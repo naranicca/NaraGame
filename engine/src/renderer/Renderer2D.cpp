@@ -1,15 +1,15 @@
-#include "nara/renderer/Renderer2D.h"
+#include "NaraGame/renderer/Renderer2D.h"
 
-#include "nara/core/Log.h"
-#include "nara/renderer/BitmapFont.h"
-#include "nara/renderer/Font.h"
-#include "nara/renderer/rhi/RHIDevice.h"
+#include "NaraGame/core/Log.h"
+#include "NaraGame/renderer/BitmapFont.h"
+#include "NaraGame/renderer/Font.h"
+#include "NaraGame/renderer/rhi/RHIDevice.h"
 #include "renderer/SpriteSpirv.h" // precompiled Vulkan sprite shader
 
 #include <cstddef> // offsetof
 #include <cstdint>
 
-namespace nara {
+namespace NaraGame {
 
 // Default sprite shader: transforms by the camera and multiplies texture by a
 // per-vertex tint. Solid-color quads use a 1x1 white texture so they share this
@@ -116,7 +116,7 @@ void Renderer2D::Init(RHIDevice& device) {
     m_cameraBuffer = device.CreateBuffer(cameraDesc);
 
     m_vertices.reserve(kMaxVertices);
-    NARA_INFO("Renderer2D initialized (max %u quads/batch)", kMaxQuads);
+    NARAGAME_INFO("Renderer2D initialized (max %u quads/batch)", kMaxQuads);
 }
 
 void Renderer2D::Shutdown() {
@@ -262,4 +262,4 @@ void Renderer2D::Flush() {
     m_device->DrawIndexed(m_quadCount * 6);
 }
 
-} // namespace nara
+} // namespace NaraGame

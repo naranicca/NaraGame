@@ -1,13 +1,13 @@
 #include "renderer/rhi/vulkan/VulkanResources.h"
 
-#if defined(NARA_HAVE_VULKAN)
+#if defined(NARAGAME_HAVE_VULKAN)
 
-#include "nara/core/Log.h"
+#include "NaraGame/core/Log.h"
 
 #include <cstring>
 #include <vector>
 
-namespace nara {
+namespace NaraGame {
 namespace {
 
 VkDeviceSize AlignUp(VkDeviceSize value, VkDeviceSize align) {
@@ -36,7 +36,7 @@ uint32_t FindMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeBits,
             (props.memoryTypes[i].propertyFlags & properties) == properties)
             return i;
     }
-    NARA_ERROR("Vulkan: no suitable memory type");
+    NARAGAME_ERROR("Vulkan: no suitable memory type");
     return 0;
 }
 
@@ -231,7 +231,7 @@ VulkanTexture::~VulkanTexture() {
 // ===========================================================================
 VulkanShader::VulkanShader(const VulkanContext& ctx, const ShaderDesc& desc) : m_ctx(&ctx) {
     if (desc.vertexSpirv == nullptr || desc.pixelSpirv == nullptr) {
-        NARA_ERROR("VulkanShader: ShaderDesc has no SPIR-V");
+        NARAGAME_ERROR("VulkanShader: ShaderDesc has no SPIR-V");
         return;
     }
     VkShaderModuleCreateInfo v{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -258,7 +258,7 @@ VulkanShader::~VulkanShader() {
 VulkanPipeline::VulkanPipeline(const VulkanContext& ctx, const PipelineDesc& desc) : m_ctx(&ctx) {
     auto* shader = static_cast<VulkanShader*>(desc.shader);
     if (shader == nullptr || !shader->Valid()) {
-        NARA_ERROR("VulkanPipeline: invalid shader");
+        NARAGAME_ERROR("VulkanPipeline: invalid shader");
         return;
     }
 
@@ -355,7 +355,7 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& ctx, const PipelineDesc& des
     pci.subpass = 0;
     if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_pipeline) !=
         VK_SUCCESS)
-        NARA_ERROR("vkCreateGraphicsPipelines failed");
+        NARAGAME_ERROR("vkCreateGraphicsPipelines failed");
 }
 
 VulkanPipeline::~VulkanPipeline() {
@@ -365,6 +365,6 @@ VulkanPipeline::~VulkanPipeline() {
         vkDestroyPipelineLayout(m_ctx->device, m_layout, nullptr);
 }
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_HAVE_VULKAN
+#endif // NARAGAME_HAVE_VULKAN

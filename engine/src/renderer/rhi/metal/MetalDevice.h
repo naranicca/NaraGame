@@ -1,12 +1,12 @@
 #pragma once
 
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_PLATFORM_MACOS) || defined(NARA_PLATFORM_IOS)
+#if defined(NARAGAME_PLATFORM_MACOS) || defined(NARAGAME_PLATFORM_IOS)
 
-#include "nara/renderer/rhi/RHIDevice.h"
+#include "NaraGame/renderer/rhi/RHIDevice.h"
 
-namespace nara {
+namespace NaraGame {
 
 // TODO: Implement with Metal (MTLDevice + CAMetalLayer). The real version must
 // be compiled as Objective-C++ (.mm). This stub only satisfies the interface so
@@ -25,6 +25,6 @@ public:
     const char* BackendName() const override { return "Metal (stub)"; }
 };
 
-} // namespace nara
+} // namespace NaraGame
 
 #endif

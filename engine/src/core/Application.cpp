@@ -1,18 +1,18 @@
-#include "nara/core/Application.h"
+#include "NaraGame/core/Application.h"
 
-#include "nara/core/Assert.h"
-#include "nara/core/Log.h"
-#include "nara/core/Time.h"
-#include "nara/input/Input.h"
+#include "NaraGame/core/Assert.h"
+#include "NaraGame/core/Log.h"
+#include "NaraGame/core/Time.h"
+#include "NaraGame/input/Input.h"
 
 #include <utility>
 
-namespace nara {
+namespace NaraGame {
 
 Application* Application::s_instance = nullptr;
 
 Application::Application(AppConfig config) : m_config(std::move(config)) {
-    NARA_ASSERT(s_instance == nullptr, "Application already exists");
+    NARAGAME_ASSERT(s_instance == nullptr, "Application already exists");
     s_instance = this;
 
     WindowDesc windowDesc;
@@ -20,7 +20,7 @@ Application::Application(AppConfig config) : m_config(std::move(config)) {
     windowDesc.width = m_config.width;
     windowDesc.height = m_config.height;
     m_window = Window::Create(windowDesc);
-    NARA_ASSERT(m_window != nullptr, "Failed to create window");
+    NARAGAME_ASSERT(m_window != nullptr, "Failed to create window");
 
     RHIDeviceDesc deviceDesc;
     deviceDesc.nativeWindowHandle = m_window->NativeHandle();
@@ -28,14 +28,14 @@ Application::Application(AppConfig config) : m_config(std::move(config)) {
     deviceDesc.height = m_window->Height();
     deviceDesc.vsync = m_config.vsync;
     m_device = RHIDevice::Create(deviceDesc);
-    NARA_ASSERT(m_device != nullptr, "Failed to create RHI device");
+    NARAGAME_ASSERT(m_device != nullptr, "Failed to create RHI device");
 
     m_audio = AudioDevice::Create();
 
     m_lastWidth = m_window->Width();
     m_lastHeight = m_window->Height();
 
-    NARA_INFO("Initialized: window %ux%u, render %s, audio %s",
+    NARAGAME_INFO("Initialized: window %ux%u, render %s, audio %s",
               m_window->Width(), m_window->Height(),
               m_device ? m_device->BackendName() : "none",
               m_audio ? m_audio->BackendName() : "none");
@@ -86,4 +86,4 @@ void Application::Run() {
     OnStop();
 }
 
-} // namespace nara
+} // namespace NaraGame

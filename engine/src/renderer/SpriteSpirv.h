@@ -2,7 +2,7 @@
 // Auto-generated from engine/shaders/sprite.{vert,frag} via glslc. Do not edit.
 #include <cstdint>
 
-namespace nara {
+namespace NaraGame {
 inline const uint32_t kSpriteVertSpv[] = {
     0x07230203u, 0x00010000u, 0x000d000bu, 0x0000002du, 0x00000000u, 0x00020011u, 0x00000001u, 0x0006000bu,
     0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u,
@@ -79,4 +79,4 @@ inline const uint32_t kSpriteFragSpv[] = {
     0x00000016u, 0x0003003eu, 0x00000009u, 0x00000017u, 0x000100fdu, 0x00010038u,
 };
 
-} // namespace nara
+} // namespace NaraGame

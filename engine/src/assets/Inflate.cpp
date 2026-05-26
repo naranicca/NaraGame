@@ -4,7 +4,7 @@
 // the canonical "puff" approach: build per-length symbol tables, then walk the
 // bit stream one bit at a time. Optimized for clarity, not raw throughput.
 
-namespace nara::detail {
+namespace NaraGame::detail {
 namespace {
 
 // Length codes 257..285: base length and number of extra bits.
@@ -258,4 +258,4 @@ bool ZlibInflate(const uint8_t* data, size_t size, std::vector<uint8_t>& out) {
     return Inflate(data + 2, size - 2, out);
 }
 
-} // namespace nara::detail
+} // namespace NaraGame::detail

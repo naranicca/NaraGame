@@ -1,14 +1,14 @@
 #include "renderer/rhi/d3d11/D3D11Device.h"
 
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
 
 #include "renderer/rhi/d3d11/D3D11Resources.h"
 
-#include "nara/core/Log.h"
+#include "NaraGame/core/Log.h"
 
 #include <cstdlib> // _countof
 
-namespace nara {
+namespace NaraGame {
 
 D3D11Device::D3D11Device(const RHIDeviceDesc& desc)
     : m_hwnd(static_cast<HWND>(desc.nativeWindowHandle))
@@ -45,7 +45,7 @@ D3D11Device::D3D11Device(const RHIDeviceDesc& desc)
 
     // The debug layer requires the "Graphics Tools" feature; retry without it.
     if (FAILED(hr) && (flags & D3D11_CREATE_DEVICE_DEBUG)) {
-        NARA_WARN("D3D11 debug layer unavailable; creating device without it");
+        NARAGAME_WARN("D3D11 debug layer unavailable; creating device without it");
         flags &= ~static_cast<UINT>(D3D11_CREATE_DEVICE_DEBUG);
         hr = D3D11CreateDeviceAndSwapChain(
             nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
@@ -55,14 +55,14 @@ D3D11Device::D3D11Device(const RHIDeviceDesc& desc)
     }
 
     if (FAILED(hr)) {
-        NARA_ERROR("D3D11CreateDeviceAndSwapChain failed (0x%08lX)",
+        NARAGAME_ERROR("D3D11CreateDeviceAndSwapChain failed (0x%08lX)",
                    static_cast<unsigned long>(hr));
         return;
     }
 
     CreateRenderTarget();
     CreateDefaultStates();
-    NARA_INFO("D3D11 device created (feature level 0x%04X)", static_cast<unsigned>(obtained));
+    NARAGAME_INFO("D3D11 device created (feature level 0x%04X)", static_cast<unsigned>(obtained));
 }
 
 D3D11Device::~D3D11Device() = default;
@@ -202,6 +202,6 @@ void D3D11Device::DrawIndexed(uint32_t indexCount, uint32_t firstIndex) {
     m_context->DrawIndexed(indexCount, firstIndex, 0);
 }
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_PLATFORM_WINDOWS
+#endif // NARAGAME_PLATFORM_WINDOWS

@@ -1,8 +1,8 @@
-#include "nara/renderer/Font.h"
+#include "NaraGame/renderer/Font.h"
 
-#include "nara/renderer/rhi/RHIResources.h"
+#include "NaraGame/renderer/rhi/RHIResources.h"
 
-namespace nara {
+namespace NaraGame {
 
 Font::Font() = default;
 Font::~Font() = default;
@@ -40,4 +40,4 @@ void Font::SetTexture(std::unique_ptr<RHITexture> texture) {
     m_texture = std::move(texture);
 }
 
-} // namespace nara
+} // namespace NaraGame

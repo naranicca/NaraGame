@@ -1,15 +1,15 @@
 #pragma once
 
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
 
-#include "nara/renderer/rhi/RHIResources.h"
+#include "NaraGame/renderer/rhi/RHIResources.h"
 
 #include <d3d11.h>
 #include <wrl/client.h>
 
-namespace nara {
+namespace NaraGame {
 
 template <typename T>
 using ComPtr = Microsoft::WRL::ComPtr<T>;
@@ -79,6 +79,6 @@ private:
     D3D11_PRIMITIVE_TOPOLOGY m_topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 };
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_PLATFORM_WINDOWS
+#endif // NARAGAME_PLATFORM_WINDOWS

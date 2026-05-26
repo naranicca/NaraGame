@@ -1,8 +1,8 @@
-#include "nara/renderer/SpriteSheet.h"
+#include "NaraGame/renderer/SpriteSheet.h"
 
-#include "nara/renderer/rhi/RHIResources.h"
+#include "NaraGame/renderer/rhi/RHIResources.h"
 
-namespace nara {
+namespace NaraGame {
 
 SpriteSheet::SpriteSheet(RHITexture* texture, int cellWidth, int cellHeight, int margin, int spacing)
     : m_texture(texture)
@@ -40,4 +40,4 @@ TextureRegion SpriteSheet::At(int index) const {
     return At(index % m_columns, index / m_columns);
 }
 
-} // namespace nara
+} // namespace NaraGame

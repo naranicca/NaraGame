@@ -1,6 +1,6 @@
-#include "nara/renderer/TextureAtlas.h"
+#include "NaraGame/renderer/TextureAtlas.h"
 
-namespace nara {
+namespace NaraGame {
 
 void TextureAtlas::Add(const std::string& name, float x, float y, float w, float h) {
     if (m_texture != nullptr)
@@ -16,4 +16,4 @@ TextureRegion TextureAtlas::Get(const std::string& name) const {
     return it != m_regions.end() ? it->second : TextureRegion{};
 }
 
-} // namespace nara
+} // namespace NaraGame

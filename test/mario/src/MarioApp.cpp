@@ -5,26 +5,26 @@
 // step. Controls: Enter start, Left/Right or A/D move, Space/Up jump, P pause,
 // Esc quit (to title from pause, or close from title).
 
-#include <nara/assets/BMFont.h>
-#include <nara/assets/TextureLoader.h>
-#include <nara/assets/TileLevel.h>
-#include <nara/audio/AudioClip.h>
-#include <nara/audio/AudioDevice.h>
-#include <nara/core/Application.h>
-#include <nara/core/EntryPoint.h>
-#include <nara/core/Log.h>
-#include <nara/input/Input.h>
-#include <nara/math/Math.h>
-#include <nara/renderer/BitmapFont.h>
-#include <nara/renderer/Camera2D.h>
-#include <nara/renderer/Font.h>
-#include <nara/renderer/Renderer2D.h>
-#include <nara/renderer/SpriteSheet.h>
-#include <nara/renderer/TextureAtlas.h>
-#include <nara/renderer/Tilemap.h>
-#include <nara/renderer/rhi/RHIDevice.h>
-#include <nara/scene/Scene.h>
-#include <nara/scene/SceneManager.h>
+#include <NaraGame/assets/BMFont.h>
+#include <NaraGame/assets/TextureLoader.h>
+#include <NaraGame/assets/TileLevel.h>
+#include <NaraGame/audio/AudioClip.h>
+#include <NaraGame/audio/AudioDevice.h>
+#include <NaraGame/core/Application.h>
+#include <NaraGame/core/EntryPoint.h>
+#include <NaraGame/core/Log.h>
+#include <NaraGame/input/Input.h>
+#include <NaraGame/math/Math.h>
+#include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/renderer/Camera2D.h>
+#include <NaraGame/renderer/Font.h>
+#include <NaraGame/renderer/Renderer2D.h>
+#include <NaraGame/renderer/SpriteSheet.h>
+#include <NaraGame/renderer/TextureAtlas.h>
+#include <NaraGame/renderer/Tilemap.h>
+#include <NaraGame/renderer/rhi/RHIDevice.h>
+#include <NaraGame/scene/Scene.h>
+#include <NaraGame/scene/SceneManager.h>
 
 #include <cmath>
 #include <functional>
@@ -33,11 +33,11 @@
 #include <unordered_map>
 #include <vector>
 
-#ifndef NARA_ASSETS_DIR
-#define NARA_ASSETS_DIR "assets"
+#ifndef NARAGAME_ASSETS_DIR
+#define NARAGAME_ASSETS_DIR "assets"
 #endif
 
-using namespace nara;
+using namespace NaraGame;
 
 namespace {
 constexpr float kScreenW = 1024.0f;
@@ -451,7 +451,7 @@ public:
                                 Color(0.6f, 0.65f, 0.8f));
         // Proportional (variable-width) BMFont tagline.
         if (m_ctx->propFont != nullptr && m_ctx->propFont->Valid()) {
-            const std::string tag = "Built from scratch with the Nara engine";
+            const std::string tag = "Built from scratch with the NaraGame engine";
             const float s = 0.9f;
             const float w = m_ctx->propFont->Measure(tag, s).x;
             r.DrawText(*m_ctx->propFont, tag, {(m_ctx->screenW - w) * 0.5f, 410.0f},
@@ -475,7 +475,7 @@ public:
 protected:
     void OnStart() override {
         m_renderer.Init(GetDevice());
-        const std::string assets = NARA_ASSETS_DIR;
+        const std::string assets = NARAGAME_ASSETS_DIR;
 
         m_tilesTexture = LoadTexture(GetDevice(), assets + "/tiles.png");
         m_charTexture = LoadTexture(GetDevice(), assets + "/characters.png");
@@ -514,7 +514,7 @@ protected:
         m_ctx.makeGame = [this](int level) { return std::make_unique<GameScene>(&m_ctx, level); };
 
         m_scenes.Change(m_ctx.makeTitle());
-        NARA_INFO("Mario: scene/state demo (title -> game <-> pause, file-loaded levels)");
+        NARAGAME_INFO("Mario: scene/state demo (title -> game <-> pause, file-loaded levels)");
     }
 
     void OnStop() override {
@@ -530,7 +530,7 @@ protected:
 private:
     static AppConfig MakeConfig() {
         AppConfig config;
-        config.title = "Nara - Super Mario";
+        config.title = "NaraGame - Super Mario";
         config.width = static_cast<uint32_t>(kScreenW);
         config.height = static_cast<uint32_t>(kScreenH);
         return config;
@@ -551,6 +551,6 @@ private:
     SceneManager m_scenes;
 };
 
-Application* nara::CreateApplication(int /*argc*/, char** /*argv*/) {
+Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {
     return new MarioApp();
 }

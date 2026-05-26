@@ -1,13 +1,13 @@
 #include "platform/windows/WindowsWindow.h"
 
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
 
-#include "nara/core/Log.h"
-#include "nara/input/Input.h"
+#include "NaraGame/core/Log.h"
+#include "NaraGame/input/Input.h"
 
 #include <string>
 
-namespace nara {
+namespace NaraGame {
 
 static const wchar_t* kWindowClassName = L"NaraWindowClass";
 
@@ -74,7 +74,7 @@ WindowsWindow::WindowsWindow(const WindowDesc& desc)
                              rect.right - rect.left, rect.bottom - rect.top,
                              nullptr, nullptr, instance, this);
     if (m_hwnd == nullptr) {
-        NARA_ERROR("CreateWindowExW failed (0x%08lX)", GetLastError());
+        NARAGAME_ERROR("CreateWindowExW failed (0x%08lX)", GetLastError());
         return;
     }
 
@@ -138,6 +138,6 @@ LRESULT WindowsWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     }
 }
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_PLATFORM_WINDOWS
+#endif // NARAGAME_PLATFORM_WINDOWS

@@ -1,10 +1,10 @@
 #pragma once
 
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_HAVE_VULKAN)
+#if defined(NARAGAME_HAVE_VULKAN)
 
-#include "nara/renderer/rhi/RHIResources.h"
+#include "NaraGame/renderer/rhi/RHIResources.h"
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
@@ -12,7 +12,7 @@
 
 #include <cstdint>
 
-namespace nara {
+namespace NaraGame {
 
 // Shared handles the resource objects need from the device.
 struct VulkanContext {
@@ -104,6 +104,6 @@ private:
     VkPipeline m_pipeline = VK_NULL_HANDLE;
 };
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_HAVE_VULKAN
+#endif // NARAGAME_HAVE_VULKAN

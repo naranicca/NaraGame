@@ -12,8 +12,8 @@
 NaraGame/
 ├─ CMakeLists.txt          # 루트 빌드 정의
 ├─ CMakePresets.json       # Visual Studio / Ninja 프리셋
-├─ engine/                 # 엔진 (정적 라이브러리: nara)
-│  ├─ include/nara/        # 공개 헤더 (#include "nara/...")
+├─ engine/                 # 엔진 (정적 라이브러리: NaraGame)
+│  ├─ include/NaraGame/        # 공개 헤더 (#include "NaraGame/...")
 │  │  ├─ core/             # Application, Log, Time, Platform 감지
 │  │  ├─ math/             # 직접 구현한 수학 (Vec2/3/4, Mat4)
 │  │  ├─ platform/         # Window 추상 인터페이스
@@ -59,7 +59,7 @@ D3D11로 화면이 클리어됩니다(애니메이션되는 배경색). 콘솔 �
 자동 감지(`find_package(Vulkan)`)해 Vulkan 백엔드를 함께 빌드합니다. 실행 시
 환경변수로 백엔드를 고릅니다:
 ```powershell
-$env:NARA_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d11)
+$env:NARAGAME_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d11)
 .\build\windows-x64\bin\Debug\breakout.exe
 ```
 같은 게임 바이너리가 D3D11과 Vulkan 양쪽으로 동일하게 렌더됩니다.
@@ -94,6 +94,6 @@ $env:NARA_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d11)
 - [x] 비례 폭 폰트 (Font + BMFont .fnt 로더) — Renderer2D::DrawText, Mario 타이틀에 적용
 - [x] 세이브/설정 파일 (ConfigFile, key=value) — Space Invaders 최고 점수 영속화
 - [x] 사운드 — AudioDevice(XAudio2 백엔드) + 직접 구현한 WAV 디코더, SFX 믹싱 + 루프 BGM
-- [x] **Vulkan 백엔드** — 두 번째 네이티브 RHI, 런타임 선택(`NARA_RHI=vulkan`). 스왑체인·렌더패스·SPIR-V 셰이더·디스크립터·링버퍼로 세 게임 모두 D3D11과 동일하게 렌더 (검증 레이어 클린)
+- [x] **Vulkan 백엔드** — 두 번째 네이티브 RHI, 런타임 선택(`NARAGAME_RHI=vulkan`). 스왑체인·렌더패스·SPIR-V 셰이더·디스크립터·링버퍼로 세 게임 모두 D3D11과 동일하게 렌더 (검증 레이어 클린)
 - [ ] Metal 백엔드 (macOS/iOS)
 - [ ] macOS · Android · iOS 윈도우 실제 구현

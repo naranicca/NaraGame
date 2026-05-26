@@ -1,13 +1,13 @@
-#include "nara/assets/Image.h"
+#include "NaraGame/assets/Image.h"
 
 #include "assets/Inflate.h"
-#include "nara/core/Log.h"
+#include "NaraGame/core/Log.h"
 
 #include <cstdlib> // std::abs
 #include <cstring>
 #include <fstream>
 
-namespace nara {
+namespace NaraGame {
 namespace {
 
 uint32_t ReadU32BE(const uint8_t* p) {
@@ -46,7 +46,7 @@ Image DecodePNG(const uint8_t* data, size_t size) {
 
     static const uint8_t kSignature[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
     if (size < 8 || std::memcmp(data, kSignature, 8) != 0) {
-        NARA_ERROR("PNG: bad signature");
+        NARAGAME_ERROR("PNG: bad signature");
         return image;
     }
 
@@ -66,7 +66,7 @@ Image DecodePNG(const uint8_t* data, size_t size) {
         const uint8_t* type = data + offset + 4;
         const uint8_t* chunk = data + offset + 8;
         if (offset + 12 + chunkLen > size) {
-            NARA_ERROR("PNG: truncated chunk");
+            NARAGAME_ERROR("PNG: truncated chunk");
             return image;
         }
 
@@ -92,20 +92,20 @@ Image DecodePNG(const uint8_t* data, size_t size) {
     }
 
     if (!sawIHDR || width == 0 || height == 0) {
-        NARA_ERROR("PNG: missing or invalid IHDR");
+        NARAGAME_ERROR("PNG: missing or invalid IHDR");
         return image;
     }
     if (bitDepth != 8) {
-        NARA_ERROR("PNG: unsupported bit depth %d (only 8 is supported)", bitDepth);
+        NARAGAME_ERROR("PNG: unsupported bit depth %d (only 8 is supported)", bitDepth);
         return image;
     }
     if (interlace != 0) {
-        NARA_ERROR("PNG: interlaced images are not supported");
+        NARAGAME_ERROR("PNG: interlaced images are not supported");
         return image;
     }
     const int channels = ChannelsForColorType(colorType);
     if (channels == 0) {
-        NARA_ERROR("PNG: unsupported color type %d", colorType);
+        NARAGAME_ERROR("PNG: unsupported color type %d", colorType);
         return image;
     }
 
@@ -113,13 +113,13 @@ Image DecodePNG(const uint8_t* data, size_t size) {
     std::vector<uint8_t> raw;
     raw.reserve(static_cast<size_t>(height) * (1 + width * channels));
     if (!detail::ZlibInflate(idat.data(), idat.size(), raw)) {
-        NARA_ERROR("PNG: zlib decompression failed");
+        NARAGAME_ERROR("PNG: zlib decompression failed");
         return image;
     }
 
     const size_t stride = static_cast<size_t>(width) * channels;
     if (raw.size() < height * (stride + 1)) {
-        NARA_ERROR("PNG: not enough decompressed data");
+        NARAGAME_ERROR("PNG: not enough decompressed data");
         return image;
     }
 
@@ -144,7 +144,7 @@ Image DecodePNG(const uint8_t* data, size_t size) {
                 case 3: value += (a + b) / 2; break;        // Average
                 case 4: value += PaethPredictor(a, b, c); break; // Paeth
                 default:
-                    NARA_ERROR("PNG: unknown filter %d", filter);
+                    NARAGAME_ERROR("PNG: unknown filter %d", filter);
                     return Image{};
             }
             current[x] = static_cast<uint8_t>(value & 0xFF);
@@ -190,7 +190,7 @@ Image DecodePNG(const uint8_t* data, size_t size) {
 Image LoadImageFile(const std::string& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
-        NARA_ERROR("Image: cannot open '%s'", path.c_str());
+        NARAGAME_ERROR("Image: cannot open '%s'", path.c_str());
         return Image{};
     }
     const std::streamsize fileSize = file.tellg();
@@ -198,10 +198,10 @@ Image LoadImageFile(const std::string& path) {
 
     std::vector<uint8_t> bytes(static_cast<size_t>(fileSize));
     if (!file.read(reinterpret_cast<char*>(bytes.data()), fileSize)) {
-        NARA_ERROR("Image: failed to read '%s'", path.c_str());
+        NARAGAME_ERROR("Image: failed to read '%s'", path.c_str());
         return Image{};
     }
     return DecodePNG(bytes.data(), bytes.size());
 }
 
-} // namespace nara
+} // namespace NaraGame

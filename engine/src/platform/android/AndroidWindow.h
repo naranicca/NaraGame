@@ -1,12 +1,12 @@
 #pragma once
 
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_PLATFORM_ANDROID)
+#if defined(NARAGAME_PLATFORM_ANDROID)
 
-#include "nara/platform/Window.h"
+#include "NaraGame/platform/Window.h"
 
-namespace nara {
+namespace NaraGame {
 
 // TODO: Implement with NativeActivity / ANativeWindow (android_native_app_glue).
 // This stub satisfies the interface only.
@@ -29,6 +29,6 @@ private:
     bool m_shouldClose = false;
 };
 
-} // namespace nara
+} // namespace NaraGame
 
 #endif

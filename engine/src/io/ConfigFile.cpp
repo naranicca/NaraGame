@@ -1,9 +1,9 @@
-#include "nara/io/ConfigFile.h"
+#include "NaraGame/io/ConfigFile.h"
 
 #include <cstdlib>
 #include <fstream>
 
-namespace nara {
+namespace NaraGame {
 namespace {
 
 std::string Trim(const std::string& s) {
@@ -40,7 +40,7 @@ bool ConfigFile::Save(const std::string& path) const {
     std::ofstream file(path, std::ios::trunc);
     if (!file)
         return false;
-    file << "# Nara config / save data\n";
+    file << "# NaraGame config / save data\n";
     for (const auto& [key, value] : m_values)
         file << key << '=' << value << '\n';
     return static_cast<bool>(file);
@@ -89,4 +89,4 @@ void ConfigFile::SetBool(const std::string& key, bool value) {
     m_values[key] = value ? "1" : "0";
 }
 
-} // namespace nara
+} // namespace NaraGame

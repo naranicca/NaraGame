@@ -1,10 +1,10 @@
 #pragma once
 
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
 
-#include "nara/audio/AudioDevice.h"
+#include "NaraGame/audio/AudioDevice.h"
 
 #include <vector>
 
@@ -12,7 +12,7 @@ struct IXAudio2;
 struct IXAudio2MasteringVoice;
 struct IXAudio2SourceVoice;
 
-namespace nara {
+namespace NaraGame {
 
 // XAudio2 backend. One mastering voice + a pool of source voices: SFX create a
 // transient voice that is reclaimed once its buffer drains; music uses a single
@@ -42,6 +42,6 @@ private:
     bool m_comInitialized = false;
 };
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_PLATFORM_WINDOWS
+#endif // NARAGAME_PLATFORM_WINDOWS

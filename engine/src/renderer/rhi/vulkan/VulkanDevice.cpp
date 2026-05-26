@@ -1,14 +1,14 @@
 #include "renderer/rhi/vulkan/VulkanDevice.h"
 
-#if defined(NARA_HAVE_VULKAN)
+#if defined(NARAGAME_HAVE_VULKAN)
 
-#include "nara/core/Log.h"
+#include "NaraGame/core/Log.h"
 
 #include <algorithm>
 #include <cstring>
 #include <vector>
 
-namespace nara {
+namespace NaraGame {
 namespace {
 
 #if !defined(NDEBUG)
@@ -22,9 +22,9 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(VkDebugUtilsMessageSeverityFlagBits
                                              const VkDebugUtilsMessengerCallbackDataEXT* data,
                                              void*) {
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
-        NARA_ERROR("[vk] %s", data->pMessage);
+        NARAGAME_ERROR("[vk] %s", data->pMessage);
     else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
-        NARA_WARN("[vk] %s", data->pMessage);
+        NARAGAME_WARN("[vk] %s", data->pMessage);
     return VK_FALSE;
 }
 
@@ -53,7 +53,7 @@ VulkanDevice::VulkanDevice(const RHIDeviceDesc& desc)
     sci.hinstance = GetModuleHandleW(nullptr);
     sci.hwnd = m_hwnd;
     if (vkCreateWin32SurfaceKHR(m_instance, &sci, nullptr, &m_surface) != VK_SUCCESS) {
-        NARA_ERROR("vkCreateWin32SurfaceKHR failed");
+        NARAGAME_ERROR("vkCreateWin32SurfaceKHR failed");
         return;
     }
 
@@ -91,7 +91,7 @@ VulkanDevice::VulkanDevice(const RHIDeviceDesc& desc)
     rp.dependencyCount = 1;
     rp.pDependencies = &dep;
     if (vkCreateRenderPass(m_device, &rp, nullptr, &m_renderPass) != VK_SUCCESS) {
-        NARA_ERROR("vkCreateRenderPass failed");
+        NARAGAME_ERROR("vkCreateRenderPass failed");
         return;
     }
 
@@ -112,7 +112,7 @@ VulkanDevice::VulkanDevice(const RHIDeviceDesc& desc)
         return;
     CreatePipelineResources();
 
-    NARA_INFO("Vulkan device created (%ux%u, %zu images)", m_swapExtent.width, m_swapExtent.height,
+    NARAGAME_INFO("Vulkan device created (%ux%u, %zu images)", m_swapExtent.width, m_swapExtent.height,
               m_swapImages.size());
 }
 
@@ -154,7 +154,7 @@ VulkanDevice::~VulkanDevice() {
 
 bool VulkanDevice::CreateInstance() {
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pApplicationName = "Nara";
+    app.pApplicationName = "NaraGame";
     app.apiVersion = VK_API_VERSION_1_1;
 
     std::vector<const char*> extensions = {VK_KHR_SURFACE_EXTENSION_NAME,
@@ -173,7 +173,7 @@ bool VulkanDevice::CreateInstance() {
     ci.enabledLayerCount = static_cast<uint32_t>(layers.size());
     ci.ppEnabledLayerNames = layers.data();
     if (vkCreateInstance(&ci, nullptr, &m_instance) != VK_SUCCESS) {
-        NARA_ERROR("vkCreateInstance failed");
+        NARAGAME_ERROR("vkCreateInstance failed");
         return false;
     }
 
@@ -198,7 +198,7 @@ bool VulkanDevice::CreateDeviceAndQueue() {
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
     if (deviceCount == 0) {
-        NARA_ERROR("No Vulkan physical devices");
+        NARAGAME_ERROR("No Vulkan physical devices");
         return false;
     }
     std::vector<VkPhysicalDevice> devices(deviceCount);
@@ -222,7 +222,7 @@ bool VulkanDevice::CreateDeviceAndQueue() {
             break;
     }
     if (m_physicalDevice == VK_NULL_HANDLE) {
-        NARA_ERROR("No suitable Vulkan queue family");
+        NARAGAME_ERROR("No suitable Vulkan queue family");
         return false;
     }
 
@@ -239,14 +239,14 @@ bool VulkanDevice::CreateDeviceAndQueue() {
     dci.enabledExtensionCount = 1;
     dci.ppEnabledExtensionNames = deviceExt;
     if (vkCreateDevice(m_physicalDevice, &dci, nullptr, &m_device) != VK_SUCCESS) {
-        NARA_ERROR("vkCreateDevice failed");
+        NARAGAME_ERROR("vkCreateDevice failed");
         return false;
     }
     vkGetDeviceQueue(m_device, m_queueFamily, 0, &m_queue);
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
-    NARA_INFO("Vulkan GPU: %s", props.deviceName);
+    NARAGAME_INFO("Vulkan GPU: %s", props.deviceName);
     return true;
 }
 
@@ -297,7 +297,7 @@ bool VulkanDevice::CreateSwapchain(uint32_t width, uint32_t height) {
     sc.presentMode = VK_PRESENT_MODE_FIFO_KHR; // vsync, always supported
     sc.clipped = VK_TRUE;
     if (vkCreateSwapchainKHR(m_device, &sc, nullptr, &m_swapchain) != VK_SUCCESS) {
-        NARA_ERROR("vkCreateSwapchainKHR failed");
+        NARAGAME_ERROR("vkCreateSwapchainKHR failed");
         return false;
     }
 
@@ -634,6 +634,6 @@ void VulkanDevice::DrawIndexed(uint32_t indexCount, uint32_t firstIndex) {
     vkCmdDrawIndexed(m_commandBuffer, indexCount, 1, firstIndex, 0, 0);
 }
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_HAVE_VULKAN
+#endif // NARAGAME_HAVE_VULKAN

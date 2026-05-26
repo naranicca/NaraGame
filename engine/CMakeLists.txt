@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 
 # Platform-agnostic sources (compiled everywhere).
-set(NARA_SOURCES
+set(NARAGAME_SOURCES
     src/assets/BMFont.cpp
     src/assets/Inflate.cpp
     src/assets/Png.cpp
@@ -30,71 +30,71 @@ set(NARA_SOURCES
 
 # Platform-specific window + RHI backend.
 if(WIN32)
-    list(APPEND NARA_SOURCES
+    list(APPEND NARAGAME_SOURCES
         src/platform/windows/WindowsWindow.cpp
         src/renderer/rhi/d3d11/D3D11Device.cpp
         src/renderer/rhi/d3d11/D3D11Resources.cpp
         src/audio/xaudio2/XAudio2Device.cpp
     )
 elseif(IOS)
-    list(APPEND NARA_SOURCES
+    list(APPEND NARAGAME_SOURCES
         src/platform/ios/iOSWindow.cpp
         src/renderer/rhi/metal/MetalDevice.cpp
     )
 elseif(APPLE)
-    list(APPEND NARA_SOURCES
+    list(APPEND NARAGAME_SOURCES
         src/platform/macos/MacWindow.cpp
         src/renderer/rhi/metal/MetalDevice.cpp
     )
 elseif(ANDROID)
-    list(APPEND NARA_SOURCES
+    list(APPEND NARAGAME_SOURCES
         src/platform/android/AndroidWindow.cpp
         src/renderer/rhi/vulkan/VulkanDevice.cpp
     )
 endif()
 
-add_library(nara STATIC ${NARA_SOURCES})
-add_library(Nara::nara ALIAS nara)
+add_library(NaraGame STATIC ${NARAGAME_SOURCES})
+add_library(NaraGame::NaraGame ALIAS NaraGame)
 
-target_include_directories(nara
+target_include_directories(NaraGame
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_compile_features(nara PUBLIC cxx_std_20)
+target_compile_features(NaraGame PUBLIC cxx_std_20)
 
 # Keep headers visible in the Visual Studio Solution Explorer.
-file(GLOB_RECURSE NARA_HEADERS CONFIGURE_DEPENDS include/*.h src/*.h)
-target_sources(nara PRIVATE ${NARA_HEADERS})
-source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${NARA_SOURCES} ${NARA_HEADERS})
+file(GLOB_RECURSE NARAGAME_HEADERS CONFIGURE_DEPENDS include/*.h src/*.h)
+target_sources(NaraGame PRIVATE ${NARAGAME_HEADERS})
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${NARAGAME_SOURCES} ${NARAGAME_HEADERS})
 
 if(WIN32)
-    target_compile_definitions(nara PUBLIC
+    target_compile_definitions(NaraGame PUBLIC
         UNICODE _UNICODE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
     )
     # Direct3D 11 + DXGI. d3dcompiler/dxguid reserved for upcoming shader work.
     # xaudio2 for audio; ole32 for CoInitialize.
-    target_link_libraries(nara PUBLIC d3d11 dxgi d3dcompiler dxguid xaudio2 ole32)
+    target_link_libraries(NaraGame PUBLIC d3d11 dxgi d3dcompiler dxguid xaudio2 ole32)
 endif()
 
 if(MSVC)
-    target_compile_options(nara PRIVATE /W4 /permissive- /MP)
+    target_compile_options(NaraGame PRIVATE /W4 /permissive- /MP)
 else()
-    target_compile_options(nara PRIVATE -Wall -Wextra)
+    target_compile_options(NaraGame PRIVATE -Wall -Wextra)
 endif()
 
 # Optional Vulkan backend (a second native RHI; runs on Windows when the SDK is
-# present). Selected at runtime via the NARA_RHI=vulkan environment variable.
+# present). Selected at runtime via the NARAGAME_RHI=vulkan environment variable.
 find_package(Vulkan QUIET)
 if(Vulkan_FOUND)
-    message(STATUS "Nara: Vulkan found (${Vulkan_LIBRARY}) -> Vulkan backend enabled")
-    target_sources(nara PRIVATE
+    message(STATUS "NaraGame: Vulkan found (${Vulkan_LIBRARY}) -> Vulkan backend enabled")
+    target_sources(NaraGame PRIVATE
         src/renderer/rhi/vulkan/VulkanDevice.cpp
         src/renderer/rhi/vulkan/VulkanResources.cpp)
-    target_link_libraries(nara PUBLIC Vulkan::Vulkan)
-    target_compile_definitions(nara PUBLIC NARA_HAVE_VULKAN)
+    target_link_libraries(NaraGame PUBLIC Vulkan::Vulkan)
+    target_compile_definitions(NaraGame PUBLIC NARAGAME_HAVE_VULKAN)
 else()
-    message(STATUS "Nara: Vulkan SDK not found -> Vulkan backend disabled")
+    message(STATUS "NaraGame: Vulkan SDK not found -> Vulkan backend disabled")
 endif()

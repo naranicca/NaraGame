@@ -1,4 +1,4 @@
-# Nara 엔진 아키텍처
+# NaraGame 엔진 아키텍처
 
 ## 레이어 구조
 
@@ -23,8 +23,8 @@
 ## 핵심 개념
 
 ### Application 과 진입점
-게임은 `nara::Application`을 상속하고 `OnStart/OnUpdate/OnRender/OnStop`을
-오버라이드합니다. `nara::CreateApplication()`을 정의하면, `EntryPoint.h`가
+게임은 `NaraGame::Application`을 상속하고 `OnStart/OnUpdate/OnRender/OnStop`을
+오버라이드합니다. `NaraGame::CreateApplication()`을 정의하면, `EntryPoint.h`가
 제공하는 `main()`이 이를 생성·실행합니다. `main()`을 직접 작성하지 않습니다.
 
 메인 루프(`Application::Run`)의 매 프레임 순서:
@@ -49,7 +49,7 @@
 
 ### 플랫폼 감지
 `core/Platform.h`가 컴파일러 매크로(`_WIN32`, `__APPLE__`, `__ANDROID__`)로부터
-`NARA_PLATFORM_*` 매크로 하나를 정의합니다. 플랫폼별 소스는 CMake가 대상
+`NARAGAME_PLATFORM_*` 매크로 하나를 정의합니다. 플랫폼별 소스는 CMake가 대상
 플랫폼에서만 컴파일 목록에 넣고, 헤더/구현 본문도 `#if`로 가드되어 있어
 타 플랫폼 빌드에 새지 않습니다.
 
@@ -60,7 +60,7 @@
   Direct3D / Vulkan / Metal 클립 공간 규약과 맞춥니다(OpenGL의 [-1,1] 아님).
 
 ## 디렉토리에 새 기능 추가하기
-- 공개 API 헤더 → `engine/include/nara/<영역>/`, `#include "nara/..."`로 사용.
+- 공개 API 헤더 → `engine/include/NaraGame/<영역>/`, `#include "NaraGame/..."`로 사용.
 - 내부 구현 → `engine/src/<영역>/`, `engine/src` 기준 상대 경로로 include.
 - 새 플랫폼 백엔드 → 해당 `src/.../<platform>/` 폴더에 추가하고
   `engine/CMakeLists.txt`의 플랫폼 분기에 소스 등록.

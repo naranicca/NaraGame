@@ -1,10 +1,10 @@
 #pragma once
 
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_HAVE_VULKAN)
+#if defined(NARAGAME_HAVE_VULKAN)
 
-#include "nara/renderer/rhi/RHIDevice.h"
+#include "NaraGame/renderer/rhi/RHIDevice.h"
 #include "renderer/rhi/vulkan/VulkanResources.h"
 
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace nara {
+namespace NaraGame {
 
 // Vulkan RHI backend. Stage 1 covers full device/swapchain bring-up plus clear
 // and present; resource/draw entry points are filled in stage 2.
@@ -100,6 +100,6 @@ private:
     VulkanTexture* m_boundTexture = nullptr;
 };
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_HAVE_VULKAN
+#endif // NARAGAME_HAVE_VULKAN

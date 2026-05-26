@@ -1,9 +1,9 @@
-#include "nara/core/Log.h"
+#include "NaraGame/core/Log.h"
 
 #include <cstdarg>
 #include <cstdio>
 
-namespace nara {
+namespace NaraGame {
 
 static const char* LevelName(LogLevel level) {
     switch (level) {
@@ -21,7 +21,7 @@ void Log::Shutdown() {}
 void Log::Write(LogLevel level, const char* fmt, ...) {
     std::FILE* out = (level == LogLevel::Error || level == LogLevel::Warn) ? stderr : stdout;
 
-    std::fprintf(out, "[nara][%s] ", LevelName(level));
+    std::fprintf(out, "[NaraGame][%s] ", LevelName(level));
 
     va_list args;
     va_start(args, fmt);
@@ -32,4 +32,4 @@ void Log::Write(LogLevel level, const char* fmt, ...) {
     std::fflush(out); // flush each line so logs survive a crash / kill
 }
 
-} // namespace nara
+} // namespace NaraGame

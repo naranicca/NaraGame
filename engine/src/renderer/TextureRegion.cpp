@@ -1,8 +1,8 @@
-#include "nara/renderer/TextureRegion.h"
+#include "NaraGame/renderer/TextureRegion.h"
 
-#include "nara/renderer/rhi/RHIResources.h"
+#include "NaraGame/renderer/rhi/RHIResources.h"
 
-namespace nara {
+namespace NaraGame {
 
 TextureRegion TextureRegion::FromPixels(RHITexture* texture, float x, float y, float w, float h) {
     if (texture == nullptr)
@@ -17,4 +17,4 @@ TextureRegion TextureRegion::FromPixels(RHITexture* texture, float x, float y, f
     return TextureRegion(texture, uv, Vec2{w, h});
 }
 
-} // namespace nara
+} // namespace NaraGame

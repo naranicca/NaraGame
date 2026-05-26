@@ -1,11 +1,11 @@
-#include "nara/renderer/Tilemap.h"
+#include "NaraGame/renderer/Tilemap.h"
 
-#include "nara/math/MathUtil.h"
-#include "nara/renderer/Renderer2D.h"
+#include "NaraGame/math/MathUtil.h"
+#include "NaraGame/renderer/Renderer2D.h"
 
 #include <cmath>
 
-namespace nara {
+namespace NaraGame {
 
 Tilemap::Tilemap(int width, int height, float tileWidth, float tileHeight)
     : m_width(width)
@@ -54,4 +54,4 @@ void Tilemap::Draw(Renderer2D& renderer, const Vec4& visible, const Color& tint)
     }
 }
 
-} // namespace nara
+} // namespace NaraGame

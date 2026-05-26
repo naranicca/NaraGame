@@ -1,13 +1,13 @@
-#include "nara/audio/AudioDevice.h"
+#include "NaraGame/audio/AudioDevice.h"
 
-#include "nara/core/Log.h"
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Log.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
     #include "audio/xaudio2/XAudio2Device.h"
 #endif
 
-namespace nara {
+namespace NaraGame {
 
 // Silent fallback used when no audio backend is available.
 class NullAudioDevice final : public AudioDevice {
@@ -21,13 +21,13 @@ public:
 };
 
 std::unique_ptr<AudioDevice> AudioDevice::Create() {
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
     auto device = std::make_unique<XAudio2Device>();
     if (device->Valid())
         return device;
-    NARA_WARN("XAudio2 unavailable; falling back to silent audio");
+    NARAGAME_WARN("XAudio2 unavailable; falling back to silent audio");
 #endif
     return std::make_unique<NullAudioDevice>();
 }
 
-} // namespace nara
+} // namespace NaraGame

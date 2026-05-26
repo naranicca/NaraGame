@@ -1,13 +1,13 @@
 #include "audio/xaudio2/XAudio2Device.h"
 
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
 
-#include "nara/core/Log.h"
+#include "NaraGame/core/Log.h"
 
 #include <objbase.h>
 #include <xaudio2.h>
 
-namespace nara {
+namespace NaraGame {
 
 XAudio2Device::XAudio2Device() {
     const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -15,17 +15,17 @@ XAudio2Device::XAudio2Device() {
 
     HRESULT hr = XAudio2Create(&m_xaudio, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(hr)) {
-        NARA_ERROR("XAudio2Create failed (0x%08lX)", static_cast<unsigned long>(hr));
+        NARAGAME_ERROR("XAudio2Create failed (0x%08lX)", static_cast<unsigned long>(hr));
         return;
     }
     hr = m_xaudio->CreateMasteringVoice(&m_master);
     if (FAILED(hr)) {
-        NARA_ERROR("CreateMasteringVoice failed (0x%08lX)", static_cast<unsigned long>(hr));
+        NARAGAME_ERROR("CreateMasteringVoice failed (0x%08lX)", static_cast<unsigned long>(hr));
         m_xaudio->Release();
         m_xaudio = nullptr;
         return;
     }
-    NARA_INFO("XAudio2 audio device created");
+    NARAGAME_INFO("XAudio2 audio device created");
 }
 
 XAudio2Device::~XAudio2Device() {
@@ -117,6 +117,6 @@ void XAudio2Device::Update() {
     }
 }
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_PLATFORM_WINDOWS
+#endif // NARAGAME_PLATFORM_WINDOWS

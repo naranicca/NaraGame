@@ -1,9 +1,9 @@
-#include "nara/input/Input.h"
+#include "NaraGame/input/Input.h"
 
 #include <array>
 #include <cstddef>
 
-namespace nara {
+namespace NaraGame {
 
 static std::array<bool, static_cast<std::size_t>(Key::Count)> g_current{};
 static std::array<bool, static_cast<std::size_t>(Key::Count)> g_previous{};
@@ -30,4 +30,4 @@ void Input::NewFrame() {
     g_previous = g_current; // snapshot last frame for edge detection
 }
 
-} // namespace nara
+} // namespace NaraGame

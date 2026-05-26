@@ -1,11 +1,11 @@
-#include "nara/assets/TileLevel.h"
+#include "NaraGame/assets/TileLevel.h"
 
-#include "nara/core/Log.h"
+#include "NaraGame/core/Log.h"
 
 #include <fstream>
 #include <string>
 
-namespace nara {
+namespace NaraGame {
 
 TileLevel LoadTileLevel(const std::string& path, float tileWidth, float tileHeight,
                         const SpriteSheet& tileset,
@@ -14,7 +14,7 @@ TileLevel LoadTileLevel(const std::string& path, float tileWidth, float tileHeig
 
     std::ifstream file(path);
     if (!file) {
-        NARA_ERROR("LoadTileLevel: cannot open '%s'", path.c_str());
+        NARAGAME_ERROR("LoadTileLevel: cannot open '%s'", path.c_str());
         return level;
     }
 
@@ -29,7 +29,7 @@ TileLevel LoadTileLevel(const std::string& path, float tileWidth, float tileHeig
     }
 
     if (lines.empty() || width == 0) {
-        NARA_ERROR("LoadTileLevel: '%s' is empty", path.c_str());
+        NARAGAME_ERROR("LoadTileLevel: '%s' is empty", path.c_str());
         return level;
     }
 
@@ -53,9 +53,9 @@ TileLevel LoadTileLevel(const std::string& path, float tileWidth, float tileHeig
     }
 
     level.valid = true;
-    NARA_INFO("Loaded level '%s' (%dx%d, %zu objects)", path.c_str(), w, h,
+    NARAGAME_INFO("Loaded level '%s' (%dx%d, %zu objects)", path.c_str(), w, h,
               level.objects.size());
     return level;
 }
 
-} // namespace nara
+} // namespace NaraGame

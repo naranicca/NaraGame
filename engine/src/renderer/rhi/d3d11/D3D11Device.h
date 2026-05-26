@@ -1,15 +1,15 @@
 #pragma once
 
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
 
-#include "nara/renderer/rhi/RHIDevice.h"
+#include "NaraGame/renderer/rhi/RHIDevice.h"
 
 #include <d3d11.h>
 #include <wrl/client.h>
 
-namespace nara {
+namespace NaraGame {
 
 // Direct3D 11 implementation of the RHI. Owns the device, immediate context,
 // swap chain and back-buffer render target view.
@@ -63,6 +63,6 @@ private:
     ComPtr<ID3D11SamplerState> m_sampler;         // linear, clamp
 };
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_PLATFORM_WINDOWS
+#endif // NARAGAME_PLATFORM_WINDOWS

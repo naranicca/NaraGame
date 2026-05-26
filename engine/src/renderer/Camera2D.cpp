@@ -1,6 +1,6 @@
-#include "nara/renderer/Camera2D.h"
+#include "NaraGame/renderer/Camera2D.h"
 
-namespace nara {
+namespace NaraGame {
 
 Camera2D::Camera2D(float viewportWidth, float viewportHeight)
     : m_viewW(viewportWidth), m_viewH(viewportHeight) {}
@@ -49,4 +49,4 @@ Mat4 Camera2D::ViewProjection() const {
                        -1.0f, 1.0f);
 }
 
-} // namespace nara
+} // namespace NaraGame

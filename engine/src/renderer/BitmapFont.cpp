@@ -1,8 +1,8 @@
-#include "nara/renderer/BitmapFont.h"
+#include "NaraGame/renderer/BitmapFont.h"
 
-#include "nara/renderer/rhi/RHIResources.h"
+#include "NaraGame/renderer/rhi/RHIResources.h"
 
-namespace nara {
+namespace NaraGame {
 
 BitmapFont::BitmapFont(RHITexture* texture, char firstChar, int columns, int glyphWidth,
                        int glyphHeight, int margin, int spacing)
@@ -44,4 +44,4 @@ Vec2 BitmapFont::Measure(const std::string& text, float scale) const {
     return Vec2{maxWidth * scale, static_cast<float>(lines * LineHeight()) * scale};
 }
 
-} // namespace nara
+} // namespace NaraGame

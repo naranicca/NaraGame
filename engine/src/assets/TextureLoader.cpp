@@ -1,14 +1,14 @@
-#include "nara/assets/TextureLoader.h"
+#include "NaraGame/assets/TextureLoader.h"
 
-#include "nara/assets/Image.h"
-#include "nara/core/Log.h"
-#include "nara/renderer/rhi/RHIDevice.h"
+#include "NaraGame/assets/Image.h"
+#include "NaraGame/core/Log.h"
+#include "NaraGame/renderer/rhi/RHIDevice.h"
 
-namespace nara {
+namespace NaraGame {
 
 std::unique_ptr<RHITexture> CreateTexture(RHIDevice& device, const Image& image) {
     if (!image.Valid()) {
-        NARA_ERROR("CreateTexture: invalid image");
+        NARAGAME_ERROR("CreateTexture: invalid image");
         return nullptr;
     }
     TextureDesc desc;
@@ -22,11 +22,11 @@ std::unique_ptr<RHITexture> CreateTexture(RHIDevice& device, const Image& image)
 std::unique_ptr<RHITexture> LoadTexture(RHIDevice& device, const std::string& path) {
     const Image image = LoadImageFile(path);
     if (!image.Valid()) {
-        NARA_ERROR("LoadTexture: failed to load '%s'", path.c_str());
+        NARAGAME_ERROR("LoadTexture: failed to load '%s'", path.c_str());
         return nullptr;
     }
-    NARA_INFO("Loaded texture '%s' (%ux%u)", path.c_str(), image.width, image.height);
+    NARAGAME_INFO("Loaded texture '%s' (%ux%u)", path.c_str(), image.width, image.height);
     return CreateTexture(device, image);
 }
 
-} // namespace nara
+} // namespace NaraGame

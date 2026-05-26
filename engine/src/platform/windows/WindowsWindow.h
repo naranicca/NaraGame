@@ -1,14 +1,14 @@
 #pragma once
 
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
 
-#include "nara/platform/Window.h"
+#include "NaraGame/platform/Window.h"
 
 #include <windows.h>
 
-namespace nara {
+namespace NaraGame {
 
 class WindowsWindow final : public Window {
 public:
@@ -35,6 +35,6 @@ private:
     bool m_shouldClose = false;
 };
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_PLATFORM_WINDOWS
+#endif // NARAGAME_PLATFORM_WINDOWS

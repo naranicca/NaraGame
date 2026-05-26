@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace nara::detail {
+namespace NaraGame::detail {
 
 // Decompress a raw DEFLATE stream (RFC 1951). Returns false on malformed input.
 bool Inflate(const uint8_t* data, size_t size, std::vector<uint8_t>& out);
@@ -13,4 +13,4 @@ bool Inflate(const uint8_t* data, size_t size, std::vector<uint8_t>& out);
 // The trailing checksum is not verified.
 bool ZlibInflate(const uint8_t* data, size_t size, std::vector<uint8_t>& out);
 
-} // namespace nara::detail
+} // namespace NaraGame::detail

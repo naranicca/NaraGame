@@ -1,33 +1,33 @@
-// Space Invaders (스페이스 인베이더) — test game on the Nara engine.
+// Space Invaders (스페이스 인베이더) — test game on the NaraGame engine.
 //
 // Exercises the engine: window + D3D11 + Renderer2D batching + a packed sprite
 // atlas + bitmap-font text + keyboard input. Controls: Left/Right move,
 // Space fires, ESC quits, Enter restarts after game over.
 
-#include <nara/assets/TextureLoader.h>
-#include <nara/core/Application.h>
-#include <nara/core/EntryPoint.h>
-#include <nara/core/Log.h>
-#include <nara/audio/AudioClip.h>
-#include <nara/audio/AudioDevice.h>
-#include <nara/input/Input.h>
-#include <nara/io/ConfigFile.h>
-#include <nara/math/Math.h>
-#include <nara/renderer/BitmapFont.h>
-#include <nara/renderer/Renderer2D.h>
-#include <nara/renderer/TextureAtlas.h>
-#include <nara/renderer/rhi/RHIDevice.h>
+#include <NaraGame/assets/TextureLoader.h>
+#include <NaraGame/core/Application.h>
+#include <NaraGame/core/EntryPoint.h>
+#include <NaraGame/core/Log.h>
+#include <NaraGame/audio/AudioClip.h>
+#include <NaraGame/audio/AudioDevice.h>
+#include <NaraGame/input/Input.h>
+#include <NaraGame/io/ConfigFile.h>
+#include <NaraGame/math/Math.h>
+#include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/renderer/Renderer2D.h>
+#include <NaraGame/renderer/TextureAtlas.h>
+#include <NaraGame/renderer/rhi/RHIDevice.h>
 
 #include <memory>
 #include <random>
 #include <string>
 #include <vector>
 
-#ifndef NARA_ASSETS_DIR
-#define NARA_ASSETS_DIR "assets"
+#ifndef NARAGAME_ASSETS_DIR
+#define NARAGAME_ASSETS_DIR "assets"
 #endif
 
-using namespace nara;
+using namespace NaraGame;
 
 namespace {
 
@@ -87,7 +87,7 @@ public:
 protected:
     void OnStart() override {
         m_renderer.Init(GetDevice());
-        const std::string assets = NARA_ASSETS_DIR;
+        const std::string assets = NARAGAME_ASSETS_DIR;
 
         m_spritesTexture = LoadTexture(GetDevice(), assets + "/invaders.png");
         m_atlas = TextureAtlas(m_spritesTexture.get());
@@ -112,7 +112,7 @@ protected:
         m_hiScore = m_save.GetInt("hiscore", 0);
 
         ResetGame();
-        NARA_INFO("Space Invaders: hi-score %d (from %s)", m_hiScore, kSavePath);
+        NARAGAME_INFO("Space Invaders: hi-score %d (from %s)", m_hiScore, kSavePath);
     }
 
     void OnStop() override {
@@ -187,7 +187,7 @@ protected:
 private:
     static AppConfig MakeConfig() {
         AppConfig config;
-        config.title = "Nara - Space Invaders";
+        config.title = "NaraGame - Space Invaders";
         config.width = static_cast<uint32_t>(kWidth);
         config.height = static_cast<uint32_t>(kHeight);
         return config;
@@ -427,6 +427,6 @@ private:
     std::mt19937 m_rng;
 };
 
-Application* nara::CreateApplication(int /*argc*/, char** /*argv*/) {
+Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {
     return new SpaceInvadersApp();
 }

@@ -1,13 +1,13 @@
 #include "renderer/rhi/d3d11/D3D11Resources.h"
 
-#if defined(NARA_PLATFORM_WINDOWS)
+#if defined(NARAGAME_PLATFORM_WINDOWS)
 
-#include "nara/core/Log.h"
+#include "NaraGame/core/Log.h"
 
 #include <cstring>
 #include <d3dcompiler.h>
 
-namespace nara {
+namespace NaraGame {
 
 static DXGI_FORMAT ToDXGI(VertexFormat format) {
     switch (format) {
@@ -46,7 +46,7 @@ D3D11Buffer::D3D11Buffer(ID3D11Device* device, ID3D11DeviceContext* context,
     const HRESULT hr =
         device->CreateBuffer(&bd, desc.initialData ? &init : nullptr, m_buffer.GetAddressOf());
     if (FAILED(hr))
-        NARA_ERROR("CreateBuffer failed (0x%08lX)", static_cast<unsigned long>(hr));
+        NARAGAME_ERROR("CreateBuffer failed (0x%08lX)", static_cast<unsigned long>(hr));
 }
 
 void D3D11Buffer::Update(const void* data, size_t size, size_t offset) {
@@ -87,13 +87,13 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, const TextureDesc& desc)
     HRESULT hr =
         device->CreateTexture2D(&td, desc.pixels ? &init : nullptr, texture.GetAddressOf());
     if (FAILED(hr)) {
-        NARA_ERROR("CreateTexture2D failed (0x%08lX)", static_cast<unsigned long>(hr));
+        NARAGAME_ERROR("CreateTexture2D failed (0x%08lX)", static_cast<unsigned long>(hr));
         return;
     }
 
     hr = device->CreateShaderResourceView(texture.Get(), nullptr, m_srv.GetAddressOf());
     if (FAILED(hr))
-        NARA_ERROR("CreateShaderResourceView failed (0x%08lX)", static_cast<unsigned long>(hr));
+        NARAGAME_ERROR("CreateShaderResourceView failed (0x%08lX)", static_cast<unsigned long>(hr));
 }
 
 // ===========================================================================
@@ -112,7 +112,7 @@ static ComPtr<ID3DBlob> CompileHLSL(const std::string& source, const std::string
         D3DCompile(source.data(), source.size(), debugName, nullptr, nullptr, entry.c_str(),
                    target, flags, 0, code.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(hr)) {
-        NARA_ERROR("HLSL compile failed [%s/%s]: %s", debugName, target,
+        NARAGAME_ERROR("HLSL compile failed [%s/%s]: %s", debugName, target,
                    errors ? static_cast<const char*>(errors->GetBufferPointer()) : "(no message)");
         return nullptr;
     }
@@ -138,7 +138,7 @@ D3D11Shader::D3D11Shader(ID3D11Device* device, const ShaderDesc& desc) {
 D3D11Pipeline::D3D11Pipeline(ID3D11Device* device, const PipelineDesc& desc) {
     auto* shader = static_cast<D3D11Shader*>(desc.shader);
     if (shader == nullptr || !shader->Valid() || shader->VSBytecode() == nullptr) {
-        NARA_ERROR("CreatePipeline: invalid shader");
+        NARAGAME_ERROR("CreatePipeline: invalid shader");
         return;
     }
     m_vs = shader->VS();
@@ -162,7 +162,7 @@ D3D11Pipeline::D3D11Pipeline(ID3D11Device* device, const PipelineDesc& desc) {
         shader->VSBytecode()->GetBufferPointer(), shader->VSBytecode()->GetBufferSize(),
         m_inputLayout.GetAddressOf());
     if (FAILED(hr))
-        NARA_ERROR("CreateInputLayout failed (0x%08lX)", static_cast<unsigned long>(hr));
+        NARAGAME_ERROR("CreateInputLayout failed (0x%08lX)", static_cast<unsigned long>(hr));
 
     // Blend state.
     D3D11_BLEND_DESC blend{};
@@ -192,6 +192,6 @@ void D3D11Pipeline::Bind(ID3D11DeviceContext* context) const {
     context->OMSetBlendState(m_blendState.Get(), blendFactor, 0xFFFFFFFF);
 }
 
-} // namespace nara
+} // namespace NaraGame
 
-#endif // NARA_PLATFORM_WINDOWS
+#endif // NARAGAME_PLATFORM_WINDOWS

@@ -1,8 +1,8 @@
-#include "nara/assets/BMFont.h"
+#include "NaraGame/assets/BMFont.h"
 
-#include "nara/assets/TextureLoader.h"
-#include "nara/core/Log.h"
-#include "nara/renderer/rhi/RHIResources.h" // complete RHITexture for unique_ptr
+#include "NaraGame/assets/TextureLoader.h"
+#include "NaraGame/core/Log.h"
+#include "NaraGame/renderer/rhi/RHIResources.h" // complete RHITexture for unique_ptr
 
 #include <cstdlib>
 #include <fstream>
@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace nara {
+namespace NaraGame {
 namespace {
 
 // Split a BMFont line into "key=value" tokens, respecting quoted values.
@@ -63,7 +63,7 @@ Font LoadBMFont(RHIDevice& device, const std::string& fntPath) {
 
     std::ifstream file(fntPath);
     if (!file) {
-        NARA_ERROR("LoadBMFont: cannot open '%s'", fntPath.c_str());
+        NARAGAME_ERROR("LoadBMFont: cannot open '%s'", fntPath.c_str());
         return font;
     }
 
@@ -99,19 +99,19 @@ Font LoadBMFont(RHIDevice& device, const std::string& fntPath) {
     }
 
     if (pageFile.empty()) {
-        NARA_ERROR("LoadBMFont: '%s' has no page texture", fntPath.c_str());
+        NARAGAME_ERROR("LoadBMFont: '%s' has no page texture", fntPath.c_str());
         return font;
     }
 
     auto texture = LoadTexture(device, dir + pageFile);
     if (!texture) {
-        NARA_ERROR("LoadBMFont: failed to load page '%s'", (dir + pageFile).c_str());
+        NARAGAME_ERROR("LoadBMFont: failed to load page '%s'", (dir + pageFile).c_str());
         return font;
     }
     font.SetTexture(std::move(texture));
-    NARA_INFO("Loaded BMFont '%s' (%d glyphs, lineHeight %.0f)", fntPath.c_str(), glyphCount,
+    NARAGAME_INFO("Loaded BMFont '%s' (%d glyphs, lineHeight %.0f)", fntPath.c_str(), glyphCount,
               font.LineHeight());
     return font;
 }
 
-} // namespace nara
+} // namespace NaraGame

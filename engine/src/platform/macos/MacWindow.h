@@ -1,12 +1,12 @@
 #pragma once
 
-#include "nara/core/Platform.h"
+#include "NaraGame/core/Platform.h"
 
-#if defined(NARA_PLATFORM_MACOS)
+#if defined(NARAGAME_PLATFORM_MACOS)
 
-#include "nara/platform/Window.h"
+#include "NaraGame/platform/Window.h"
 
-namespace nara {
+namespace NaraGame {
 
 // TODO: Implement with Cocoa (NSWindow + NSView). The real version must be
 // compiled as Objective-C++ (.mm). This stub only satisfies the interface.
@@ -28,6 +28,6 @@ private:
     bool m_shouldClose = false;
 };
 
-} // namespace nara
+} // namespace NaraGame
 
 #endif

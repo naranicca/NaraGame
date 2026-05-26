@@ -1,8 +1,8 @@
-#include "nara/scene/SceneManager.h"
+#include "NaraGame/scene/SceneManager.h"
 
 #include <utility>
 
-namespace nara {
+namespace NaraGame {
 
 SceneManager::~SceneManager() {
     DoClear();
@@ -97,4 +97,4 @@ void SceneManager::Render() {
         m_stack[i]->OnRender();
 }
 
-} // namespace nara
+} // namespace NaraGame

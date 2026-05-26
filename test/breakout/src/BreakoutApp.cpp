@@ -1,29 +1,29 @@
-// Breakout (벽돌깨기) — first playable test game on the Nara engine.
+// Breakout (벽돌깨기) — first playable test game on the NaraGame engine.
 //
 // Demonstrates the engine end to end: Win32 window + D3D11 + Renderer2D batched
 // quads + keyboard input. Controls: Left/Right arrows move the paddle, ESC quits.
 
-#include <nara/assets/TextureLoader.h>
-#include <nara/core/Application.h>
-#include <nara/core/EntryPoint.h>
-#include <nara/core/Log.h>
-#include <nara/input/Input.h>
-#include <nara/math/Math.h>
-#include <nara/renderer/BitmapFont.h>
-#include <nara/renderer/Renderer2D.h>
-#include <nara/renderer/SpriteSheet.h>
-#include <nara/renderer/TextureAtlas.h>
-#include <nara/renderer/rhi/RHIDevice.h>
+#include <NaraGame/assets/TextureLoader.h>
+#include <NaraGame/core/Application.h>
+#include <NaraGame/core/EntryPoint.h>
+#include <NaraGame/core/Log.h>
+#include <NaraGame/input/Input.h>
+#include <NaraGame/math/Math.h>
+#include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/renderer/Renderer2D.h>
+#include <NaraGame/renderer/SpriteSheet.h>
+#include <NaraGame/renderer/TextureAtlas.h>
+#include <NaraGame/renderer/rhi/RHIDevice.h>
 
 #include <memory>
 #include <string>
 #include <vector>
 
-#ifndef NARA_ASSETS_DIR
-#define NARA_ASSETS_DIR "assets"
+#ifndef NARAGAME_ASSETS_DIR
+#define NARAGAME_ASSETS_DIR "assets"
 #endif
 
-using namespace nara;
+using namespace NaraGame;
 
 namespace {
 
@@ -51,7 +51,7 @@ protected:
     void OnStart() override {
         m_renderer.Init(GetDevice());
 
-        const std::string assets = NARA_ASSETS_DIR;
+        const std::string assets = NARAGAME_ASSETS_DIR;
 
         // Sprite sheet: a 3x2 grid of 64x32 brick styles in one texture.
         m_brickSheetTexture = LoadTexture(GetDevice(), assets + "/bricks.png");
@@ -70,7 +70,7 @@ protected:
 
         ResetBricks();
         ResetBall();
-        NARA_INFO("Breakout: Left/Right to move, ESC to quit");
+        NARAGAME_INFO("Breakout: Left/Right to move, ESC to quit");
     }
 
     void OnStop() override {
@@ -138,7 +138,7 @@ protected:
 private:
     static AppConfig MakeConfig() {
         AppConfig config;
-        config.title = "Nara - Breakout";
+        config.title = "NaraGame - Breakout";
         config.width = 800;
         config.height = 600;
         return config;
@@ -256,6 +256,6 @@ private:
     Vec2 m_ballVel;
 };
 
-Application* nara::CreateApplication(int /*argc*/, char** /*argv*/) {
+Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {
     return new BreakoutApp();
 }
