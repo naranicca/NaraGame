@@ -1,0 +1,4 @@
+# Test games built on top of the Nara engine. Each is its own executable.
+add_subdirectory(breakout)
+add_subdirectory(space_invaders)
+add_subdirectory(mario)

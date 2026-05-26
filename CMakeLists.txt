@@ -1,0 +1,50 @@
+cmake_minimum_required(VERSION 3.21)
+
+project(NaraGame
+    VERSION 0.1.0
+    DESCRIPTION "Cross-platform 2D/3D game engine"
+    LANGUAGES CXX)
+
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Single-config generators default to Debug for first-time configures.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
+
+# Predictable output locations so the .exe and its console are easy to find.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+# Organize targets into Solution folders inside Visual Studio.
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
+# Sources are UTF-8 (Korean comments). Tell MSVC so it does not fall back to the
+# system code page (e.g. 949) and emit C4819 / misread multibyte sequences.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
+# Make the breakout demo the default startup project when a .sln is generated.
+set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT breakout)
+
+if(WIN32)
+    message(STATUS "Nara: target platform = Windows (D3D11 backend)")
+elseif(IOS)
+    message(STATUS "Nara: target platform = iOS (Metal backend, stub)")
+elseif(APPLE)
+    message(STATUS "Nara: target platform = macOS (Metal backend, stub)")
+elseif(ANDROID)
+    message(STATUS "Nara: target platform = Android (Vulkan backend, stub)")
+else()
+    message(STATUS "Nara: target platform = ${CMAKE_SYSTEM_NAME} (no backend yet)")
+endif()
+
+add_subdirectory(engine)
+add_subdirectory(test)

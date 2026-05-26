@@ -1,0 +1,29 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows-x64",
+      "displayName": "Windows x64 (Visual Studio 2022)",
+      "description": "Generates a .sln for debugging in Visual Studio.",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/windows-x64"
+    },
+    {
+      "name": "windows-x64-ninja",
+      "displayName": "Windows x64 (Ninja + MSVC)",
+      "description": "Fast incremental builds; used by VS 'Open Folder'.",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/windows-x64-ninja",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-debug",   "configurePreset": "windows-x64", "configuration": "Debug" },
+    { "name": "windows-release", "configurePreset": "windows-x64", "configuration": "Release" }
+  ]
+}
