@@ -15,6 +15,7 @@
 #include <NaraGame/core/Log.h>
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
+#include <NaraGame/physics/Physics2D.h>
 #include <NaraGame/renderer/BitmapFont.h>
 #include <NaraGame/renderer/Camera2D.h>
 #include <NaraGame/renderer/Font.h>
@@ -63,10 +64,12 @@ constexpr float kGoombaW = 26.0f;
 constexpr float kGoombaH = 24.0f;
 constexpr float kGoombaSpeed = 60.0f;
 
+enum BodyTag : uint32_t { TagTile = 1, TagPlayer = 2, TagGoomba = 3 };
+
 struct Goomba {
-    Vec2 pos;
-    Vec2 vel;
-    float lastDir = -kGoombaSpeed;
+    int bodyId = -1;
+    Vec2 lastPos;          // cached for drawing while squashed (body removed)
+    float dir = -1.0f;     // -1 left, +1 right
     bool alive = true;
     float squashTimer = 0.0f;
     float animTimer = 0.0f;
@@ -142,7 +145,8 @@ private:
 };
 
 // ===========================================================================
-// GameScene — the platformer; loads its level from a text file.
+// GameScene — the platformer, driven by the shared PhysicsWorld:
+// solid tiles -> static bodies, player + goombas -> dynamic bodies.
 // ===========================================================================
 class GameScene : public Scene {
 public:
@@ -161,6 +165,22 @@ public:
         m_camera = Camera2D(m_ctx->screenW, m_ctx->screenH);
         m_camera.SetBounds({0.0f, 0.0f}, m_worldSize);
 
+        // Physics world: a static body per solid tile, dynamic bodies for actors.
+        m_world.Clear();
+        m_world.SetGravity({0.0f, kGravity});
+        for (int y = 0; y < m_map.Height(); ++y) {
+            for (int x = 0; x < m_map.Width(); ++x) {
+                if (!IsSolidTile(m_map.GetTile(x, y)))
+                    continue;
+                Body tile;
+                tile.type = BodyType::Static;
+                tile.tag = TagTile;
+                tile.position = {x * kT, y * kT};
+                tile.size = {kT, kT};
+                m_world.AddBody(tile);
+            }
+        }
+
         m_goombas.clear();
         m_spawn = {120.0f, kT * 14.0f};
         for (const LevelObject& obj : level.objects) {
@@ -168,14 +188,28 @@ public:
             if (obj.symbol == 'M') {
                 m_spawn = {px, (obj.tileY + 1) * kT - kPlayerH};
             } else if (obj.symbol == 'g') {
+                Body gb;
+                gb.type = BodyType::Dynamic;
+                gb.tag = TagGoomba;
+                gb.size = {kGoombaW, kGoombaH};
+                gb.position = {px, (obj.tileY + 1) * kT - kGoombaH};
                 Goomba g;
-                g.pos = {px, (obj.tileY + 1) * kT - kGoombaH};
-                g.vel = {-kGoombaSpeed, 0.0f};
-                g.lastDir = g.vel.x;
+                g.bodyId = m_world.AddBody(gb);
+                g.lastPos = gb.position;
+                g.dir = -1.0f;
                 m_goombas.push_back(g);
             }
         }
-        RespawnPlayer();
+
+        Body player;
+        player.type = BodyType::Dynamic;
+        player.tag = TagPlayer;
+        player.size = {kPlayerW, kPlayerH};
+        player.position = m_spawn;
+        m_playerId = m_world.AddBody(player);
+        m_facing = 1.0f;
+        m_walkFrame = 0;
+        m_walkTimer = 0.0f;
 
         if (m_ctx->audio != nullptr && m_ctx->music != nullptr && m_ctx->music->Valid())
             m_ctx->audio->PlayMusic(*m_ctx->music, 0.35f, true);
@@ -193,18 +227,27 @@ public:
         }
 
         const float dt = Min(dtRaw, 1.0f / 30.0f);
-        UpdatePlayer(dt);
-        UpdateGoombas(dt);
+        ControlPlayer(dt);
+        ControlGoombas(dt);
+
+        m_world.Step(dt); // integrates gravity + resolves tile collisions
+
+        TurnGoombasAtWalls();
         CollectCoins();
         ResolveGoombaHits();
 
-        if (m_playerPos.y > m_worldSize.y + 80.0f)
+        Body* p = m_world.Get(m_playerId);
+        if (p == nullptr)
+            return;
+        if (p->position.y > m_worldSize.y + 80.0f) {
             Die();
-
-        if (m_playerPos.x + kPlayerW >= m_worldSize.x - 2.0f)
+            return;
+        }
+        if (p->position.x + kPlayerW >= m_worldSize.x - 2.0f) {
             NextLevel();
-
-        m_camera.CenterOn({m_playerPos.x + kPlayerW * 0.5f, m_playerPos.y + kPlayerH * 0.5f});
+            return;
+        }
+        m_camera.CenterOn({p->position.x + kPlayerW * 0.5f, p->position.y + kPlayerH * 0.5f});
     }
 
     void OnRender() override {
@@ -216,18 +259,22 @@ public:
         for (const Goomba& g : m_goombas) {
             if (!g.alive)
                 continue;
-            if (g.squashTimer > 0.0f)
-                r.DrawQuad({g.pos.x, g.pos.y + kGoombaH - 10.0f}, {kGoombaW, 10.0f},
+            if (g.squashTimer > 0.0f) {
+                r.DrawQuad({g.lastPos.x, g.lastPos.y + kGoombaH - 10.0f}, {kGoombaW, 10.0f},
                            m_ctx->chars->Get("goombaSquashed"));
-            else
-                r.DrawQuad(g.pos, {kGoombaW, kGoombaH},
+            } else if (const Body* gb = m_world.Get(g.bodyId)) {
+                r.DrawQuad(gb->position, {kGoombaW, kGoombaH},
                            m_ctx->chars->Get(g.frame ? "goomba1" : "goomba0"));
+            }
         }
-        const char* name = !m_onGround ? "jump"
-                                       : (std::fabs(m_playerVel.x) > 5.0f && m_walkFrame ? "walk"
-                                                                                         : "stand");
-        r.DrawQuad(m_playerPos, {kPlayerW, kPlayerH}, m_ctx->chars->Get(name), Color::White(),
-                   m_facing < 0.0f);
+        if (const Body* p = m_world.Get(m_playerId)) {
+            const char* name = !p->onGround
+                                   ? "jump"
+                                   : (std::fabs(p->velocity.x) > 5.0f && m_walkFrame ? "walk"
+                                                                                     : "stand");
+            r.DrawQuad(p->position, {kPlayerW, kPlayerH}, m_ctx->chars->Get(name), Color::White(),
+                       m_facing < 0.0f);
+        }
         r.End();
 
         r.Begin(Renderer2D::ScreenCamera(m_ctx->screenW, m_ctx->screenH));
@@ -243,45 +290,19 @@ public:
     }
 
 private:
-    bool SolidAt(int tx, int ty) const { return IsSolidTile(m_map.GetTile(tx, ty)); }
+    // Set the player body's intended velocity from input (the world integrates
+    // gravity and resolves tile collisions during Step).
+    void ControlPlayer(float dt) {
+        Body* p = m_world.Get(m_playerId);
+        if (p == nullptr)
+            return;
 
-    bool CollideX(Vec2& pos, Vec2& vel, float w, float h) const {
-        const int top = static_cast<int>(std::floor(pos.y / kT));
-        const int bottom = static_cast<int>(std::floor((pos.y + h - 1.0f) / kT));
-        if (vel.x > 0.0f) {
-            const int tx = static_cast<int>(std::floor((pos.x + w - 1.0f) / kT));
-            for (int ty = top; ty <= bottom; ++ty)
-                if (SolidAt(tx, ty)) { pos.x = tx * kT - w; vel.x = 0.0f; return true; }
-        } else if (vel.x < 0.0f) {
-            const int tx = static_cast<int>(std::floor(pos.x / kT));
-            for (int ty = top; ty <= bottom; ++ty)
-                if (SolidAt(tx, ty)) { pos.x = (tx + 1) * kT; vel.x = 0.0f; return true; }
-        }
-        return false;
-    }
-
-    bool CollideY(Vec2& pos, Vec2& vel, float w, float h) const {
-        const int left = static_cast<int>(std::floor(pos.x / kT));
-        const int right = static_cast<int>(std::floor((pos.x + w - 1.0f) / kT));
-        if (vel.y > 0.0f) {
-            const int ty = static_cast<int>(std::floor((pos.y + h - 1.0f) / kT));
-            for (int tx = left; tx <= right; ++tx)
-                if (SolidAt(tx, ty)) { pos.y = ty * kT - h; vel.y = 0.0f; return true; }
-        } else if (vel.y < 0.0f) {
-            const int ty = static_cast<int>(std::floor(pos.y / kT));
-            for (int tx = left; tx <= right; ++tx)
-                if (SolidAt(tx, ty)) { pos.y = (ty + 1) * kT; vel.y = 0.0f; return false; }
-        }
-        return false;
-    }
-
-    void UpdatePlayer(float dt) {
         float dir = 0.0f;
         if (Input::IsKeyDown(Key::Left) || Input::IsKeyDown(Key::A))
             dir -= 1.0f;
         if (Input::IsKeyDown(Key::Right) || Input::IsKeyDown(Key::D))
             dir += 1.0f;
-        m_playerVel.x = dir * kMoveSpeed;
+        p->velocity.x = dir * kMoveSpeed;
         if (dir != 0.0f)
             m_facing = dir;
 
@@ -289,25 +310,17 @@ private:
                                  Input::IsKeyPressed(Key::Up) || Input::IsKeyPressed(Key::W);
         const bool jumpHeld = Input::IsKeyDown(Key::Space) || Input::IsKeyDown(Key::Up) ||
                               Input::IsKeyDown(Key::W);
-        if (jumpPressed && m_onGround) {
-            m_playerVel.y = -kJumpSpeed;
-            m_onGround = false;
+        if (jumpPressed && p->onGround) {
+            p->velocity.y = -kJumpSpeed;
             m_ctx->Sfx(m_ctx->sfxJump);
         }
 
-        float g = kGravity;
-        if (m_playerVel.y < 0.0f && !jumpHeld)
-            g *= kFastFall;
-        m_playerVel.y = Min(m_playerVel.y + g * dt, kMaxFall);
+        // Variable-height jump: heavier gravity while rising without holding jump.
+        p->gravityScale = (p->velocity.y < 0.0f && !jumpHeld) ? kFastFall : 1.0f;
+        if (p->velocity.y > kMaxFall)
+            p->velocity.y = kMaxFall;
 
-        m_playerPos.x += m_playerVel.x * dt;
-        CollideX(m_playerPos, m_playerVel, kPlayerW, kPlayerH);
-        m_playerPos.x = Clamp(m_playerPos.x, 0.0f, m_worldSize.x - kPlayerW);
-
-        m_playerPos.y += m_playerVel.y * dt;
-        m_onGround = CollideY(m_playerPos, m_playerVel, kPlayerW, kPlayerH);
-
-        if (std::fabs(m_playerVel.x) > 5.0f && m_onGround) {
+        if (std::fabs(p->velocity.x) > 5.0f && p->onGround) {
             m_walkTimer += dt;
             if (m_walkTimer >= 0.12f) { m_walkTimer = 0.0f; m_walkFrame ^= 1; }
         } else {
@@ -315,7 +328,7 @@ private:
         }
     }
 
-    void UpdateGoombas(float dt) {
+    void ControlGoombas(float dt) {
         for (Goomba& g : m_goombas) {
             if (!g.alive)
                 continue;
@@ -325,37 +338,65 @@ private:
                     g.alive = false;
                 continue;
             }
-            g.vel.y = Min(g.vel.y + kGravity * dt, kMaxFall);
-            const float prev = (g.vel.x != 0.0f) ? g.vel.x : g.lastDir;
-            g.pos.x += g.vel.x * dt;
-            if (CollideX(g.pos, g.vel, kGoombaW, kGoombaH))
-                g.vel.x = (prev > 0.0f) ? -kGoombaSpeed : kGoombaSpeed;
-            g.lastDir = g.vel.x;
-            g.pos.y += g.vel.y * dt;
-            CollideY(g.pos, g.vel, kGoombaW, kGoombaH);
-            if (g.pos.y > m_worldSize.y + 80.0f)
-                g.alive = false;
+            Body* gb = m_world.Get(g.bodyId);
+            if (gb == nullptr || !gb->active)
+                continue;
+            gb->velocity.x = g.dir * kGoombaSpeed;
+            if (gb->velocity.y > kMaxFall)
+                gb->velocity.y = kMaxFall;
+            g.lastPos = gb->position;
             g.animTimer += dt;
             if (g.animTimer >= 0.2f) { g.animTimer = 0.0f; g.frame ^= 1; }
         }
     }
 
-    void ResolveGoombaHits() {
+    // A goomba that hit a wall (horizontal contact normal) reverses direction.
+    void TurnGoombasAtWalls() {
+        for (const Contact& c : m_world.Contacts()) {
+            if (std::fabs(c.normal.x) < 0.5f)
+                continue;
+            for (Goomba& g : m_goombas) {
+                if (g.alive && g.squashTimer <= 0.0f && g.bodyId == c.a) {
+                    g.dir = (c.normal.x > 0.0f) ? 1.0f : -1.0f;
+                    break;
+                }
+            }
+        }
+        // Goombas that fell into a pit.
         for (Goomba& g : m_goombas) {
             if (!g.alive || g.squashTimer > 0.0f)
                 continue;
-            const bool overlap = m_playerPos.x < g.pos.x + kGoombaW &&
-                                 m_playerPos.x + kPlayerW > g.pos.x &&
-                                 m_playerPos.y < g.pos.y + kGoombaH &&
-                                 m_playerPos.y + kPlayerH > g.pos.y;
+            Body* gb = m_world.Get(g.bodyId);
+            if (gb != nullptr && gb->position.y > m_worldSize.y + 80.0f) {
+                g.alive = false;
+                m_world.RemoveBody(g.bodyId);
+            }
+        }
+    }
+
+    void ResolveGoombaHits() {
+        Body* p = m_world.Get(m_playerId);
+        if (p == nullptr)
+            return;
+        for (Goomba& g : m_goombas) {
+            if (!g.alive || g.squashTimer > 0.0f)
+                continue;
+            Body* gb = m_world.Get(g.bodyId);
+            if (gb == nullptr || !gb->active)
+                continue;
+            const bool overlap = p->position.x < gb->position.x + kGoombaW &&
+                                 p->position.x + kPlayerW > gb->position.x &&
+                                 p->position.y < gb->position.y + kGoombaH &&
+                                 p->position.y + kPlayerH > gb->position.y;
             if (!overlap)
                 continue;
-            const bool stomp = m_playerVel.y > 0.0f &&
-                               (m_playerPos.y + kPlayerH) < g.pos.y + kGoombaH * 0.6f;
+            const bool stomp = p->velocity.y > 0.0f &&
+                               (p->position.y + kPlayerH) < gb->position.y + kGoombaH * 0.6f;
             if (stomp) {
+                g.lastPos = gb->position;
                 g.squashTimer = 0.35f;
-                g.vel = {0.0f, 0.0f};
-                m_playerVel.y = -kStompBounce;
+                m_world.RemoveBody(g.bodyId);
+                p->velocity.y = -kStompBounce;
                 m_ctx->score += 200;
                 m_ctx->Sfx(m_ctx->sfxStomp);
             } else {
@@ -366,10 +407,13 @@ private:
     }
 
     void CollectCoins() {
-        const int left = static_cast<int>(std::floor(m_playerPos.x / kT));
-        const int right = static_cast<int>(std::floor((m_playerPos.x + kPlayerW - 1.0f) / kT));
-        const int top = static_cast<int>(std::floor(m_playerPos.y / kT));
-        const int bottom = static_cast<int>(std::floor((m_playerPos.y + kPlayerH - 1.0f) / kT));
+        const Body* p = m_world.Get(m_playerId);
+        if (p == nullptr)
+            return;
+        const int left = static_cast<int>(std::floor(p->position.x / kT));
+        const int right = static_cast<int>(std::floor((p->position.x + kPlayerW - 1.0f) / kT));
+        const int top = static_cast<int>(std::floor(p->position.y / kT));
+        const int bottom = static_cast<int>(std::floor((p->position.y + kPlayerH - 1.0f) / kT));
         for (int ty = top; ty <= bottom; ++ty)
             for (int tx = left; tx <= right; ++tx)
                 if (m_map.GetTile(tx, ty) == COIN) {
@@ -381,11 +425,13 @@ private:
     }
 
     void RespawnPlayer() {
-        m_playerPos = m_spawn;
-        m_playerVel = {0.0f, 0.0f};
-        m_onGround = false;
+        if (Body* p = m_world.Get(m_playerId)) {
+            p->position = m_spawn;
+            p->velocity = {0.0f, 0.0f};
+            p->onGround = false;
+        }
         m_facing = 1.0f;
-        m_camera.CenterOn({m_playerPos.x, m_playerPos.y});
+        m_camera.CenterOn(m_spawn);
     }
 
     void Die() {
@@ -409,10 +455,9 @@ private:
     Vec2 m_worldSize;
     Vec2 m_spawn;
 
+    PhysicsWorld m_world;
+    int m_playerId = -1;
     std::vector<Goomba> m_goombas;
-    Vec2 m_playerPos;
-    Vec2 m_playerVel;
-    bool m_onGround = false;
     float m_facing = 1.0f;
     float m_walkTimer = 0.0f;
     int m_walkFrame = 0;
