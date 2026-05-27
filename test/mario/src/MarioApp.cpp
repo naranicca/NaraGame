@@ -53,9 +53,11 @@ constexpr int kMaxLevel = 2;
 constexpr float kZoom = 2.0f;
 
 enum Tile { EMPTY = -1, GROUND = 0, DIRT = 1, BRICK = 2, QUESTION = 3,
-            PIPE_TL = 4, PIPE_TR = 5, PIPE_BL = 6, PIPE_BR = 7, HARD = 8, COIN = 9 };
+            PIPE_TL = 4, PIPE_TR = 5, PIPE_BL = 6, PIPE_BR = 7, HARD = 8, COIN = 9,
+            USED = 10 };
 
-bool IsSolidTile(int id) { return id >= GROUND && id <= HARD; }
+// USED is what a ? block becomes after it is bumped — still solid.
+bool IsSolidTile(int id) { return (id >= GROUND && id <= HARD) || id == USED; }
 
 constexpr float kGravity = 2300.0f;
 constexpr float kFastFall = 2.1f;
@@ -231,6 +233,7 @@ public:
         m_world.Step(dt); // integrates gravity + resolves tile collisions
 
         TurnGoombasAtWalls();
+        BumpBlocks();
         CollectCoins();
         ResolveGoombaHits();
         m_particles.Update(dt);
@@ -455,6 +458,51 @@ private:
                 Die();
                 return;
             }
+        }
+    }
+
+    // Bumping a ? block from below pops a coin and turns it into a used (still
+    // solid) block. The head-bump is detected from this frame's contacts; the
+    // struck tile is the one directly above the player's head.
+    void BumpBlocks() {
+        const Body* p = m_world.Get(m_playerId);
+        if (p == nullptr)
+            return;
+
+        bool headHit = false;
+        for (const Contact& c : m_world.Contacts()) {
+            if (c.a == m_playerId && c.normal.y > 0.5f) { headHit = true; break; }
+        }
+        if (!headHit)
+            return;
+
+        const int row = static_cast<int>(std::floor((p->position.y - 2.0f) / kT));
+        const int left = static_cast<int>(std::floor(p->position.x / kT));
+        const int right = static_cast<int>(std::floor((p->position.x + kPlayerW - 1.0f) / kT));
+        for (int tx = left; tx <= right; ++tx) {
+            if (m_map.GetTile(tx, row) != QUESTION)
+                continue;
+            m_map.SetTile(tx, row, USED);
+            ++m_ctx->coins;
+            m_ctx->score += 200;
+            m_ctx->Sfx(m_ctx->sfxCoin);
+
+            // A coin sprays up out of the block.
+            ParticleBurst burst;
+            burst.position = {tx * kT + kT * 0.5f, row * kT + 4.0f};
+            burst.count = 16;
+            burst.minSpeed = 140.0f;
+            burst.maxSpeed = 300.0f;
+            burst.minLife = 0.3f;
+            burst.maxLife = 0.6f;
+            burst.startSize = 6.0f;
+            burst.startColor = Color(1.0f, 0.85f, 0.25f);
+            burst.endColor = Color(1.0f, 0.85f, 0.25f, 0.0f);
+            burst.gravity = {0.0f, 900.0f};
+            burst.dirAngle = -1.5708f; // straight up (+Y is down)
+            burst.spread = 1.2f;
+            m_particles.Emit(burst);
+            break; // one block per bump
         }
     }
 

@@ -89,7 +89,7 @@ $env:NARAGAME_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d1
 - [x] Space Invaders 플레이 가능 — 편대 이동/가장자리 낙하 + 발사 + 폭탄 + 점수/생명/레벨 + 게임오버
 - [x] 입력 엣지 트리거(IsKeyPressed/Released) + 스프라이트 좌우 반전
 - [x] Camera2D(스크롤·타깃 추적·경계 클램프) + Tilemap(가시 영역 컬링 렌더)
-- [x] Mario 플레이 가능 — 중력/가변 점프/축별 타일 AABB 충돌 + 코인 + 굼바(밟기/피격) + 걷기·점프 애니메이션
+- [x] Mario 플레이 가능 — 중력/가변 점프/축별 타일 AABB 충돌 + 코인 + 물음표 블록(밑에서 치면 코인 팝업 후 사용된 블록으로) + 굼바(밟기/피격) + 걷기·점프 애니메이션
 - [x] 씬/상태 관리 (SceneManager 스택, 지연 전환) + 텍스트 레벨 파일 로더 — 타이틀↔게임↔일시정지, 파일 로드 2개 레벨
 - [x] 비례 폭 폰트 (Font + BMFont .fnt 로더) — Renderer2D::DrawText, Mario 타이틀에 적용
 - [x] 세이브/설정 파일 (ConfigFile, key=value) — Space Invaders 최고 점수 영속화
