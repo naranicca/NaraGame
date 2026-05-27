@@ -15,6 +15,7 @@ set(NARAGAME_SOURCES
     src/core/Log.cpp
     src/input/Input.cpp
     src/io/ConfigFile.cpp
+    src/physics/PhysicsWorld.cpp
     src/platform/Window.cpp
     src/renderer/BitmapFont.cpp
     src/renderer/Camera2D.cpp

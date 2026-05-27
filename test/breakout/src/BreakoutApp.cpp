@@ -1,7 +1,8 @@
-// Breakout (벽돌깨기) — first playable test game on the NaraGame engine.
+// Breakout (벽돌깨기) — driven by the engine's shared 2D physics (PhysicsWorld).
 //
-// Demonstrates the engine end to end: Win32 window + D3D11 + Renderer2D batched
-// quads + keyboard input. Controls: Left/Right arrows move the paddle, ESC quits.
+// Ball = dynamic body (restitution 1, no gravity); walls/bricks = static; paddle
+// = kinematic. The swept-AABB solver bounces the ball and reports contacts, which
+// the game uses to break bricks and add paddle "english". Left/Right move, ESC quits.
 
 #include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/core/Application.h>
@@ -9,12 +10,14 @@
 #include <NaraGame/core/Log.h>
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
+#include <NaraGame/physics/Physics2D.h>
 #include <NaraGame/renderer/BitmapFont.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/SpriteSheet.h>
 #include <NaraGame/renderer/TextureAtlas.h>
 #include <NaraGame/renderer/rhi/RHIDevice.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,21 +29,21 @@
 using namespace NaraGame;
 
 namespace {
+constexpr float kBallSize = 14.0f;
+constexpr float kPaddleW = 110.0f;
+constexpr float kPaddleH = 18.0f;
+constexpr float kPaddleSpeed = 700.0f;
+
+enum Tag : uint32_t { TagBall = 1, TagPaddle = 2, TagBrick = 3, TagWall = 4 };
 
 struct Brick {
     Vec2 position;
     Vec2 size;
     Color color;
-    int sprite = 0; // which sprite-sheet cell to draw
+    int sprite = 0;
+    int bodyId = -1;
     bool alive = true;
 };
-
-// Axis-aligned overlap test for two rectangles given by top-left + size.
-bool Overlaps(const Vec2& aPos, const Vec2& aSize, const Vec2& bPos, const Vec2& bSize) {
-    return aPos.x < bPos.x + bSize.x && aPos.x + aSize.x > bPos.x &&
-           aPos.y < bPos.y + bSize.y && aPos.y + aSize.y > bPos.y;
-}
-
 } // namespace
 
 class BreakoutApp : public Application {
@@ -50,27 +53,22 @@ public:
 protected:
     void OnStart() override {
         m_renderer.Init(GetDevice());
-
         const std::string assets = NARAGAME_ASSETS_DIR;
 
-        // Sprite sheet: a 3x2 grid of 64x32 brick styles in one texture.
         m_brickSheetTexture = LoadTexture(GetDevice(), assets + "/bricks.png");
         m_brickSheet = SpriteSheet(m_brickSheetTexture.get(), 64, 32);
 
-        // Packed atlas: ball + paddle share one texture, addressed by name.
         m_spritesTexture = LoadTexture(GetDevice(), assets + "/sprites.png");
         m_atlas = TextureAtlas(m_spritesTexture.get());
         m_atlas.Add("ball", 0.0f, 0.0f, 32.0f, 32.0f);
         m_atlas.Add("paddle", 0.0f, 32.0f, 120.0f, 20.0f);
 
-        // Bitmap font: 16-column grid starting at space, 14x24 glyph cells.
         m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png");
         m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
         m_font.SetTracking(-2);
 
-        ResetBricks();
-        ResetBall();
-        NARAGAME_INFO("Breakout: Left/Right to move, ESC to quit");
+        BuildWorld();
+        NARAGAME_INFO("Breakout: Left/Right to move, ESC to quit (physics-driven)");
     }
 
     void OnStop() override {
@@ -80,56 +78,55 @@ protected:
         m_renderer.Shutdown();
     }
 
-    void OnUpdate(float dt) override {
+    void OnUpdate(float dtRaw) override {
         if (Input::IsKeyDown(Key::Escape))
             Close();
 
+        const float dt = Min(dtRaw, 1.0f / 30.0f);
         const float w = static_cast<float>(Config().width);
 
-        // Paddle.
-        const float paddleSpeed = 700.0f;
-        if (Input::IsKeyDown(Key::Left))
-            m_paddlePos.x -= paddleSpeed * dt;
-        if (Input::IsKeyDown(Key::Right))
-            m_paddlePos.x += paddleSpeed * dt;
-        m_paddlePos.x = Clamp(m_paddlePos.x, 0.0f, w - m_paddleSize.x);
+        // Drive the kinematic paddle directly from input.
+        if (Body* paddle = m_world.Get(m_paddleId)) {
+            float x = paddle->position.x;
+            if (Input::IsKeyDown(Key::Left))
+                x -= kPaddleSpeed * dt;
+            if (Input::IsKeyDown(Key::Right))
+                x += kPaddleSpeed * dt;
+            paddle->position.x = Clamp(x, 0.0f, w - kPaddleW);
+        }
 
-        // Ball integration.
-        m_ballPos += m_ballVel * dt;
+        m_world.Step(dt);
+        HandleContacts();
 
-        BounceOffWalls();
-        BounceOffPaddle();
-        BounceOffBricks();
+        if (Body* ball = m_world.Get(m_ballId))
+            if (ball->position.y > static_cast<float>(Config().height))
+                ResetBall();
 
         if (AllBricksCleared())
-            ResetBricks();
+            BuildWorld();
     }
 
     void OnRender() override {
         const float w = static_cast<float>(Config().width);
         const float h = static_cast<float>(Config().height);
-
         GetDevice().Clear(Color(0.05f, 0.06f, 0.10f, 1.0f));
 
         m_renderer.Begin(Renderer2D::ScreenCamera(w, h));
-        // Bricks: each row draws a different sheet cell, tinted per row. All share
-        // one texture, so the whole wall is still a single batched draw call.
         for (const Brick& brick : m_bricks) {
             if (brick.alive)
                 m_renderer.DrawQuad(brick.position, brick.size, m_brickSheet.At(brick.sprite),
                                     brick.color);
         }
-        // Paddle and ball come from the packed atlas, addressed by name.
-        m_renderer.DrawQuad(m_paddlePos, m_paddleSize, m_atlas.Get("paddle"),
-                            Color(0.9f, 0.9f, 0.95f, 1.0f));
-        m_renderer.DrawQuad(m_ballPos, m_ballSize, m_atlas.Get("ball"),
-                            Color(1.0f, 0.85f, 0.3f, 1.0f));
+        if (Body* paddle = m_world.Get(m_paddleId))
+            m_renderer.DrawQuad(paddle->position, {kPaddleW, kPaddleH}, m_atlas.Get("paddle"),
+                                Color(0.9f, 0.9f, 0.95f, 1.0f));
+        if (Body* ball = m_world.Get(m_ballId))
+            m_renderer.DrawQuad(ball->position, {kBallSize, kBallSize}, m_atlas.Get("ball"),
+                                Color(1.0f, 0.85f, 0.3f, 1.0f));
 
-        // --- Text (bitmap font) ---
         m_renderer.DrawText(m_font, "SCORE " + std::to_string(m_score), {16.0f, 18.0f},
                             Color(0.95f, 0.95f, 1.0f), 1.5f);
-
-        DrawCentered("NARA  BREAKOUT", 300.0f, 3.0f, Color(0.35f, 0.45f, 0.7f));
+        DrawCentered("NARAGAME  BREAKOUT", 300.0f, 3.0f, Color(0.35f, 0.45f, 0.7f));
         DrawCentered("ARROW KEYS  -  MOVE      ESC  -  QUIT", 360.0f, 1.3f,
                      Color(0.5f, 0.5f, 0.6f));
         m_renderer.End();
@@ -144,9 +141,41 @@ private:
         return config;
     }
 
-    void ResetBricks() {
-        m_bricks.clear();
+    void BuildWorld() {
         const float w = static_cast<float>(Config().width);
+        const float h = static_cast<float>(Config().height);
+        m_world.Clear();
+        m_world.SetGravity({0.0f, 0.0f});
+        m_bricks.clear();
+
+        // Walls (static): left, right, top — thick rectangles just off-screen.
+        Body wall;
+        wall.type = BodyType::Static;
+        wall.tag = TagWall;
+        wall.position = {-40.0f, -200.0f}; wall.size = {40.0f, h + 400.0f}; m_world.AddBody(wall);
+        wall.position = {w, -200.0f};       wall.size = {40.0f, h + 400.0f}; m_world.AddBody(wall);
+        wall.position = {-200.0f, -40.0f};  wall.size = {w + 400.0f, 40.0f}; m_world.AddBody(wall);
+
+        // Paddle (kinematic).
+        Body paddle;
+        paddle.type = BodyType::Kinematic;
+        paddle.tag = TagPaddle;
+        paddle.size = {kPaddleW, kPaddleH};
+        paddle.position = {(w - kPaddleW) * 0.5f, h - 48.0f};
+        m_paddleId = m_world.AddBody(paddle);
+
+        // Ball (dynamic, perfect bounce, no gravity).
+        Body ball;
+        ball.type = BodyType::Dynamic;
+        ball.tag = TagBall;
+        ball.size = {kBallSize, kBallSize};
+        ball.position = {(w - kBallSize) * 0.5f, h - 90.0f};
+        ball.velocity = {220.0f, -320.0f};
+        ball.restitution = 1.0f;
+        ball.gravityScale = 0.0f;
+        m_ballId = m_world.AddBody(ball);
+
+        // Bricks (static), 6 rows x 10 cols.
         const int cols = 10;
         const int rows = 6;
         const float margin = 40.0f;
@@ -154,20 +183,25 @@ private:
         const float top = 60.0f;
         const float brickW = (w - 2.0f * margin - (cols - 1) * gap) / cols;
         const float brickH = 22.0f;
-
         const Color rowColors[] = {
             Color(0.91f, 0.30f, 0.24f), Color(0.95f, 0.61f, 0.07f),
             Color(0.95f, 0.85f, 0.10f), Color(0.18f, 0.80f, 0.44f),
             Color(0.20f, 0.60f, 0.86f), Color(0.61f, 0.35f, 0.71f),
         };
-
         for (int row = 0; row < rows; ++row) {
             for (int col = 0; col < cols; ++col) {
                 Brick brick;
                 brick.position = {margin + col * (brickW + gap), top + row * (brickH + gap)};
                 brick.size = {brickW, brickH};
                 brick.color = rowColors[row % 6];
-                brick.sprite = row % 6; // a different sheet cell per row
+                brick.sprite = row % 6;
+
+                Body body;
+                body.type = BodyType::Static;
+                body.tag = TagBrick;
+                body.position = brick.position;
+                body.size = brick.size;
+                brick.bodyId = m_world.AddBody(body);
                 m_bricks.push_back(brick);
             }
         }
@@ -176,53 +210,40 @@ private:
     void ResetBall() {
         const float w = static_cast<float>(Config().width);
         const float h = static_cast<float>(Config().height);
-        m_paddleSize = {110.0f, 18.0f};
-        m_paddlePos = {(w - m_paddleSize.x) * 0.5f, h - 48.0f};
-        m_ballSize = {14.0f, 14.0f};
-        m_ballPos = {(w - m_ballSize.x) * 0.5f, h - 90.0f};
-        m_ballVel = {220.0f, -320.0f};
+        if (Body* ball = m_world.Get(m_ballId)) {
+            ball->position = {(w - kBallSize) * 0.5f, h - 90.0f};
+            ball->velocity = {220.0f, -320.0f};
+        }
+        if (Body* paddle = m_world.Get(m_paddleId))
+            paddle->position.x = (w - kPaddleW) * 0.5f;
     }
 
-    void BounceOffWalls() {
-        const float w = static_cast<float>(Config().width);
-        const float h = static_cast<float>(Config().height);
-        if (m_ballPos.x < 0.0f) {
-            m_ballPos.x = 0.0f;
-            m_ballVel.x = -m_ballVel.x;
-        }
-        if (m_ballPos.x + m_ballSize.x > w) {
-            m_ballPos.x = w - m_ballSize.x;
-            m_ballVel.x = -m_ballVel.x;
-        }
-        if (m_ballPos.y < 0.0f) {
-            m_ballPos.y = 0.0f;
-            m_ballVel.y = -m_ballVel.y;
-        }
-        if (m_ballPos.y > h) // fell past the paddle: lose the ball
-            ResetBall();
-    }
-
-    void BounceOffPaddle() {
-        if (m_ballVel.y <= 0.0f || !Overlaps(m_ballPos, m_ballSize, m_paddlePos, m_paddleSize))
-            return;
-        m_ballPos.y = m_paddlePos.y - m_ballSize.y;
-        m_ballVel.y = -m_ballVel.y;
-        // Deflect based on where the ball struck the paddle.
-        const float ballCenter = m_ballPos.x + m_ballSize.x * 0.5f;
-        const float paddleCenter = m_paddlePos.x + m_paddleSize.x * 0.5f;
-        const float offset = (ballCenter - paddleCenter) / (m_paddleSize.x * 0.5f);
-        m_ballVel.x = Clamp(offset, -1.0f, 1.0f) * 320.0f;
-    }
-
-    void BounceOffBricks() {
-        for (Brick& brick : m_bricks) {
-            if (!brick.alive)
+    void HandleContacts() {
+        for (const Contact& c : m_world.Contacts()) {
+            const int other = (c.a == m_ballId) ? c.b : (c.b == m_ballId ? c.a : -1);
+            if (other < 0)
                 continue;
-            if (Overlaps(m_ballPos, m_ballSize, brick.position, brick.size)) {
-                brick.alive = false;
-                m_score += 10;
-                m_ballVel.y = -m_ballVel.y;
-                break; // one brick per frame keeps the response stable
+            Body* ob = m_world.Get(other);
+            if (ob == nullptr)
+                continue;
+
+            if (ob->tag == TagBrick) {
+                for (Brick& brick : m_bricks) {
+                    if (brick.alive && brick.bodyId == other) {
+                        brick.alive = false;
+                        m_world.RemoveBody(other);
+                        m_score += 10;
+                        break;
+                    }
+                }
+            } else if (ob->tag == TagPaddle) {
+                // Deflect based on where the ball struck the paddle.
+                if (Body* ball = m_world.Get(m_ballId)) {
+                    const float ballCenter = ball->position.x + kBallSize * 0.5f;
+                    const float paddleCenter = ob->position.x + kPaddleW * 0.5f;
+                    const float offset = (ballCenter - paddleCenter) / (kPaddleW * 0.5f);
+                    ball->velocity.x = Clamp(offset, -1.0f, 1.0f) * 320.0f;
+                }
             }
         }
     }
@@ -247,13 +268,12 @@ private:
     SpriteSheet m_brickSheet;
     TextureAtlas m_atlas;
     BitmapFont m_font;
-    int m_score = 0;
+
+    PhysicsWorld m_world;
+    int m_ballId = -1;
+    int m_paddleId = -1;
     std::vector<Brick> m_bricks;
-    Vec2 m_paddlePos;
-    Vec2 m_paddleSize;
-    Vec2 m_ballPos;
-    Vec2 m_ballSize;
-    Vec2 m_ballVel;
+    int m_score = 0;
 };
 
 Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {

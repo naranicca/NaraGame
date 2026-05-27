@@ -20,6 +20,8 @@
 
 #include "NaraGame/math/Math.h"
 
+#include "NaraGame/physics/Physics2D.h"
+
 #include "NaraGame/platform/Window.h"
 #include "NaraGame/input/Input.h"
 
