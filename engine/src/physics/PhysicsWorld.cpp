@@ -14,6 +14,16 @@ bool Overlap(const Vec2& aMin, const Vec2& aMax, const Vec2& bMin, const Vec2& b
 // slab/Minkowski sweep.
 float Swept(const Vec2& aMin, const Vec2& aMax, const Vec2& delta, const Vec2& bMin,
             const Vec2& bMax, Vec2& normal) {
+    normal = {0.0f, 0.0f};
+
+    // An axis with no motion can only collide if the boxes already overlap on it
+    // (used by the per-axis resolution below; without this a horizontal-only move
+    // would falsely collide with tiles above/below).
+    if (delta.x == 0.0f && (aMax.x <= bMin.x || aMin.x >= bMax.x))
+        return 1.0f;
+    if (delta.y == 0.0f && (aMax.y <= bMin.y || aMin.y >= bMax.y))
+        return 1.0f;
+
     const float inf = std::numeric_limits<float>::infinity();
 
     float xInvEntry, xInvExit, yInvEntry, yInvExit;
@@ -70,40 +80,51 @@ void PhysicsWorld::Clear() {
     m_contacts.clear();
 }
 
+// Sweep `b` along one axis (delta has a single non-zero component) against all
+// static/kinematic solids, snap to the earliest contact, and return the hit
+// body id (-1 if none) with its normal.
+int PhysicsWorld::SweepAxis(Body& b, const Vec2& delta, Vec2& outNormal) {
+    const Vec2 aMin = b.position;
+    const Vec2 aMax = b.position + b.size;
+    float bestT = 1.0f;
+    Vec2 bestN{0.0f, 0.0f};
+    int bestId = -1;
+    for (Body& o : m_bodies) {
+        if (!o.active || o.id == b.id || o.type == BodyType::Dynamic || o.sensor)
+            continue;
+        Vec2 n;
+        const float t = Swept(aMin, aMax, delta, o.position, o.position + o.size, n);
+        if (t < bestT) { bestT = t; bestN = n; bestId = o.id; }
+    }
+    b.position += delta * bestT;
+    if (bestId >= 0)
+        b.position += bestN * kSkin; // nudge off the surface
+    outNormal = bestN;
+    return bestId;
+}
+
 void PhysicsWorld::ResolveDynamic(Body& b, float dt) {
     b.onGround = false;
-    Vec2 delta = b.velocity * dt;
 
-    for (int iter = 0; iter < 4; ++iter) {
-        if (LengthSq(delta) < 1e-8f)
-            break;
-
-        const Vec2 aMin = b.position;
-        const Vec2 aMax = b.position + b.size;
-        float bestT = 1.0f;
-        Vec2 bestN{0.0f, 0.0f};
-        int bestId = -1;
-        for (Body& o : m_bodies) {
-            if (!o.active || o.id == b.id || o.type == BodyType::Dynamic || o.sensor)
-                continue;
-            Vec2 n;
-            const float t = Swept(aMin, aMax, delta, o.position, o.position + o.size, n);
-            if (t < bestT) { bestT = t; bestN = n; bestId = o.id; }
+    // Resolve one axis at a time: each sweep is 1D, so the contact normal is
+    // unambiguous and the body never snags on the corner between two tiles.
+    if (b.velocity.x != 0.0f) {
+        Vec2 normal;
+        const int hit = SweepAxis(b, {b.velocity.x * dt, 0.0f}, normal);
+        if (hit >= 0) {
+            m_contacts.push_back(Contact{b.id, hit, normal});
+            b.velocity.x = -b.restitution * b.velocity.x;
         }
-
-        b.position += delta * bestT;
-        if (bestId < 0)
-            break; // travelled the full delta with no hit
-
-        b.position += bestN * kSkin; // nudge off the surface
-        m_contacts.push_back(Contact{b.id, bestId, bestN});
-        if (bestN.y < 0.0f)
-            b.onGround = true;
-
-        const float e = b.restitution;
-        const Vec2 remaining = delta * (1.0f - bestT);
-        b.velocity = b.velocity - bestN * ((1.0f + e) * Dot(b.velocity, bestN));
-        delta = remaining - bestN * ((1.0f + e) * Dot(remaining, bestN));
+    }
+    if (b.velocity.y != 0.0f) {
+        Vec2 normal;
+        const int hit = SweepAxis(b, {0.0f, b.velocity.y * dt}, normal);
+        if (hit >= 0) {
+            m_contacts.push_back(Contact{b.id, hit, normal});
+            if (normal.y < 0.0f)
+                b.onGround = true;
+            b.velocity.y = -b.restitution * b.velocity.y;
+        }
     }
 }
 

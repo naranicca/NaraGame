@@ -51,6 +51,7 @@ public:
 
 private:
     void ResolveDynamic(Body& body, float dt);
+    int SweepAxis(Body& body, const Vec2& delta, Vec2& outNormal);
 
     Vec2 m_gravity;
     std::vector<Body> m_bodies;
