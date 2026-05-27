@@ -28,6 +28,7 @@
 #include "NaraGame/renderer/BitmapFont.h"
 #include "NaraGame/renderer/Camera2D.h"
 #include "NaraGame/renderer/Font.h"
+#include "NaraGame/renderer/ParticleSystem.h"
 #include "NaraGame/renderer/Renderer2D.h"
 #include "NaraGame/renderer/SpriteSheet.h"
 #include "NaraGame/renderer/TextureAtlas.h"

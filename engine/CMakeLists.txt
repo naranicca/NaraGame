@@ -20,6 +20,7 @@ set(NARAGAME_SOURCES
     src/renderer/BitmapFont.cpp
     src/renderer/Camera2D.cpp
     src/renderer/Font.cpp
+    src/renderer/ParticleSystem.cpp
     src/renderer/Renderer2D.cpp
     src/renderer/SpriteSheet.cpp
     src/renderer/TextureAtlas.cpp

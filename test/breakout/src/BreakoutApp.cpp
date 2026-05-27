@@ -12,6 +12,7 @@
 #include <NaraGame/math/Math.h>
 #include <NaraGame/physics/Physics2D.h>
 #include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/renderer/ParticleSystem.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/SpriteSheet.h>
 #include <NaraGame/renderer/TextureAtlas.h>
@@ -97,6 +98,7 @@ protected:
 
         m_world.Step(dt);
         HandleContacts();
+        m_particles.Update(dt);
 
         if (Body* ball = m_world.Get(m_ballId))
             if (ball->position.y > static_cast<float>(Config().height))
@@ -123,6 +125,8 @@ protected:
         if (Body* ball = m_world.Get(m_ballId))
             m_renderer.DrawQuad(ball->position, {kBallSize, kBallSize}, m_atlas.Get("ball"),
                                 Color(1.0f, 0.85f, 0.3f, 1.0f));
+
+        m_particles.Draw(m_renderer);
 
         m_renderer.DrawText(m_font, "SCORE " + std::to_string(m_score), {16.0f, 18.0f},
                             Color(0.95f, 0.95f, 1.0f), 1.5f);
@@ -233,6 +237,7 @@ private:
                         brick.alive = false;
                         m_world.RemoveBody(other);
                         m_score += 10;
+                        EmitBrickBurst(brick);
                         break;
                     }
                 }
@@ -246,6 +251,22 @@ private:
                 }
             }
         }
+    }
+
+    void EmitBrickBurst(const Brick& brick) {
+        ParticleBurst burst;
+        burst.position = {brick.position.x + brick.size.x * 0.5f,
+                          brick.position.y + brick.size.y * 0.5f};
+        burst.count = 16;
+        burst.minSpeed = 60.0f;
+        burst.maxSpeed = 240.0f;
+        burst.minLife = 0.3f;
+        burst.maxLife = 0.7f;
+        burst.startSize = 7.0f;
+        burst.startColor = brick.color;
+        burst.endColor = Color(brick.color.r, brick.color.g, brick.color.b, 0.0f);
+        burst.gravity = {0.0f, 700.0f}; // debris falls
+        m_particles.Emit(burst);
     }
 
     bool AllBricksCleared() const {
@@ -270,6 +291,7 @@ private:
     BitmapFont m_font;
 
     PhysicsWorld m_world;
+    ParticleSystem m_particles;
     int m_ballId = -1;
     int m_paddleId = -1;
     std::vector<Brick> m_bricks;

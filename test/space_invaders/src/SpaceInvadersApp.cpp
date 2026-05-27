@@ -15,6 +15,7 @@
 #include <NaraGame/math/Math.h>
 #include <NaraGame/physics/Physics2D.h>
 #include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/renderer/ParticleSystem.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/TextureAtlas.h>
 #include <NaraGame/renderer/rhi/RHIDevice.h>
@@ -131,6 +132,7 @@ protected:
         m_world.Step(dt); // moves bullet + bombs, reports sensor overlaps
         ProcessContacts();
         CleanupProjectiles();
+        m_particles.Update(dt);
 
         if (m_score > m_hiScore) {
             m_hiScore = m_score;
@@ -163,6 +165,8 @@ protected:
         if (const Body* bullet = m_world.Get(m_bulletId); bullet != nullptr && bullet->active)
             m_renderer.DrawQuad(bullet->position, {kBulletW, kBulletH}, m_atlas.Get("bullet"),
                                 Color(1.0f, 1.0f, 0.6f));
+
+        m_particles.Draw(m_renderer);
 
         DrawHud();
         if (m_gameOver) {
@@ -267,6 +271,22 @@ private:
     }
 
     static int RowPoints(int row) { return row == 0 ? 30 : (row <= 2 ? 20 : 10); }
+
+    void EmitAlienBurst(const Alien& a) {
+        const Vec2 p = AlienPos(a);
+        const Color tint = RowTint(a.row);
+        ParticleBurst burst;
+        burst.position = {p.x + kAlienW * 0.5f, p.y + kAlienH * 0.5f};
+        burst.count = 18;
+        burst.minSpeed = 60.0f;
+        burst.maxSpeed = 220.0f;
+        burst.minLife = 0.3f;
+        burst.maxLife = 0.6f;
+        burst.startSize = 6.0f;
+        burst.startColor = tint;
+        burst.endColor = Color(tint.r, tint.g, tint.b, 0.0f);
+        m_particles.Emit(burst);
+    }
 
     void UpdatePlayer(float dt) {
         if (Input::IsKeyDown(Key::Left))
@@ -379,6 +399,7 @@ private:
                         if (Body* bullet = m_world.Get(m_bulletId))
                             bullet->active = false;
                         bulletConsumed = true;
+                        EmitAlienBurst(a);
                         if (m_explosion.Valid())
                             m_audio->PlaySound(m_explosion, 0.4f);
                         break;
@@ -432,6 +453,7 @@ private:
     BitmapFont m_font;
 
     PhysicsWorld m_world;
+    ParticleSystem m_particles;
     int m_playerId = -1;
     int m_bulletId = -1;
     int m_bombIds[kMaxBombs] = {-1, -1, -1};

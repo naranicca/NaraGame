@@ -19,6 +19,7 @@
 #include <NaraGame/renderer/BitmapFont.h>
 #include <NaraGame/renderer/Camera2D.h>
 #include <NaraGame/renderer/Font.h>
+#include <NaraGame/renderer/ParticleSystem.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/SpriteSheet.h>
 #include <NaraGame/renderer/TextureAtlas.h>
@@ -235,6 +236,7 @@ public:
         TurnGoombasAtWalls();
         CollectCoins();
         ResolveGoombaHits();
+        m_particles.Update(dt);
 
         Body* p = m_world.Get(m_playerId);
         if (p == nullptr)
@@ -275,6 +277,7 @@ public:
             r.DrawQuad(p->position, {kPlayerW, kPlayerH}, m_ctx->chars->Get(name), Color::White(),
                        m_facing < 0.0f);
         }
+        m_particles.Draw(r);
         r.End();
 
         r.Begin(Renderer2D::ScreenCamera(m_ctx->screenW, m_ctx->screenH));
@@ -399,6 +402,16 @@ private:
                 p->velocity.y = -kStompBounce;
                 m_ctx->score += 200;
                 m_ctx->Sfx(m_ctx->sfxStomp);
+                ParticleBurst burst;
+                burst.position = {gb->position.x + kGoombaW * 0.5f, gb->position.y + kGoombaH};
+                burst.count = 14;
+                burst.minSpeed = 40.0f;
+                burst.maxSpeed = 170.0f;
+                burst.startSize = 6.0f;
+                burst.startColor = Color(0.6f, 0.4f, 0.2f);
+                burst.endColor = Color(0.6f, 0.4f, 0.2f, 0.0f);
+                burst.gravity = {0.0f, 600.0f};
+                m_particles.Emit(burst);
             } else {
                 Die();
                 return;
@@ -421,6 +434,17 @@ private:
                     ++m_ctx->coins;
                     m_ctx->score += 100;
                     m_ctx->Sfx(m_ctx->sfxCoin);
+                    ParticleBurst burst;
+                    burst.position = {tx * kT + kT * 0.5f, ty * kT + kT * 0.5f};
+                    burst.count = 12;
+                    burst.minSpeed = 50.0f;
+                    burst.maxSpeed = 150.0f;
+                    burst.minLife = 0.25f;
+                    burst.maxLife = 0.5f;
+                    burst.startSize = 5.0f;
+                    burst.startColor = Color(1.0f, 0.9f, 0.3f);
+                    burst.endColor = Color(1.0f, 0.9f, 0.3f, 0.0f);
+                    m_particles.Emit(burst);
                 }
     }
 
@@ -456,6 +480,7 @@ private:
     Vec2 m_spawn;
 
     PhysicsWorld m_world;
+    ParticleSystem m_particles;
     int m_playerId = -1;
     std::vector<Goomba> m_goombas;
     float m_facing = 1.0f;
