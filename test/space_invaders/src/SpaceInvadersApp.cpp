@@ -1,18 +1,19 @@
-// Space Invaders (스페이스 인베이더) — test game on the NaraGame engine.
-//
-// Exercises the engine: window + D3D11 + Renderer2D batching + a packed sprite
-// atlas + bitmap-font text + keyboard input. Controls: Left/Right move,
-// Space fires, ESC quits, Enter restarts after game over.
+// Space Invaders (스페이스 인베이더) — collision unified through the engine's
+// PhysicsWorld using sensors: aliens + player are kinematic sensor bodies (the
+// game positions them), bullets + bombs are dynamic bodies that move by velocity
+// (no gravity). The world's sensor pass reports overlaps as contacts.
+// Controls: Left/Right move, Space fires, ESC quits, Enter restarts.
 
 #include <NaraGame/assets/TextureLoader.h>
+#include <NaraGame/audio/AudioClip.h>
+#include <NaraGame/audio/AudioDevice.h>
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
 #include <NaraGame/core/Log.h>
-#include <NaraGame/audio/AudioClip.h>
-#include <NaraGame/audio/AudioDevice.h>
 #include <NaraGame/input/Input.h>
 #include <NaraGame/io/ConfigFile.h>
 #include <NaraGame/math/Math.h>
+#include <NaraGame/physics/Physics2D.h>
 #include <NaraGame/renderer/BitmapFont.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/TextureAtlas.h>
@@ -62,20 +63,13 @@ constexpr float kBombH = 20.0f;
 constexpr float kBombSpeed = 300.0f;
 constexpr int kMaxBombs = 3;
 
-bool Overlaps(const Vec2& aPos, const Vec2& aSize, const Vec2& bPos, const Vec2& bSize) {
-    return aPos.x < bPos.x + bSize.x && aPos.x + aSize.x > bPos.x &&
-           aPos.y < bPos.y + bSize.y && aPos.y + aSize.y > bPos.y;
-}
+enum BodyTag : uint32_t { TagAlien = 1, TagPlayer = 2, TagBullet = 3, TagBomb = 4 };
 
 struct Alien {
     int row = 0;
     int col = 0;
+    int bodyId = -1;
     bool alive = true;
-};
-
-struct Bomb {
-    Vec2 position;
-    bool active = false;
 };
 
 } // namespace
@@ -107,7 +101,6 @@ protected:
         m_shoot = LoadWav(assets + "/shoot.wav");
         m_explosion = LoadWav(assets + "/explosion.wav");
 
-        // Persisted high score (survives across runs).
         m_save.Load(kSavePath);
         m_hiScore = m_save.GetInt("hiscore", 0);
 
@@ -132,12 +125,13 @@ protected:
         }
 
         UpdatePlayer(dt);
-        UpdateBullet(dt);
         UpdateAliens(dt);
         UpdateBombs(dt);
-        CheckCollisions();
 
-        // Beat the record? Persist it immediately.
+        m_world.Step(dt); // moves bullet + bombs, reports sensor overlaps
+        ProcessContacts();
+        CleanupProjectiles();
+
         if (m_score > m_hiScore) {
             m_hiScore = m_score;
             m_save.SetInt("hiscore", m_hiScore);
@@ -154,23 +148,20 @@ protected:
         GetDevice().Clear(Color(0.02f, 0.02f, 0.06f, 1.0f));
         m_renderer.Begin(Renderer2D::ScreenCamera(kWidth, kHeight));
 
-        // Aliens (animated, colored per row).
         for (const Alien& a : m_aliens) {
-            if (!a.alive)
-                continue;
-            m_renderer.DrawQuad(AlienPos(a), {kAlienW, kAlienH}, AlienSprite(a.row), RowTint(a.row));
+            if (a.alive)
+                m_renderer.DrawQuad(AlienPos(a), {kAlienW, kAlienH}, AlienSprite(a.row),
+                                    RowTint(a.row));
         }
-
-        // Bombs, player, bullet.
-        for (const Bomb& b : m_bombs) {
-            if (b.active)
-                m_renderer.DrawQuad(b.position, {kBombW, kBombH}, m_atlas.Get("bomb"),
+        for (int id : m_bombIds) {
+            if (const Body* b = m_world.Get(id); b != nullptr && b->active)
+                m_renderer.DrawQuad(b->position, {kBombW, kBombH}, m_atlas.Get("bomb"),
                                     Color(1.0f, 0.4f, 0.35f));
         }
         m_renderer.DrawQuad(m_playerPos, {kPlayerW, kPlayerH}, m_atlas.Get("player"),
                             Color(0.4f, 0.95f, 0.5f));
-        if (m_bulletActive)
-            m_renderer.DrawQuad(m_bulletPos, {kBulletW, kBulletH}, m_atlas.Get("bullet"),
+        if (const Body* bullet = m_world.Get(m_bulletId); bullet != nullptr && bullet->active)
+            m_renderer.DrawQuad(bullet->position, {kBulletW, kBulletH}, m_atlas.Get("bullet"),
                                 Color(1.0f, 1.0f, 0.6f));
 
         DrawHud();
@@ -180,7 +171,6 @@ protected:
                          Color(0.9f, 0.9f, 1.0f));
             DrawCentered("PRESS ENTER TO RESTART", 500.0f, 1.4f, Color(0.6f, 0.6f, 0.7f));
         }
-
         m_renderer.End();
     }
 
@@ -202,20 +192,55 @@ private:
     }
 
     void SpawnWave() {
+        m_world.Clear();
+        m_world.SetGravity({0.0f, 0.0f});
+
         m_aliens.clear();
         m_aliens.reserve(kTotal);
-        for (int row = 0; row < kRows; ++row)
-            for (int col = 0; col < kCols; ++col)
-                m_aliens.push_back(Alien{row, col, true});
+        m_formation = {kStartX, kStartY};
+        for (int row = 0; row < kRows; ++row) {
+            for (int col = 0; col < kCols; ++col) {
+                Alien a{row, col, -1, true};
+                Body body;
+                body.type = BodyType::Kinematic; // positioned by the game
+                body.sensor = true;              // overlap-only
+                body.tag = TagAlien;
+                body.size = {kAlienW, kAlienH};
+                body.position = AlienPos(a);
+                a.bodyId = m_world.AddBody(body);
+                m_aliens.push_back(a);
+            }
+        }
         m_aliveCount = kTotal;
 
-        m_formation = {kStartX, kStartY};
-        m_dir = 1.0f;
-        m_bulletActive = false;
-        for (Bomb& b : m_bombs)
-            b.active = false;
-
         m_playerPos = {(kWidth - kPlayerW) * 0.5f, kPlayerY};
+        Body player;
+        player.type = BodyType::Kinematic;
+        player.sensor = true;
+        player.tag = TagPlayer;
+        player.size = {kPlayerW, kPlayerH};
+        player.position = m_playerPos;
+        m_playerId = m_world.AddBody(player);
+
+        Body bullet;
+        bullet.type = BodyType::Dynamic;
+        bullet.tag = TagBullet;
+        bullet.size = {kBulletW, kBulletH};
+        bullet.gravityScale = 0.0f;
+        m_bulletId = m_world.AddBody(bullet);
+        m_world.Get(m_bulletId)->active = false;
+
+        for (int i = 0; i < kMaxBombs; ++i) {
+            Body bomb;
+            bomb.type = BodyType::Dynamic;
+            bomb.tag = TagBomb;
+            bomb.size = {kBombW, kBombH};
+            bomb.gravityScale = 0.0f;
+            m_bombIds[i] = m_world.AddBody(bomb);
+            m_world.Get(m_bombIds[i])->active = false;
+        }
+
+        m_dir = 1.0f;
         m_bombTimer = 1.0f;
         m_animTimer = 0.0f;
         m_frame = 0;
@@ -233,10 +258,10 @@ private:
 
     static Color RowTint(int row) {
         switch (row) {
-            case 0: return Color(0.4f, 0.9f, 1.0f);  // squid - cyan
-            case 1: return Color(1.0f, 0.5f, 0.8f);  // crab - pink
-            case 2: return Color(1.0f, 0.8f, 0.3f);  // crab - amber
-            case 3: return Color(0.6f, 1.0f, 0.5f);  // crab - green
+            case 0: return Color(0.4f, 0.9f, 1.0f);
+            case 1: return Color(1.0f, 0.5f, 0.8f);
+            case 2: return Color(1.0f, 0.8f, 0.3f);
+            case 3: return Color(0.6f, 1.0f, 0.5f);
             default: return Color(0.85f, 0.85f, 0.95f);
         }
     }
@@ -250,20 +275,18 @@ private:
             m_playerPos.x += kPlayerSpeed * dt;
         m_playerPos.x = Clamp(m_playerPos.x, 0.0f, kWidth - kPlayerW);
 
-        if (Input::IsKeyDown(Key::Space) && !m_bulletActive) {
-            m_bulletActive = true;
-            m_bulletPos = {m_playerPos.x + (kPlayerW - kBulletW) * 0.5f, m_playerPos.y - kBulletH};
+        Body* bullet = m_world.Get(m_bulletId);
+        if (Input::IsKeyDown(Key::Space) && bullet != nullptr && !bullet->active) {
+            bullet->active = true;
+            bullet->position = {m_playerPos.x + (kPlayerW - kBulletW) * 0.5f,
+                                m_playerPos.y - kBulletH};
+            bullet->velocity = {0.0f, -kBulletSpeed};
             if (m_shoot.Valid())
                 m_audio->PlaySound(m_shoot, 0.4f);
         }
-    }
 
-    void UpdateBullet(float dt) {
-        if (!m_bulletActive)
-            return;
-        m_bulletPos.y -= kBulletSpeed * dt;
-        if (m_bulletPos.y + kBulletH < 0.0f)
-            m_bulletActive = false;
+        if (Body* p = m_world.Get(m_playerId))
+            p->position = m_playerPos; // keep the sensor body in sync
     }
 
     void UpdateAliens(float dt) {
@@ -273,7 +296,6 @@ private:
             m_frame ^= 1;
         }
 
-        // Speed grows as the wave thins out and with each level.
         const float thinning = 1.0f + (static_cast<float>(kTotal - m_aliveCount) / kTotal) * 2.2f;
         const float speed = 36.0f * (1.0f + (m_level - 1) * 0.25f) * thinning;
         m_formation.x += m_dir * speed * dt;
@@ -298,31 +320,29 @@ private:
             m_formation.y += kDropY;
         }
 
+        // Sync the kinematic sensor bodies to the formation.
+        for (const Alien& a : m_aliens) {
+            if (!a.alive)
+                continue;
+            if (Body* ab = m_world.Get(a.bodyId))
+                ab->position = AlienPos(a);
+        }
+
         if (maxBottom >= m_playerPos.y)
-            m_gameOver = true; // aliens reached the player
+            m_gameOver = true;
     }
 
     void UpdateBombs(float dt) {
-        for (Bomb& b : m_bombs) {
-            if (!b.active)
-                continue;
-            b.position.y += kBombSpeed * dt;
-            if (b.position.y > kHeight)
-                b.active = false;
-        }
-
         m_bombTimer -= dt;
         if (m_bombTimer > 0.0f || m_aliveCount == 0)
             return;
         m_bombTimer = std::uniform_real_distribution<float>(0.6f, 1.5f)(m_rng);
 
-        // Find a free bomb slot and a random living alien to fire from.
-        Bomb* slot = nullptr;
-        for (Bomb& b : m_bombs)
-            if (!b.active) {
-                slot = &b;
-                break;
-            }
+        Body* slot = nullptr;
+        for (int id : m_bombIds) {
+            Body* b = m_world.Get(id);
+            if (b != nullptr && !b->active) { slot = b; break; }
+        }
         if (slot == nullptr)
             return;
 
@@ -337,35 +357,50 @@ private:
         const Vec2 p = AlienPos(*shooter);
         slot->active = true;
         slot->position = {p.x + (kAlienW - kBombW) * 0.5f, p.y + kAlienH};
+        slot->velocity = {0.0f, kBombSpeed};
     }
 
-    void CheckCollisions() {
-        // Player bullet vs aliens.
-        if (m_bulletActive) {
-            for (Alien& a : m_aliens) {
-                if (!a.alive)
-                    continue;
-                if (Overlaps(m_bulletPos, {kBulletW, kBulletH}, AlienPos(a), {kAlienW, kAlienH})) {
-                    a.alive = false;
-                    --m_aliveCount;
-                    m_score += RowPoints(a.row);
-                    m_bulletActive = false;
-                    if (m_explosion.Valid())
-                        m_audio->PlaySound(m_explosion, 0.4f);
-                    break;
-                }
-            }
-        }
-
-        // Bombs vs player.
-        for (Bomb& b : m_bombs) {
-            if (!b.active)
+    void ProcessContacts() {
+        bool bulletConsumed = false;
+        for (const Contact& c : m_world.Contacts()) {
+            const Body* dyn = m_world.Get(c.a); // dynamic side
+            const Body* sen = m_world.Get(c.b); // sensor side
+            if (dyn == nullptr || sen == nullptr)
                 continue;
-            if (Overlaps(b.position, {kBombW, kBombH}, m_playerPos, {kPlayerW, kPlayerH})) {
-                b.active = false;
+
+            if (dyn->tag == TagBullet && sen->tag == TagAlien && !bulletConsumed) {
+                for (Alien& a : m_aliens) {
+                    if (a.alive && a.bodyId == c.b) {
+                        a.alive = false;
+                        --m_aliveCount;
+                        m_score += RowPoints(a.row);
+                        if (Body* ab = m_world.Get(a.bodyId))
+                            ab->active = false;
+                        if (Body* bullet = m_world.Get(m_bulletId))
+                            bullet->active = false;
+                        bulletConsumed = true;
+                        if (m_explosion.Valid())
+                            m_audio->PlaySound(m_explosion, 0.4f);
+                        break;
+                    }
+                }
+            } else if (dyn->tag == TagBomb && sen->tag == TagPlayer) {
+                if (Body* bomb = m_world.Get(c.a))
+                    bomb->active = false;
                 if (--m_lives <= 0)
                     m_gameOver = true;
             }
+        }
+    }
+
+    void CleanupProjectiles() {
+        if (Body* bullet = m_world.Get(m_bulletId))
+            if (bullet->active && bullet->position.y + kBulletH < 0.0f)
+                bullet->active = false;
+        for (int id : m_bombIds) {
+            if (Body* b = m_world.Get(id))
+                if (b->active && b->position.y > kHeight)
+                    b->active = false;
         }
     }
 
@@ -374,16 +409,14 @@ private:
                             Color(0.95f, 0.95f, 1.0f), 1.4f);
         m_renderer.DrawText(m_font, "LEVEL " + std::to_string(m_level), {16.0f, 46.0f},
                             Color(0.7f, 0.8f, 1.0f), 1.0f);
-
         const std::string hi = "HI-SCORE " + std::to_string(m_hiScore);
         const float hiW = m_font.Measure(hi, 1.4f).x;
         m_renderer.DrawText(m_font, hi, {(kWidth - hiW) * 0.5f, 16.0f}, Color(1.0f, 0.85f, 0.3f),
                             1.4f);
-
-        // Lives as little ships on the right.
         for (int i = 0; i < m_lives; ++i) {
             const Vec2 pos{kWidth - 40.0f - i * 40.0f, 18.0f};
-            m_renderer.DrawQuad(pos, {32.0f, 20.0f}, m_atlas.Get("player"), Color(0.4f, 0.95f, 0.5f));
+            m_renderer.DrawQuad(pos, {32.0f, 20.0f}, m_atlas.Get("player"),
+                                Color(0.4f, 0.95f, 0.5f));
         }
     }
 
@@ -398,6 +431,11 @@ private:
     TextureAtlas m_atlas;
     BitmapFont m_font;
 
+    PhysicsWorld m_world;
+    int m_playerId = -1;
+    int m_bulletId = -1;
+    int m_bombIds[kMaxBombs] = {-1, -1, -1};
+
     std::vector<Alien> m_aliens;
     int m_aliveCount = 0;
     Vec2 m_formation;
@@ -406,10 +444,6 @@ private:
     int m_frame = 0;
 
     Vec2 m_playerPos;
-    Vec2 m_bulletPos;
-    bool m_bulletActive = false;
-
-    Bomb m_bombs[kMaxBombs];
     float m_bombTimer = 1.0f;
 
     int m_score = 0;

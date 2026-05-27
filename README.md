@@ -96,6 +96,6 @@ $env:NARAGAME_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d1
 - [x] 사운드 — AudioDevice(XAudio2 백엔드) + 직접 구현한 WAV 디코더, SFX 믹싱 + 루프 BGM
 - [x] **Vulkan 백엔드** — 두 번째 네이티브 RHI, 런타임 선택(`NARAGAME_RHI=vulkan`). 스왑체인·렌더패스·SPIR-V 셰이더·디스크립터·링버퍼로 세 게임 모두 D3D11과 동일하게 렌더 (검증 레이어 클린)
 - [x] 공용 2D 물리 (PhysicsWorld) — 정적/키네마틱/동적 바디 + 중력 + **스윕 AABB 충돌(터널링 방지)** + 반발 계수 + 센서 + 접촉 보고
-- [x] Breakout·Mario를 공용 물리로 전환 — Breakout(공=반발 바디, 벽/벽돌=정적), Mario(솔리드 타일=정적 바디, 플레이어·굼바=동적 바디로 중력/점프/타일 충돌)
+- [x] 세 게임 모두 공용 물리로 통일 — Breakout(공=반발 바디, 벽/벽돌=정적), Mario(솔리드 타일=정적, 플레이어·굼바=동적+중력/점프/타일 충돌), Space Invaders(총알·폭탄=동적, 외계인·플레이어=센서 → 겹침 접촉)
 - [ ] Metal 백엔드 (macOS/iOS)
 - [ ] macOS · Android · iOS 윈도우 실제 구현
