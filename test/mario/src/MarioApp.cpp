@@ -56,8 +56,8 @@ bool IsSolidTile(int id) { return id >= GROUND && id <= HARD; }
 constexpr float kGravity = 2300.0f;
 constexpr float kFastFall = 2.1f;
 constexpr float kMaxFall = 950.0f;
-constexpr float kMoveSpeed = 235.0f;
-constexpr float kJumpSpeed = 720.0f;
+constexpr float kMoveSpeed = 260.0f;
+constexpr float kJumpSpeed = 900.0f; // ~176px (5.5 tiles) high — clears the tallest pipe
 constexpr float kStompBounce = 430.0f;
 constexpr float kPlayerW = 26.0f;
 constexpr float kPlayerH = 34.0f;
