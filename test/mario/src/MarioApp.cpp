@@ -47,6 +47,10 @@ constexpr float kScreenH = 576.0f;
 constexpr int kTile = 32;
 constexpr float kT = static_cast<float>(kTile);
 constexpr int kMaxLevel = 2;
+// Camera zoom: the window shows 32 tiles wide at 1:1, which renders everything
+// at half the classic-Mario scale. 2x gives the iconic 16-tile view and makes
+// the characters/tiles read at a proper size.
+constexpr float kZoom = 2.0f;
 
 enum Tile { EMPTY = -1, GROUND = 0, DIRT = 1, BRICK = 2, QUESTION = 3,
             PIPE_TL = 4, PIPE_TR = 5, PIPE_BL = 6, PIPE_BR = 7, HARD = 8, COIN = 9 };
@@ -164,6 +168,7 @@ public:
         m_worldSize = m_map.WorldSize();
 
         m_camera = Camera2D(m_ctx->screenW, m_ctx->screenH);
+        m_camera.SetZoom(kZoom); // before SetBounds: clamping uses the zoomed view size
         m_camera.SetBounds({0.0f, 0.0f}, m_worldSize);
 
         // Physics world: solid tiles become static bodies (dynamic bodies for
