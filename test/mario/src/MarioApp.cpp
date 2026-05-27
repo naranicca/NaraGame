@@ -166,21 +166,13 @@ public:
         m_camera = Camera2D(m_ctx->screenW, m_ctx->screenH);
         m_camera.SetBounds({0.0f, 0.0f}, m_worldSize);
 
-        // Physics world: a static body per solid tile, dynamic bodies for actors.
+        // Physics world: solid tiles become static bodies (dynamic bodies for
+        // actors). Adjacent solids are merged into larger rectangles (greedy
+        // meshing) so the player slides along smooth surfaces instead of catching
+        // on the seams between per-tile colliders.
         m_world.Clear();
         m_world.SetGravity({0.0f, kGravity});
-        for (int y = 0; y < m_map.Height(); ++y) {
-            for (int x = 0; x < m_map.Width(); ++x) {
-                if (!IsSolidTile(m_map.GetTile(x, y)))
-                    continue;
-                Body tile;
-                tile.type = BodyType::Static;
-                tile.tag = TagTile;
-                tile.position = {x * kT, y * kT};
-                tile.size = {kT, kT};
-                m_world.AddBody(tile);
-            }
-        }
+        BuildTileColliders();
 
         m_goombas.clear();
         m_spawn = {120.0f, kT * 14.0f};
@@ -293,6 +285,48 @@ public:
     }
 
 private:
+    // Merge contiguous solid tiles into maximal rectangles and add one static
+    // body per rectangle. Removes the internal seams that a fast/jumping body
+    // can otherwise snag on.
+    void BuildTileColliders() {
+        const int mw = m_map.Width();
+        const int mh = m_map.Height();
+        std::vector<char> used(static_cast<size_t>(mw) * mh, 0);
+        auto solid = [&](int x, int y) { return IsSolidTile(m_map.GetTile(x, y)); };
+
+        for (int y = 0; y < mh; ++y) {
+            for (int x = 0; x < mw; ++x) {
+                if (used[y * mw + x] || !solid(x, y))
+                    continue;
+                int w = 1;
+                while (x + w < mw && solid(x + w, y) && !used[y * mw + x + w])
+                    ++w;
+                int h = 1;
+                bool extend = true;
+                while (y + h < mh && extend) {
+                    for (int xx = x; xx < x + w; ++xx) {
+                        if (!solid(xx, y + h) || used[(y + h) * mw + xx]) {
+                            extend = false;
+                            break;
+                        }
+                    }
+                    if (extend)
+                        ++h;
+                }
+                for (int yy = y; yy < y + h; ++yy)
+                    for (int xx = x; xx < x + w; ++xx)
+                        used[yy * mw + xx] = 1;
+
+                Body box;
+                box.type = BodyType::Static;
+                box.tag = TagTile;
+                box.position = {x * kT, y * kT};
+                box.size = {w * kT, h * kT};
+                m_world.AddBody(box);
+            }
+        }
+    }
+
     // Set the player body's intended velocity from input (the world integrates
     // gravity and resolves tile collisions during Step).
     void ControlPlayer(float dt) {
