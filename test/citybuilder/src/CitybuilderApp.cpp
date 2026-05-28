@@ -29,6 +29,7 @@
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
 #include <NaraGame/math/Vec2.h>
+#include <NaraGame/renderer/BitmapFont.h>
 #include <NaraGame/renderer/Camera2D.h>
 #include <NaraGame/renderer/IsoTerrain.h>
 #include <NaraGame/renderer/Renderer2D.h>
@@ -38,6 +39,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <string>
@@ -102,6 +104,10 @@ protected:
         m_roadsSheet   = SpriteSheet(m_roadsTexture.get(), 64, 40);
         m_roadCells.assign(static_cast<size_t>(m_terrain.Width()) * m_terrain.Height(), false);
 
+        m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png");
+        m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
+        m_font.SetTracking(-2);
+
         m_camera.SetViewport(static_cast<float>(Config().width),
                              static_cast<float>(Config().height));
         m_camera.SetZoom(1.0f);
@@ -119,6 +125,7 @@ protected:
     void OnStop() override {
         m_slopesTexture.reset();
         m_roadsTexture.reset();
+        m_fontTexture.reset();
         m_renderer.Shutdown();
     }
 
@@ -227,6 +234,14 @@ protected:
                                 Color(1.0f, 0.95f, 0.30f, 1.0f));
         }
 
+        m_renderer.End();
+
+        // HUD pass in screen space — second Begin/End so the text uses
+        // window pixels regardless of camera zoom or pan.
+        const float w = static_cast<float>(Config().width);
+        const float h = static_cast<float>(Config().height);
+        m_renderer.Begin(Renderer2D::ScreenCamera(w, h));
+        DrawHud();
         m_renderer.End();
     }
 
@@ -426,6 +441,52 @@ private:
                             Color(1.0f, 1.0f, 1.0f, 1.0f));
     }
 
+    // Top-left text overlay: title + live hover/camera state + controls help.
+    // Called from a separate Begin/End in OnRender that uses screen-pixel
+    // coords, so the layout doesn't have to undo the camera transform.
+    void DrawHud() {
+        constexpr float kPad = 12.0f;
+        constexpr float kScale = 1.0f;
+        const float lineH = static_cast<float>(m_font.LineHeight()) * kScale;
+        const Color white {1.00f, 1.00f, 1.00f, 1.0f};
+        const Color dim   {0.78f, 0.80f, 0.85f, 1.0f};
+        const Color dimmer{0.55f, 0.57f, 0.62f, 1.0f};
+
+        float y = kPad;
+        auto line = [&](const std::string& s, const Color& c) {
+            m_renderer.DrawText(m_font, s, {kPad, y}, c, kScale);
+            y += lineH;
+        };
+
+        line("CITYBUILDER", white);
+
+        char buf[96];
+        if (m_hoverCornerValid) {
+            std::snprintf(buf, sizeof(buf), "Cell %d,%d  Corner %d,%d h=%d",
+                          m_hoverCellX, m_hoverCellY, m_hoverI, m_hoverJ,
+                          m_terrain.Corner(m_hoverI, m_hoverJ));
+        } else {
+            std::snprintf(buf, sizeof(buf), "Cell  -");
+        }
+        line(buf, dim);
+
+        int roadCount = 0;
+        for (bool v : m_roadCells) if (v) ++roadCount;
+        std::snprintf(buf, sizeof(buf), "Roads %d   Buildings %d",
+                      roadCount, static_cast<int>(m_buildings.size()));
+        line(buf, dim);
+
+        std::snprintf(buf, sizeof(buf), "Zoom %.2fx", m_camera.Zoom());
+        line(buf, dim);
+
+        y += lineH * 0.4f;
+        line("LMB raise  RMB lower", dimmer);
+        line("MMB drag pan  Wheel zoom", dimmer);
+        line("Arrows pan", dimmer);
+        line("B 1x1  V 2x2  X del  R road", dimmer);
+        line("ESC quit", dimmer);
+    }
+
     void SeedDemoLake() {
         // Same lake as before, but on the bigger 32x32 grid it now sits in
         // the upper-left quadrant — pan/zoom to see other empty regions.
@@ -444,6 +505,8 @@ private:
     std::unique_ptr<RHITexture> m_roadsTexture;
     SpriteSheet                 m_roadsSheet;
     std::vector<bool>           m_roadCells;
+    std::unique_ptr<RHITexture> m_fontTexture;
+    BitmapFont                  m_font;
     IsoTerrain                  m_terrain;
     std::vector<Building>       m_buildings;
     Camera2D                    m_camera;
