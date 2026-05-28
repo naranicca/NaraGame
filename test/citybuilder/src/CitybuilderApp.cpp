@@ -1,11 +1,24 @@
-// Citybuilder — milestone (d): multi-cell buildings + correct painter sort.
+// Citybuilder — milestone (e): elevation-aware face-based picking.
 //
-// Buildings sit on the terrain from milestone (c). Each building has a
-// rectangular footprint (1x1 or 2x2 for this prototype) and lives in a flat
-// vector. The renderer interleaves buildings into the existing diagonal terrain
-// pass: a building is drawn right after the terrain cell at its FRONT-most
-// footprint corner — i.e. after every cell it occupies, but before any cell at
-// a larger x+y that might visually overlap and need to cover it.
+// Replaces the flat-plane hover / click projection with a CPU "which visible
+// face is under the cursor" picker. For each cell we project its 4 corners
+// with the current elevation, test point-in-quad against the cursor, then
+// among hits keep the camera-frontmost one (highest x+y; tiebreak by baseElev).
+// The picked corner is the closest of that cell's 4 corners in screen space.
+// This is the spirit of SC2K-style "render IDs to an offscreen buffer and
+// read the pixel under the cursor" — done in CPU because the engine doesn't
+// have render-to-texture yet and 16x16 cells make the brute-force loop free.
+//
+// Effect: clicking on a visible hill peak now picks the peak corner; clicking
+// on a slope face picks a corner of that face. The yellow hover marker
+// likewise rides the visible terrain instead of the flat plane.
+//
+// Earlier milestones (carried forward unchanged):
+//
+// (a) flat diamond grid + ScreenToTile picking
+// (b) corner-height grid + 16-variant slope atlas + diagonal painter sort
+// (c) interactive raise/lower with 8-conn slope-limit cascade
+// (d) multi-cell buildings sorted by front-most footprint cell's x+y
 //
 // Controls:
 //   Left  click   raise corner nearest cursor (terraform)
@@ -30,6 +43,7 @@
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -68,13 +82,6 @@ Vec2 TileCenterToScreen(int tx, int ty) {
     return { (tx - ty) * kHalfW + kOriginX, (tx + ty) * kHalfH + kOriginY };
 }
 
-void ScreenToTile(float sx, float sy, int& tx, int& ty) {
-    const float dx = (sx - kOriginX) / kHalfW;
-    const float dy = (sy - kOriginY) / kHalfH;
-    tx = static_cast<int>(std::floor((dx + dy) * 0.5f));
-    ty = static_cast<int>(std::floor((dy - dx) * 0.5f));
-}
-
 Vec2 CornerToScreen(int i, int j, int height) {
     return {
         (i - j) * kHalfW + kOriginX,
@@ -82,20 +89,23 @@ Vec2 CornerToScreen(int i, int j, int height) {
     };
 }
 
-bool ScreenToCorner(float sx, float sy, int& outI, int& outJ) {
-    const float dx = sx - kOriginX;
-    const float dy = sy - kOriginY;
-    const float fi = (dx / kHalfW + dy / kHalfH + 1.0f) * 0.5f;
-    const float fj = (dy / kHalfH - dx / kHalfW + 1.0f) * 0.5f;
-    if (fi < -0.5f || fi > kGridW + 0.5f || fj < -0.5f || fj > kGridH + 0.5f) {
-        outI = outJ = -1;
-        return false;
-    }
-    outI = static_cast<int>(std::lround(fi));
-    outJ = static_cast<int>(std::lround(fj));
-    if (outI < 0) outI = 0;  else if (outI > kGridW) outI = kGridW;
-    if (outJ < 0) outJ = 0;  else if (outJ > kGridH) outJ = kGridH;
-    return true;
+// Triangle point-in test via consistent cross-product sign — robust against
+// CW vs CCW winding because we accept "all same sign or all zero".
+bool PointInTri(Vec2 p, Vec2 a, Vec2 b, Vec2 c) {
+    const float d1 = (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y);
+    const float d2 = (p.x - c.x) * (b.y - c.y) - (b.x - c.x) * (p.y - c.y);
+    const float d3 = (p.x - a.x) * (c.y - a.y) - (c.x - a.x) * (p.y - a.y);
+    const bool hasNeg = (d1 < 0.0f) || (d2 < 0.0f) || (d3 < 0.0f);
+    const bool hasPos = (d1 > 0.0f) || (d2 > 0.0f) || (d3 > 0.0f);
+    return !(hasNeg && hasPos);
+}
+
+// Convex-quad point-in test by splitting on the (a,c) diagonal. Slope tiles
+// stay (close to) convex while the slope-limit cascade keeps neighbour
+// heights within one step; the rare "saddle" mask (5 or 10) goes butterfly,
+// which this test will under-report — acceptable for a prototype.
+bool PointInQuad(Vec2 p, Vec2 a, Vec2 b, Vec2 c, Vec2 d) {
+    return PointInTri(p, a, b, c) || PointInTri(p, a, c, d);
 }
 
 // Distinct prototype palettes by size so 1x1 vs 2x2 are obvious at a glance.
@@ -140,21 +150,24 @@ protected:
         if (Input::IsKeyDown(Key::Escape))
             Close();
 
+        // Single elevation-aware pick drives both corner hover (terraforming)
+        // and cell hover (building placement). With this picker the marker
+        // and clicks land on whatever the player visibly sees under the
+        // cursor instead of on the flat-plane projection beneath it.
         const Vec2 mp = Input::MousePosition();
-        m_hoverCornerValid = ScreenToCorner(mp.x, mp.y, m_hoverI, m_hoverJ);
-        ScreenToTile(mp.x, mp.y, m_hoverCellX, m_hoverCellY);
+        const PickResult pick = Pick(mp.x, mp.y);
+        m_hoverCornerValid = pick.valid;
+        m_hoverI    = pick.cornerI;
+        m_hoverJ    = pick.cornerJ;
+        m_hoverCellX = pick.cellX;
+        m_hoverCellY = pick.cellY;
 
-        // Terraforming: edge-triggered on either button.
-        if (m_hoverCornerValid) {
+        if (pick.valid) {
             if (Input::IsMousePressed(MouseButton::Left))  AdjustCorner(m_hoverI, m_hoverJ, +1);
             if (Input::IsMousePressed(MouseButton::Right)) AdjustCorner(m_hoverI, m_hoverJ, -1);
-        }
 
-        // Building actions key the hovered CELL, not the corner. Bounds-checked
-        // so V doesn't try to place a 2x2 that runs off the grid.
-        const bool cellInBounds = m_hoverCellX >= 0 && m_hoverCellX < kGridW
-                               && m_hoverCellY >= 0 && m_hoverCellY < kGridH;
-        if (cellInBounds) {
+            // V (2x2) needs the +1 cell in bounds too; B and X just need the
+            // hovered cell to exist, which `pick.valid` already guarantees.
             if (Input::IsKeyPressed(Key::B))
                 PlaceBuilding(m_hoverCellX, m_hoverCellY, 1, 1, kColor1x1);
             if (Input::IsKeyPressed(Key::V)
@@ -211,6 +224,64 @@ private:
         c.width = 1024;
         c.height = 640;
         return c;
+    }
+
+    struct PickResult {
+        bool valid    = false;
+        int  cellX    = -1;
+        int  cellY    = -1;
+        int  cornerI  = -1;
+        int  cornerJ  = -1;
+    };
+
+    // CPU face-based picker: walks all cells, projects each cell's 4 corners
+    // with elevation, tests point-in-quad against the cursor, then among hits
+    // keeps the visually-frontmost — highest x+y, tiebreak by baseElev (a
+    // higher cell at the same diagonal pokes further up the screen so it sits
+    // visually in front). The corner is the closest of the picked cell's 4 in
+    // screen space, also elevation-aware. O(kGridW * kGridH) per frame; trivial
+    // at this scale.
+    PickResult Pick(float mx, float my) const {
+        PickResult r;
+        int bestKey = -1;
+        for (int y = 0; y < kGridH; ++y) {
+            for (int x = 0; x < kGridW; ++x) {
+                const int hT = Corner(x,     y    );
+                const int hR = Corner(x + 1, y    );
+                const int hB = Corner(x + 1, y + 1);
+                const int hL = Corner(x,     y + 1);
+                const Vec2 sT = CornerToScreen(x,     y,     hT);
+                const Vec2 sR = CornerToScreen(x + 1, y,     hR);
+                const Vec2 sB = CornerToScreen(x + 1, y + 1, hB);
+                const Vec2 sL = CornerToScreen(x,     y + 1, hL);
+                if (!PointInQuad({mx, my}, sT, sR, sB, sL))
+                    continue;
+                const int baseElev = Min(Min(hT, hR), Min(hB, hL));
+                const int key = (x + y) * (kMaxHeight + 1) + baseElev;
+                if (key <= bestKey)
+                    continue;
+                bestKey = key;
+                r.valid = true;
+                r.cellX = x;
+                r.cellY = y;
+                // Nearest of the 4 corners to the cursor, in screen space.
+                const Vec2 cs[4] = { sT, sR, sB, sL };
+                const int ci[4][2] = {
+                    {x, y}, {x + 1, y}, {x + 1, y + 1}, {x, y + 1}
+                };
+                float bestD = std::numeric_limits<float>::max();
+                int   bestC = 0;
+                for (int k = 0; k < 4; ++k) {
+                    const float ddx = cs[k].x - mx;
+                    const float ddy = cs[k].y - my;
+                    const float d = ddx * ddx + ddy * ddy;
+                    if (d < bestD) { bestD = d; bestC = k; }
+                }
+                r.cornerI = ci[bestC][0];
+                r.cornerJ = ci[bestC][1];
+            }
+        }
+        return r;
     }
 
     int  Corner(int i, int j) const { return m_corners[j * kCornerCols + i]; }
