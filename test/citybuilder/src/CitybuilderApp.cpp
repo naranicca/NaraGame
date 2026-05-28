@@ -18,6 +18,8 @@
 //   Arrow keys        pan camera (alt)
 //   B / V             place 1x1 / 2x2 building at hovered cell
 //   X                 remove any building containing the hovered cell
+//   R                 toggle road on hovered cell (flat + above water only;
+//                     16-variant sprite auto-connects to neighbouring roads)
 //   ESC               quit
 
 #include <NaraGame/assets/TextureLoader.h>
@@ -96,6 +98,9 @@ protected:
         const std::string assets = NARAGAME_ASSETS_DIR;
         m_slopesTexture = LoadTexture(GetDevice(), assets + "/slopes.png");
         m_slopes = SpriteSheet(m_slopesTexture.get(), 64, 40);
+        m_roadsTexture = LoadTexture(GetDevice(), assets + "/roads.png");
+        m_roadsSheet   = SpriteSheet(m_roadsTexture.get(), 64, 40);
+        m_roadCells.assign(static_cast<size_t>(m_terrain.Width()) * m_terrain.Height(), false);
 
         m_camera.SetViewport(static_cast<float>(Config().width),
                              static_cast<float>(Config().height));
@@ -113,6 +118,7 @@ protected:
 
     void OnStop() override {
         m_slopesTexture.reset();
+        m_roadsTexture.reset();
         m_renderer.Shutdown();
     }
 
@@ -182,6 +188,8 @@ protected:
                 PlaceBuilding(m_hoverCellX, m_hoverCellY, 2, 2, kColor2x2);
             if (Input::IsKeyPressed(Key::X))
                 RemoveBuildingAt(m_hoverCellX, m_hoverCellY);
+            if (Input::IsKeyPressed(Key::R))
+                ToggleRoad(m_hoverCellX, m_hoverCellY);
         }
     }
 
@@ -196,8 +204,11 @@ protected:
         for (int sum = 0; sum <= m_terrain.MaxDiagonalSum(); ++sum) {
             const int xMin = m_terrain.DiagonalXMin(sum);
             const int xMax = m_terrain.DiagonalXMax(sum);
-            for (int x = xMin; x <= xMax; ++x)
-                DrawCell(x, sum - x);
+            for (int x = xMin; x <= xMax; ++x) {
+                const int y = sum - x;
+                DrawCell(x, y);
+                if (HasRoad(x, y)) DrawRoad(x, y);
+            }
             for (const Building& b : m_buildings)
                 if ((b.x + b.w - 1) + (b.y + b.h - 1) == sum)
                     DrawBuilding(b);
@@ -371,6 +382,50 @@ private:
             m_buildings.end());
     }
 
+    bool HasRoad(int x, int y) const {
+        return m_roadCells[static_cast<size_t>(y) * m_terrain.Width() + x];
+    }
+
+    void SetRoad(int x, int y, bool v) {
+        m_roadCells[static_cast<size_t>(y) * m_terrain.Width() + x] = v;
+    }
+
+    // Toggle road on a cell. Reject placement on non-flat or underwater cells —
+    // the road sprite is a 64x40 flat-diamond decal anchored at baseElev, so a
+    // sloped cell would render a flat road floating off the actual surface.
+    void ToggleRoad(int x, int y) {
+        if (HasRoad(x, y)) { SetRoad(x, y, false); return; }
+        const IsoCellSlope s = m_terrain.CellSlope(x, y);
+        const bool flat = (s.maxH == s.minH);
+        const bool aboveWater = s.minH >= 0;
+        if (flat && aboveWater)
+            SetRoad(x, y, true);
+    }
+
+    // 4-bit cardinal-neighbour bitmask used to pick a sprite from roads.png.
+    // bit 0 = N (y-1), 1 = E (x+1), 2 = S (y+1), 3 = W (x-1). Computed fresh
+    // every frame from m_roadCells so placements auto-connect without bookkeeping.
+    int RoadMask(int x, int y) const {
+        int mask = 0;
+        if (y > 0                          && HasRoad(x,     y - 1)) mask |= 1;
+        if (x < m_terrain.Width()  - 1     && HasRoad(x + 1, y    )) mask |= 2;
+        if (y < m_terrain.Height() - 1     && HasRoad(x,     y + 1)) mask |= 4;
+        if (x > 0                          && HasRoad(x - 1, y    )) mask |= 8;
+        return mask;
+    }
+
+    void DrawRoad(int x, int y) {
+        const IsoCellSlope s = m_terrain.CellSlope(x, y);
+        const Vec2 center = m_terrain.TileCenterToScreen(x, y);
+        const Vec2 topLeft{
+            center.x - kSpriteW * 0.5f,
+            center.y - kSpriteAnchorY - static_cast<float>(s.baseElev * m_terrain.StepHeight())
+        };
+        m_renderer.DrawQuad(topLeft, {kSpriteW, kSpriteH},
+                            m_roadsSheet.At(RoadMask(x, y)),
+                            Color(1.0f, 1.0f, 1.0f, 1.0f));
+    }
+
     void SeedDemoLake() {
         // Same lake as before, but on the bigger 32x32 grid it now sits in
         // the upper-left quadrant — pan/zoom to see other empty regions.
@@ -386,6 +441,9 @@ private:
     Renderer2D                  m_renderer;
     std::unique_ptr<RHITexture> m_slopesTexture;
     SpriteSheet                 m_slopes;
+    std::unique_ptr<RHITexture> m_roadsTexture;
+    SpriteSheet                 m_roadsSheet;
+    std::vector<bool>           m_roadCells;
     IsoTerrain                  m_terrain;
     std::vector<Building>       m_buildings;
     Camera2D                    m_camera;
