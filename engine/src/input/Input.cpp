@@ -5,11 +5,21 @@
 
 namespace NaraGame {
 
+// "Current" reflects the held state for IsKeyDown/IsMouseDown. Edge queries
+// (IsKeyPressed/IsKeyReleased and their mouse counterparts) read from the
+// "pressed/released this frame" trackers, which OR in any down/up event
+// since the last NewFrame() and survive a sub-frame down→up cycle (a fast
+// synthesized click, or a real human click that completes between two game
+// frames). Without those trackers the naive current-vs-previous edge would
+// silently drop sub-frame events.
+
 static std::array<bool, static_cast<std::size_t>(Key::Count)> g_keyCurrent{};
-static std::array<bool, static_cast<std::size_t>(Key::Count)> g_keyPrevious{};
+static std::array<bool, static_cast<std::size_t>(Key::Count)> g_keyPressedThisFrame{};
+static std::array<bool, static_cast<std::size_t>(Key::Count)> g_keyReleasedThisFrame{};
 
 static std::array<bool, static_cast<std::size_t>(MouseButton::Count)> g_mouseCurrent{};
-static std::array<bool, static_cast<std::size_t>(MouseButton::Count)> g_mousePrevious{};
+static std::array<bool, static_cast<std::size_t>(MouseButton::Count)> g_mousePressedThisFrame{};
+static std::array<bool, static_cast<std::size_t>(MouseButton::Count)> g_mouseReleasedThisFrame{};
 static Vec2 g_mousePosition{};
 
 bool Input::IsKeyDown(Key key) {
@@ -17,13 +27,11 @@ bool Input::IsKeyDown(Key key) {
 }
 
 bool Input::IsKeyPressed(Key key) {
-    const std::size_t i = static_cast<std::size_t>(key);
-    return g_keyCurrent[i] && !g_keyPrevious[i];
+    return g_keyPressedThisFrame[static_cast<std::size_t>(key)];
 }
 
 bool Input::IsKeyReleased(Key key) {
-    const std::size_t i = static_cast<std::size_t>(key);
-    return !g_keyCurrent[i] && g_keyPrevious[i];
+    return g_keyReleasedThisFrame[static_cast<std::size_t>(key)];
 }
 
 bool Input::IsMouseDown(MouseButton button) {
@@ -31,13 +39,11 @@ bool Input::IsMouseDown(MouseButton button) {
 }
 
 bool Input::IsMousePressed(MouseButton button) {
-    const std::size_t i = static_cast<std::size_t>(button);
-    return g_mouseCurrent[i] && !g_mousePrevious[i];
+    return g_mousePressedThisFrame[static_cast<std::size_t>(button)];
 }
 
 bool Input::IsMouseReleased(MouseButton button) {
-    const std::size_t i = static_cast<std::size_t>(button);
-    return !g_mouseCurrent[i] && g_mousePrevious[i];
+    return g_mouseReleasedThisFrame[static_cast<std::size_t>(button)];
 }
 
 Vec2 Input::MousePosition() {
@@ -45,11 +51,19 @@ Vec2 Input::MousePosition() {
 }
 
 void Input::SetKeyState(Key key, bool down) {
-    g_keyCurrent[static_cast<std::size_t>(key)] = down;
+    const std::size_t i = static_cast<std::size_t>(key);
+    // Edge-event flag OR'd in so a same-frame down+up pair (or a same-frame
+    // up+down on auto-repeat) still registers as a press / release.
+    if (down) g_keyPressedThisFrame[i] = true;
+    else      g_keyReleasedThisFrame[i] = true;
+    g_keyCurrent[i] = down;
 }
 
 void Input::SetMouseButton(MouseButton button, bool down) {
-    g_mouseCurrent[static_cast<std::size_t>(button)] = down;
+    const std::size_t i = static_cast<std::size_t>(button);
+    if (down) g_mousePressedThisFrame[i] = true;
+    else      g_mouseReleasedThisFrame[i] = true;
+    g_mouseCurrent[i] = down;
 }
 
 void Input::SetMousePosition(float x, float y) {
@@ -57,8 +71,12 @@ void Input::SetMousePosition(float x, float y) {
 }
 
 void Input::NewFrame() {
-    g_keyPrevious = g_keyCurrent;     // snapshot last frame for edge detection
-    g_mousePrevious = g_mouseCurrent; // (mouse position is continuous, no snapshot)
+    // Reset edge-event trackers; "current" carries over because Down state
+    // is continuous (button stays held across frames until an up event).
+    g_keyPressedThisFrame.fill(false);
+    g_keyReleasedThisFrame.fill(false);
+    g_mousePressedThisFrame.fill(false);
+    g_mouseReleasedThisFrame.fill(false);
 }
 
 } // namespace NaraGame

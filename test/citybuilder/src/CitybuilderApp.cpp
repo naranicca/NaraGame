@@ -1,14 +1,19 @@
-// Citybuilder — milestone (b): corner-height terrain + 16-variant slope atlas.
+// Citybuilder — milestone (c): interactive terraforming with slope-limit propagation.
 //
-// Builds on the milestone (a) flat iso grid by storing a corner-height array
-// (one int per grid intersection — corners are shared between up to 4 cells),
-// deriving each cell's slope variant from the 4-bit corner-elevation mask,
-// and blitting the matching sprite out of a packed 4x4 atlas. A stepped
-// pyramid is seeded so every slope shape — flat, single-corner, ridge,
-// three-corner — appears on screen at once for visual verification.
+// Adds the SC2K "magic" — left-click raises the corner nearest the cursor by one
+// step, right-click lowers it. Because corners are shared between up to four
+// cells, a single edit visibly reshapes all four touching cells at once. To
+// keep the heightfield representable by the (one-step-max) slope atlas, every
+// edit triggers an 8-connected BFS that drags neighbouring corners along so no
+// pair of corners differs by more than one step. The result is exactly the
+// "raising one corner of a hill cascades outward" behaviour from SC2K.
 //
-// Hover picking still uses the flat-plane inverse projection from (a); it
-// will mis-pick over elevated terrain. That is deferred to milestone (e).
+// The terrain starts flat (the seeded pyramid from milestone (b) is dropped —
+// terraforming is now the only source of relief, so the UX is the thing being
+// tested). Hover and click picking are flat-plane projections; over an
+// elevated hill they'll pick the corner geometrically under the cursor, not
+// the one drawn at the cursor position. True elevation-aware picking is
+// milestone (e).
 
 #include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/core/Application.h>
@@ -24,8 +29,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef NARAGAME_ASSETS_DIR
@@ -36,7 +43,7 @@ using namespace NaraGame;
 
 namespace {
 
-// Grid + iso projection (unchanged from milestone (a)).
+// Grid + iso projection (unchanged from milestones (a)/(b)).
 constexpr int   kGridW   = 16;
 constexpr int   kGridH   = 16;
 constexpr float kTileW   = 64.0f;
@@ -44,37 +51,63 @@ constexpr float kTileH   = 32.0f;
 constexpr float kHalfW   = kTileW * 0.5f;
 constexpr float kHalfH   = kTileH * 0.5f;
 constexpr float kOriginX = 512.0f;
-constexpr float kOriginY = 80.0f; // a bit lower than (a) to leave headroom for raised peaks
+constexpr float kOriginY = 80.0f;
 
-// Slope sprite geometry. The atlas cell is 64x40: the flat diamond sits in the
-// bottom 32 rows (y = 8..39 within the cell) and the top 8-row strip is empty
-// space that raised corners can poke into. kSpriteAnchorY is the y offset from
-// sprite top-left to the flat-diamond CENTER, used to align world position to
-// the sprite.
 constexpr float kSpriteW       = 64.0f;
 constexpr float kSpriteH       = 40.0f;
-constexpr float kSpriteAnchorY = 23.0f; // (8 + 39) / 2 -> center of the flat diamond
-constexpr int   kStepHeight    = 8;     // pixels per elevation level (matches sprite empty strip)
+constexpr float kSpriteAnchorY = 23.0f;
+constexpr int   kStepHeight    = 8;
 
-// Corner grid sizing. Corners live at integer tile-space coordinates, cells
-// occupy the unit squares between them — so an NxN cell grid has (N+1)x(N+1)
-// corners. A single corner is shared between up to 4 neighbouring cells.
 constexpr int kCornerCols = kGridW + 1;
 constexpr int kCornerRows = kGridH + 1;
 
-// Mapping cell -> screen.
+constexpr int kMaxHeight = 8;  // ~64 px tall hills at the cap; plenty for prototyping
+constexpr int kMinHeight = 0;
+
+// Cell (x, y) ground-center on the flat plane.
 Vec2 TileCenterToScreen(int tx, int ty) {
     return { (tx - ty) * kHalfW + kOriginX, (tx + ty) * kHalfH + kOriginY };
 }
 
-// Inverse of the flat-plane projection (no elevation). Returns the cell whose
-// rhombus contains the screen pixel; floors land inside the right diamond
-// because the rhombus lattice tiles the plane without gaps.
+// Inverse of the flat-plane CELL projection — unchanged from (a)/(b).
 void ScreenToTile(float sx, float sy, int& tx, int& ty) {
     const float dx = (sx - kOriginX) / kHalfW;
     const float dy = (sy - kOriginY) / kHalfH;
     tx = static_cast<int>(std::floor((dx + dy) * 0.5f));
     ty = static_cast<int>(std::floor((dy - dx) * 0.5f));
+}
+
+// Corner (i, j) sits at tile-space (i - 0.5, j - 0.5), so its flat-plane
+// screen projection is ((i - j) * halfW + origin, (i + j - 1) * halfH + origin).
+// The `height` arg shifts it up by that many step-pixels for the visual marker.
+Vec2 CornerToScreen(int i, int j, int height) {
+    return {
+        (i - j) * kHalfW + kOriginX,
+        (i + j - 1) * kHalfH + kOriginY - static_cast<float>(height * kStepHeight)
+    };
+}
+
+// Inverse of CornerToScreen on the flat plane. Returns the nearest integer
+// corner (rounded), with an out-of-grid sentinel of -1 when the cursor sits
+// well outside the corner lattice's bounding rhombus.
+bool ScreenToCorner(float sx, float sy, int& outI, int& outJ) {
+    // Solve the corner forward map for real-valued (i, j):
+    //   dx / halfW = i - j           and    (dy / halfH) + 1 = i + j
+    // → i = (dx/halfW + dy/halfH + 1) / 2
+    //   j = (dy/halfH - dx/halfW + 1) / 2
+    const float dx = sx - kOriginX;
+    const float dy = sy - kOriginY;
+    const float fi = (dx / kHalfW + dy / kHalfH + 1.0f) * 0.5f;
+    const float fj = (dy / kHalfH - dx / kHalfW + 1.0f) * 0.5f;
+    if (fi < -0.5f || fi > kGridW + 0.5f || fj < -0.5f || fj > kGridH + 0.5f) {
+        outI = outJ = -1;
+        return false;
+    }
+    outI = static_cast<int>(std::lround(fi));
+    outJ = static_cast<int>(std::lround(fj));
+    if (outI < 0) outI = 0;  else if (outI > kGridW) outI = kGridW;
+    if (outJ < 0) outJ = 0;  else if (outJ > kGridH) outJ = kGridH;
+    return true;
 }
 
 } // namespace
@@ -89,16 +122,9 @@ protected:
     void OnStart() override {
         m_renderer.Init(GetDevice());
         const std::string assets = NARAGAME_ASSETS_DIR;
-
-        // 4x4 atlas of 64x40 cells. Index = 4-bit corner mask: bit 0 = TOP raised,
-        // bit 1 = RIGHT, bit 2 = BOTTOM, bit 3 = LEFT. Index 0 is the flat tile;
-        // index 15 is "all four corners raised" — geometrically identical to flat
-        // but at +1 elevation, so it's stored as a real flat diamond in the atlas.
         m_slopesTexture = LoadTexture(GetDevice(), assets + "/slopes.png");
         m_slopes = SpriteSheet(m_slopesTexture.get(), 64, 40);
-
-        BuildDemoTerrain();
-        NARAGAME_INFO("Citybuilder: stepped pyramid terrain. ESC to quit.");
+        NARAGAME_INFO("Citybuilder: left-click raises a corner, right-click lowers. ESC to quit.");
     }
 
     void OnStop() override {
@@ -110,10 +136,14 @@ protected:
         if (Input::IsKeyDown(Key::Escape))
             Close();
 
-        // Flat-plane picking — known to mis-pick over elevated terrain; that's
-        // milestone (e). Useful here just to confirm the input pipeline.
         const Vec2 mp = Input::MousePosition();
-        ScreenToTile(mp.x, mp.y, m_hoverX, m_hoverY);
+        m_hoverValid = ScreenToCorner(mp.x, mp.y, m_hoverI, m_hoverJ);
+
+        // Edge-detect clicks so a held button doesn't terraform every frame.
+        if (m_hoverValid) {
+            if (Input::IsMousePressed(MouseButton::Left))  AdjustCorner(m_hoverI, m_hoverJ, +1);
+            if (Input::IsMousePressed(MouseButton::Right)) AdjustCorner(m_hoverI, m_hoverJ, -1);
+        }
     }
 
     void OnRender() override {
@@ -122,20 +152,25 @@ protected:
         GetDevice().Clear(Color(0.08f, 0.10f, 0.14f, 1.0f));
         m_renderer.Begin(Renderer2D::ScreenCamera(w, h));
 
-        // Back-to-front by iso "depth" sum = x + y. Inside a diagonal, cells are
-        // at the same screen-y so their bounding boxes don't fight; we walk
-        // x ascending arbitrarily. With elevation, the higher cell along the
-        // same diagonal pokes UP into the previous diagonal's box, but since
-        // the previous diagonal already drew (its screen-y is smaller), this
-        // ordering still produces correct occlusion for monotone hills.
+        // Back-to-front by diagonal x+y (correct for monotone hills).
         const int maxSum = (kGridW - 1) + (kGridH - 1);
         for (int sum = 0; sum <= maxSum; ++sum) {
             const int xMin = Max(0, sum - (kGridH - 1));
             const int xMax = Min(kGridW - 1, sum);
-            for (int x = xMin; x <= xMax; ++x) {
-                const int y = sum - x;
-                DrawCell(x, y);
-            }
+            for (int x = xMin; x <= xMax; ++x)
+                DrawCell(x, sum - x);
+        }
+
+        // Corner marker drawn last so it sits on top of every tile. A small
+        // bright square at the corner's elevated screen position tells the
+        // user exactly what they're about to edit.
+        if (m_hoverValid) {
+            const int h_at = Corner(m_hoverI, m_hoverJ);
+            const Vec2 p = CornerToScreen(m_hoverI, m_hoverJ, h_at);
+            constexpr float kMarker = 8.0f;
+            m_renderer.DrawQuad({ p.x - kMarker * 0.5f, p.y - kMarker * 0.5f },
+                                { kMarker, kMarker },
+                                Color(1.0f, 0.95f, 0.30f, 1.0f));
         }
 
         m_renderer.End();
@@ -144,7 +179,7 @@ protected:
 private:
     static AppConfig MakeConfig() {
         AppConfig c;
-        c.title = "NaraGame - Citybuilder (slope variants)";
+        c.title = "NaraGame - Citybuilder (terraform)";
         c.width = 1024;
         c.height = 640;
         return c;
@@ -153,9 +188,6 @@ private:
     int  Corner(int i, int j) const { return m_corners[j * kCornerCols + i]; }
     int& Corner(int i, int j)       { return m_corners[j * kCornerCols + i]; }
 
-    // Read the 4 corners of cell (x, y) — TOP, RIGHT, BOTTOM, LEFT in screen
-    // terms — then derive base elevation (min corner) and the 4-bit "this
-    // corner is above base" mask used to pick a slope sprite.
     void GetCellSlope(int x, int y, int& baseElev, int& slopeBits) const {
         const int hT = Corner(x,     y);
         const int hR = Corner(x + 1, y);
@@ -173,51 +205,76 @@ private:
         GetCellSlope(x, y, baseElev, slopeBits);
 
         const Vec2 center = TileCenterToScreen(x, y);
-        // Anchor the sprite so its flat-diamond CENTER lines up with the cell's
-        // ground center, then shift the whole sprite up by baseElev * step.
         const Vec2 topLeft{
             center.x - kSpriteW * 0.5f,
             center.y - kSpriteAnchorY - static_cast<float>(baseElev * kStepHeight)
         };
 
-        // Subtle checker by base elevation so flats read; tint with elevation so
-        // higher plateaus get lighter (cheap fake light) and the layering is
-        // obvious without a real lighting pass.
         const bool darkCheck = ((x + y) & 1) == 0;
         const float ev = static_cast<float>(baseElev);
-        Color tint = darkCheck
+        const Color tint = darkCheck
             ? Color(0.40f + 0.06f * ev, 0.62f + 0.06f * ev, 0.30f + 0.06f * ev, 1.0f)
             : Color(0.50f + 0.06f * ev, 0.74f + 0.06f * ev, 0.38f + 0.06f * ev, 1.0f);
-        if (x == m_hoverX && y == m_hoverY)
-            tint = Color(1.0f, 0.94f, 0.38f, 1.0f);
 
         m_renderer.DrawQuad(topLeft, {kSpriteW, kSpriteH}, m_slopes.At(slopeBits), tint);
     }
 
-    // Seed a stepped pyramid centered on corner (8, 8). Three terraces of
-    // ascending elevation give every interesting slope mask (single corner,
-    // two-adjacent, three-of-four) along their perimeters. The apex corner is
-    // surrounded by four cells each showing a different single-corner slope.
-    void BuildDemoTerrain() {
-        std::fill(m_corners.begin(), m_corners.end(), 0);
-        // Outer terrace 5x5 corners at height 1
-        for (int j = 6; j <= 10; ++j)
-            for (int i = 6; i <= 10; ++i)
-                Corner(i, j) = 1;
-        // Middle terrace 3x3 at height 2
-        for (int j = 7; j <= 9; ++j)
-            for (int i = 7; i <= 9; ++i)
-                Corner(i, j) = 2;
-        // Apex (single corner) at height 3
-        Corner(8, 8) = 3;
+    // Single entry point for raise (+1) / lower (-1) so the propagation only
+    // exists in one place. After the corner moves, BFS drags any neighbour that
+    // would have ended up more than one step away — the SC2K cascade.
+    void AdjustCorner(int i, int j, int delta) {
+        const int before = Corner(i, j);
+        const int after  = Clamp(before + delta, kMinHeight, kMaxHeight);
+        if (after == before)
+            return;
+        Corner(i, j) = after;
+        EnforceSlopeLimitFrom(i, j);
+    }
+
+    // 8-connected BFS: any neighbour outside [self-1, self+1] is dragged into
+    // range; if that touched it, its own neighbours are re-checked. Symmetric
+    // in raise/lower direction — a raise pulls low neighbours up, a lower
+    // pushes high neighbours down. Clamped to [kMinHeight, kMaxHeight] so the
+    // cascade can't run off the height limits; the clamp is consistent with
+    // AdjustCorner so propagation never reintroduces a height the player
+    // couldn't have set themselves.
+    void EnforceSlopeLimitFrom(int startI, int startJ) {
+        std::vector<std::pair<int, int>> queue;
+        queue.emplace_back(startI, startJ);
+        while (!queue.empty()) {
+            const auto [ci, cj] = queue.back();
+            queue.pop_back();
+            const int h = Corner(ci, cj);
+            for (int dj = -1; dj <= 1; ++dj) {
+                for (int di = -1; di <= 1; ++di) {
+                    if (di == 0 && dj == 0)
+                        continue;
+                    const int ni = ci + di;
+                    const int nj = cj + dj;
+                    if (ni < 0 || nj < 0 || ni >= kCornerCols || nj >= kCornerRows)
+                        continue;
+                    const int nh = Corner(ni, nj);
+                    int target = nh;
+                    if (nh < h - 1)      target = h - 1;
+                    else if (nh > h + 1) target = h + 1;
+                    target = Clamp(target, kMinHeight, kMaxHeight);
+                    if (target != nh) {
+                        Corner(ni, nj) = target;
+                        queue.emplace_back(ni, nj);
+                    }
+                }
+            }
+        }
     }
 
     Renderer2D m_renderer;
     std::unique_ptr<RHITexture> m_slopesTexture;
     SpriteSheet m_slopes;
     std::vector<int> m_corners; // (kCornerCols * kCornerRows), row-major
-    int m_hoverX = -1;
-    int m_hoverY = -1;
+
+    int  m_hoverI = -1;
+    int  m_hoverJ = -1;
+    bool m_hoverValid = false;
 };
 
 Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {
