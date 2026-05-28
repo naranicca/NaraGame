@@ -108,6 +108,34 @@ bool PointInQuad(Vec2 p, Vec2 a, Vec2 b, Vec2 c, Vec2 d) {
     return PointInTri(p, a, b, c) || PointInTri(p, a, c, d);
 }
 
+// Lambert shading for a slope mask. Compute the surface normal of the slope
+// from the 4 corner heights, then dot with a fixed light direction from the
+// upper-left (-1, -1, +1) — the standard SC2K convention. Returns a tint
+// multiplier in roughly [0.75, 1.10]. Flat tiles get the same multiplier as a
+// perfectly-up normal, so an entire flat plateau reads as one consistent
+// brightness while slope tiles around it pop in/out as their faces turn
+// toward / away from the light.
+float SlopeBrightness(int mask) {
+    const float hT = (mask & 1) ? 1.0f : 0.0f;
+    const float hR = (mask & 2) ? 1.0f : 0.0f;
+    const float hB = (mask & 4) ? 1.0f : 0.0f;
+    const float hL = (mask & 8) ? 1.0f : 0.0f;
+    // Surface normal as (north-vec) × (east-vec) where
+    //   north-vec = (0, -2, hT - hB),  east-vec = (2, 0, hR - hL).
+    // Cross product yields (-2*(hR-hL), 2*(hT-hB), 4).
+    const float nx = -2.0f * (hR - hL);
+    const float ny =  2.0f * (hT - hB);
+    const float nz =  4.0f;
+    const float nLen = std::sqrt(nx * nx + ny * ny + nz * nz);
+    // Light direction toward source: upper-left in screen = NW + up in world.
+    constexpr float lx = -1.0f, ly = -1.0f, lz = 1.0f;
+    constexpr float lLen = 1.7320508f; // sqrt(3)
+    const float dot = (nx * lx + ny * ly + nz * lz) / (nLen * lLen);
+    // Ambient floor so even back-facing slopes stay visible; diffuse term
+    // adds the directional component on top.
+    return 0.78f + 0.32f * Max(0.0f, dot);
+}
+
 // Distinct prototype palettes by size so 1x1 vs 2x2 are obvious at a glance.
 const Color kColor1x1{0.86f, 0.34f, 0.22f, 1.0f};
 const Color kColor2x2{0.30f, 0.50f, 0.85f, 1.0f};
@@ -311,9 +339,14 @@ private:
 
         const bool darkCheck = ((x + y) & 1) == 0;
         const float ev = static_cast<float>(baseElev);
-        const Color tint = darkCheck
+        Color tint = darkCheck
             ? Color(0.40f + 0.06f * ev, 0.62f + 0.06f * ev, 0.30f + 0.06f * ev, 1.0f)
             : Color(0.50f + 0.06f * ev, 0.74f + 0.06f * ev, 0.38f + 0.06f * ev, 1.0f);
+        // Lambert shading per slope direction makes the 3D shape read.
+        const float b = SlopeBrightness(slopeBits);
+        tint.r = Clamp(tint.r * b, 0.0f, 1.0f);
+        tint.g = Clamp(tint.g * b, 0.0f, 1.0f);
+        tint.b = Clamp(tint.b * b, 0.0f, 1.0f);
 
         m_renderer.DrawQuad(topLeft, {kSpriteW, kSpriteH}, m_slopes.At(slopeBits), tint);
     }
