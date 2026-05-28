@@ -2,3 +2,4 @@
 add_subdirectory(breakout)
 add_subdirectory(space_invaders)
 add_subdirectory(mario)
+add_subdirectory(citybuilder)

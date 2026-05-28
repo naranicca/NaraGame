@@ -133,6 +133,26 @@ LRESULT WindowsWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             Input::SetKeyState(TranslateKey(wParam), false);
             return 0;
 
+        case WM_MOUSEMOVE: {
+            // LOWORD/HIWORD give unsigned shorts; cast to signed short so points
+            // outside the client area (e.g. during capture) report negative coords.
+            const int mx = static_cast<short>(LOWORD(lParam));
+            const int my = static_cast<short>(HIWORD(lParam));
+            Input::SetMousePosition(static_cast<float>(mx), static_cast<float>(my));
+            return 0;
+        }
+
+        // SetCapture on press / ReleaseCapture on release so the engine keeps
+        // tracking the cursor (drag terraforming, marquee select) when it leaves
+        // the window. Capture is per-button-down event; releasing any button
+        // releases the capture — fine for a polling-style API.
+        case WM_LBUTTONDOWN: Input::SetMouseButton(MouseButton::Left, true);   SetCapture(hwnd); return 0;
+        case WM_LBUTTONUP:   Input::SetMouseButton(MouseButton::Left, false);  ReleaseCapture(); return 0;
+        case WM_RBUTTONDOWN: Input::SetMouseButton(MouseButton::Right, true);  SetCapture(hwnd); return 0;
+        case WM_RBUTTONUP:   Input::SetMouseButton(MouseButton::Right, false); ReleaseCapture(); return 0;
+        case WM_MBUTTONDOWN: Input::SetMouseButton(MouseButton::Middle, true); SetCapture(hwnd); return 0;
+        case WM_MBUTTONUP:   Input::SetMouseButton(MouseButton::Middle, false);ReleaseCapture(); return 0;
+
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }

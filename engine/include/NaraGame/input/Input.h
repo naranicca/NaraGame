@@ -1,5 +1,7 @@
 #pragma once
 
+#include "NaraGame/math/Vec2.h"
+
 #include <cstdint>
 
 namespace NaraGame {
@@ -22,18 +24,37 @@ enum class Key : uint16_t {
     Count
 };
 
+enum class MouseButton : uint8_t {
+    Left = 0,
+    Right,
+    Middle,
+    Count
+};
+
 // Polling-style input. Game code calls IsKeyDown()/IsKeyPressed(); the platform
 // window feeds state via SetKeyState(). Edge queries (Pressed/Released) compare
 // against the previous frame, so NewFrame() must run once per frame before the
 // window pumps events (the engine does this in Application::Run).
+//
+// Mouse position is reported in window client pixels (0,0 = top-left, +Y down),
+// matching Renderer2D::ScreenCamera, so it can be used as world coordinates
+// directly when drawing with the screen camera. For a panned/zoomed Camera2D,
+// transform via the camera's inverse.
 class Input {
 public:
     static bool IsKeyDown(Key key);      // held this frame
     static bool IsKeyPressed(Key key);   // went down this frame
     static bool IsKeyReleased(Key key);  // went up this frame
 
+    static bool IsMouseDown(MouseButton button);
+    static bool IsMousePressed(MouseButton button);
+    static bool IsMouseReleased(MouseButton button);
+    static Vec2 MousePosition();
+
     // --- Called by the platform layer / engine; not for game code. ---
     static void SetKeyState(Key key, bool down);
+    static void SetMouseButton(MouseButton button, bool down);
+    static void SetMousePosition(float x, float y);
     static void NewFrame();
 };
 
