@@ -76,7 +76,8 @@ constexpr int kCornerCols = kGridW + 1;
 constexpr int kCornerRows = kGridH + 1;
 
 constexpr int kMaxHeight = 8;
-constexpr int kMinHeight = 0;
+constexpr int kMinHeight = -4;   // water depth; sea level is fixed at h = 0
+constexpr int kHeightRange = kMaxHeight - kMinHeight + 1;
 
 Vec2 TileCenterToScreen(int tx, int ty) {
     return { (tx - ty) * kHalfW + kOriginX, (tx + ty) * kHalfH + kOriginY };
@@ -166,7 +167,8 @@ protected:
         const std::string assets = NARAGAME_ASSETS_DIR;
         m_slopesTexture = LoadTexture(GetDevice(), assets + "/slopes.png");
         m_slopes = SpriteSheet(m_slopesTexture.get(), 64, 40);
-        NARAGAME_INFO("Citybuilder: LMB/RMB terraform, B=1x1, V=2x2, X=remove, ESC=quit");
+        SeedDemoLake();
+        NARAGAME_INFO("Citybuilder: LMB/RMB terraform (RMB digs water), B/V place, X remove, ESC quit");
     }
 
     void OnStop() override {
@@ -232,9 +234,11 @@ protected:
             }
         }
 
-        // Hover marker on top of everything.
+        // Hover marker on top of everything. Clamp to sea level so under-
+        // water corners' markers stay visible at the water surface rather
+        // than disappearing below an opaque water tile.
         if (m_hoverCornerValid) {
-            const int hh = Corner(m_hoverI, m_hoverJ);
+            const int hh = Max(0, Corner(m_hoverI, m_hoverJ));
             const Vec2 p = CornerToScreen(m_hoverI, m_hoverJ, hh);
             constexpr float kMarker = 8.0f;
             m_renderer.DrawQuad({ p.x - kMarker * 0.5f, p.y - kMarker * 0.5f },
@@ -278,21 +282,32 @@ private:
                 const int hR = Corner(x + 1, y    );
                 const int hB = Corner(x + 1, y + 1);
                 const int hL = Corner(x,     y + 1);
-                const Vec2 sT = CornerToScreen(x,     y,     hT);
-                const Vec2 sR = CornerToScreen(x + 1, y,     hR);
-                const Vec2 sB = CornerToScreen(x + 1, y + 1, hB);
-                const Vec2 sL = CornerToScreen(x,     y + 1, hL);
+                // Water cells are drawn as flat at h=0, so the picker must
+                // test against that same quad — clamp the corner heights for
+                // hit-testing purposes (the underlying data stays negative).
+                const int maxH = Max(Max(hT, hR), Max(hB, hL));
+                const bool water = maxH < 0;
+                const int rT = water ? 0 : hT;
+                const int rR = water ? 0 : hR;
+                const int rB = water ? 0 : hB;
+                const int rL = water ? 0 : hL;
+                const Vec2 sT = CornerToScreen(x,     y,     rT);
+                const Vec2 sR = CornerToScreen(x + 1, y,     rR);
+                const Vec2 sB = CornerToScreen(x + 1, y + 1, rB);
+                const Vec2 sL = CornerToScreen(x,     y + 1, rL);
                 if (!PointInQuad({mx, my}, sT, sR, sB, sL))
                     continue;
-                const int baseElev = Min(Min(hT, hR), Min(hB, hL));
-                const int key = (x + y) * (kMaxHeight + 1) + baseElev;
+                // Frontmost = highest x+y, tiebreak by visible (render) elev.
+                // Range shifted by -kMinHeight so the key stays non-negative
+                // for all combinations.
+                const int renderElev = water ? 0 : Min(Min(hT, hR), Min(hB, hL));
+                const int key = (x + y) * kHeightRange + (renderElev - kMinHeight);
                 if (key <= bestKey)
                     continue;
                 bestKey = key;
                 r.valid = true;
                 r.cellX = x;
                 r.cellY = y;
-                // Nearest of the 4 corners to the cursor, in screen space.
                 const Vec2 cs[4] = { sT, sR, sB, sL };
                 const int ci[4][2] = {
                     {x, y}, {x + 1, y}, {x + 1, y + 1}, {x, y + 1}
@@ -328,8 +343,36 @@ private:
     }
 
     void DrawCell(int x, int y) {
-        int baseElev = 0, slopeBits = 0;
-        GetCellSlope(x, y, baseElev, slopeBits);
+        const int hT = Corner(x,     y    );
+        const int hR = Corner(x + 1, y    );
+        const int hB = Corner(x + 1, y + 1);
+        const int hL = Corner(x,     y + 1);
+        const int minH = Min(Min(hT, hR), Min(hB, hL));
+        const int maxH = Max(Max(hT, hR), Max(hB, hL));
+        const bool darkCheck = ((x + y) & 1) == 0;
+
+        // WATER cell: every corner is below sea level. Render as a flat
+        // diamond at h = 0 — the water surface. Slope shading is suppressed
+        // (water reads as a uniform plane); checker is kept very subtle so
+        // adjacent water tiles still tessellate visually.
+        if (maxH < 0) {
+            const Vec2 center = TileCenterToScreen(x, y);
+            const Vec2 topLeft{ center.x - kSpriteW * 0.5f, center.y - kSpriteAnchorY };
+            const Color tint = darkCheck
+                ? Color(0.18f, 0.40f, 0.66f, 1.0f)
+                : Color(0.22f, 0.46f, 0.72f, 1.0f);
+            m_renderer.DrawQuad(topLeft, {kSpriteW, kSpriteH}, m_slopes.At(0), tint);
+            return;
+        }
+
+        // BEACH or LAND cell — slope tile drawn at its actual baseElev (which
+        // may be negative for beach tiles). Tint family depends on whether the
+        // cell straddles sea level.
+        const int baseElev = minH;
+        const int slopeBits = ((hT > baseElev) ? 1 : 0)
+                            | ((hR > baseElev) ? 2 : 0)
+                            | ((hB > baseElev) ? 4 : 0)
+                            | ((hL > baseElev) ? 8 : 0);
 
         const Vec2 center = TileCenterToScreen(x, y);
         const Vec2 topLeft{
@@ -337,12 +380,22 @@ private:
             center.y - kSpriteAnchorY - static_cast<float>(baseElev * kStepHeight)
         };
 
-        const bool darkCheck = ((x + y) & 1) == 0;
         const float ev = static_cast<float>(baseElev);
-        Color tint = darkCheck
-            ? Color(0.40f + 0.06f * ev, 0.62f + 0.06f * ev, 0.30f + 0.06f * ev, 1.0f)
-            : Color(0.50f + 0.06f * ev, 0.74f + 0.06f * ev, 0.38f + 0.06f * ev, 1.0f);
-        // Lambert shading per slope direction makes the 3D shape read.
+        Color tint;
+        if (minH < 0) {
+            // BEACH — sandy tan. The slope ramps from land (some corners ≥ 0)
+            // down to underwater (some corners < 0); the water tile in front
+            // will cover the submerged portion automatically because painter
+            // order is by diagonal sum and water sits at h = 0 above the beach.
+            tint = darkCheck
+                ? Color(0.62f + 0.04f * ev, 0.55f + 0.04f * ev, 0.32f + 0.04f * ev, 1.0f)
+                : Color(0.72f + 0.04f * ev, 0.64f + 0.04f * ev, 0.40f + 0.04f * ev, 1.0f);
+        } else {
+            // LAND — grass green, with mild brightening per elevation step.
+            tint = darkCheck
+                ? Color(0.40f + 0.06f * ev, 0.62f + 0.06f * ev, 0.30f + 0.06f * ev, 1.0f)
+                : Color(0.50f + 0.06f * ev, 0.74f + 0.06f * ev, 0.38f + 0.06f * ev, 1.0f);
+        }
         const float b = SlopeBrightness(slopeBits);
         tint.r = Clamp(tint.r * b, 0.0f, 1.0f);
         tint.g = Clamp(tint.g * b, 0.0f, 1.0f);
@@ -434,6 +487,22 @@ private:
                 return;
         }
         m_buildings.push_back({x, y, w, h, color});
+    }
+
+    // Seed a small lake in the SE corner of the grid so the game opens with
+    // visible water + beach instead of an all-flat field. Heights are written
+    // directly (no cascade call) because the layout is constructed to satisfy
+    // the 1-step constraint by construction: a 5x5 deep block at h = -2 with
+    // a 1-corner ring at h = -1 around it. Any adjacent land corner is at
+    // h = 0, so corner-to-corner deltas stay within 1.
+    void SeedDemoLake() {
+        for (int j = 12; j <= 16; ++j)
+            for (int i = 12; i <= 16; ++i)
+                Corner(i, j) = -2;
+        for (int j = 11; j <= 16; ++j)
+            for (int i = 11; i <= 16; ++i)
+                if (Corner(i, j) == 0)
+                    Corner(i, j) = -1;
     }
 
     void RemoveBuildingAt(int cellX, int cellY) {
