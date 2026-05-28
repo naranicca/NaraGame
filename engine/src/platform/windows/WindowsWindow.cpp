@@ -153,6 +153,14 @@ LRESULT WindowsWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         case WM_MBUTTONDOWN: Input::SetMouseButton(MouseButton::Middle, true); SetCapture(hwnd); return 0;
         case WM_MBUTTONUP:   Input::SetMouseButton(MouseButton::Middle, false);ReleaseCapture(); return 0;
 
+        case WM_MOUSEWHEEL: {
+            // HIWORD(wParam) is a signed short delta in multiples of WHEEL_DELTA
+            // (120). Convert to notches so a single wheel detent reads as ±1.0.
+            const float notches = static_cast<float>(static_cast<short>(HIWORD(wParam))) / 120.0f;
+            Input::AddMouseWheel(notches);
+            return 0;
+        }
+
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }

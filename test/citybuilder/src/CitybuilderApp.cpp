@@ -8,14 +8,17 @@
 //   - elevation-aware face picker that clamps water-cell corners to sea level
 //   - placeable 1x1 / 2x2 buildings drawn in painter order alongside terrain
 //   - SC2K-style terraforming via LMB / RMB on the picked corner
+//   - Camera2D-driven zoom + pan (no fixed origin)
 //
 // Controls:
-//   Left click    raise corner nearest cursor      (RMB digs below 0 -> water)
-//   Right click   lower corner
-//   B             place 1x1 building at hovered cell
-//   V             place 2x2 building (origin = hovered cell, +x +y)
-//   X             remove any building containing the hovered cell
-//   ESC           quit
+//   Left  click       raise corner nearest cursor       (LMB digs above 0 -> land)
+//   Right click       lower corner                       (RMB digs below 0 -> water)
+//   Middle drag       pan camera
+//   Mouse wheel       zoom in/out around the cursor
+//   Arrow keys        pan camera (alt)
+//   B / V             place 1x1 / 2x2 building at hovered cell
+//   X                 remove any building containing the hovered cell
+//   ESC               quit
 
 #include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/core/Application.h>
@@ -24,6 +27,7 @@
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
 #include <NaraGame/math/Vec2.h>
+#include <NaraGame/renderer/Camera2D.h>
 #include <NaraGame/renderer/IsoTerrain.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/SpriteSheet.h>
@@ -31,6 +35,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <limits>
 #include <memory>
 #include <string>
@@ -44,34 +49,31 @@ using namespace NaraGame;
 
 namespace {
 
-// Terrain configuration. The actual heightfield + slope math lives in
-// IsoTerrain; this file just decides how to look at it.
+// 32x32 cell grid — big enough that you have to pan or zoom out to see it all
+// in a 1024x640 viewport, which is the point of a milestone with a camera.
 constexpr IsoTerrainConfig kTerrainCfg{
-    /*gridW*/ 16, /*gridH*/ 16,
+    /*gridW*/ 32, /*gridH*/ 32,
     /*tileW*/ 64.0f, /*tileH*/ 32.0f,
     /*stepHeight*/ 8,
-    /*minHeight*/ -4,   // negative depths for water
+    /*minHeight*/ -4,
     /*maxHeight*/  8,
 };
 
-// Slope sprites are taller than the diamond (extra 8 px on top for raised
-// corners). Their anchor — the y offset from sprite-local origin down to the
-// flat-diamond CENTER — is half the diamond height plus the 8 px headroom.
 constexpr float kSpriteW       = 64.0f;
 constexpr float kSpriteH       = 40.0f;
 constexpr float kSpriteAnchorY = 23.0f;
 
-// Where to place the (0, 0) cell on screen. The terrain helpers return
-// iso-relative coordinates; the game adds this offset.
-constexpr Vec2 kOrigin{512.0f, 80.0f};
+constexpr float kZoomMin = 0.25f;
+constexpr float kZoomMax = 4.0f;
+constexpr float kZoomStep = 1.15f;       // multiplier per wheel notch
+constexpr float kArrowPanPxPerSec = 500.0f;
 
-// Distinct prototype palettes per building size.
 const Color kColor1x1{0.86f, 0.34f, 0.22f, 1.0f};
 const Color kColor2x2{0.30f, 0.50f, 0.85f, 1.0f};
 
 struct Building {
-    int   x, y;   // origin (back-most cell in footprint)
-    int   w, h;   // footprint size in cells (>=1)
+    int   x, y;
+    int   w, h;
     Color color;
 };
 
@@ -94,8 +96,19 @@ protected:
         const std::string assets = NARAGAME_ASSETS_DIR;
         m_slopesTexture = LoadTexture(GetDevice(), assets + "/slopes.png");
         m_slopes = SpriteSheet(m_slopesTexture.get(), 64, 40);
+
+        m_camera.SetViewport(static_cast<float>(Config().width),
+                             static_cast<float>(Config().height));
+        m_camera.SetZoom(1.0f);
+        // Center on the grid's vertical midpoint at world x = 0 — cells extend
+        // symmetrically in x because cell (0, 0) sits at world origin, and the
+        // iso projection drives x by (cellX - cellY) * halfW.
+        const float gridVertCenter = (m_terrain.Width() + m_terrain.Height() - 2)
+                                     * m_terrain.HalfH() * 0.5f;
+        m_camera.CenterOn({0.0f, gridVertCenter});
+
         SeedDemoLake();
-        NARAGAME_INFO("Citybuilder: LMB/RMB terraform (RMB digs water), B/V place, X remove, ESC quit");
+        NARAGAME_INFO("Citybuilder: LMB/RMB terraform, MMB-drag pan, wheel zoom, B/V place, X remove, ESC quit");
     }
 
     void OnStop() override {
@@ -103,19 +116,59 @@ protected:
         m_renderer.Shutdown();
     }
 
-    void OnUpdate(float /*dt*/) override {
+    void OnUpdate(float dt) override {
         if (Input::IsKeyDown(Key::Escape))
             Close();
 
-        const Vec2 mp = Input::MousePosition();
-        const PickResult pick = Pick(mp.x, mp.y);
+        const Vec2 mouseScreen = Input::MousePosition();
+
+        // --- Camera: zoom around the cursor. ---
+        // Keep the world point currently under the cursor stationary: compute
+        // it before changing zoom, then re-derive position so the same world
+        // point still projects to the same screen pixel after the change.
+        const float wheel = Input::MouseWheelDelta();
+        if (wheel != 0.0f) {
+            const float oldZoom = m_camera.Zoom();
+            const Vec2 worldBefore = m_camera.Position() + mouseScreen / oldZoom;
+            const float newZoom = Clamp(oldZoom * std::pow(kZoomStep, wheel),
+                                        kZoomMin, kZoomMax);
+            m_camera.SetZoom(newZoom);
+            m_camera.SetPosition(worldBefore - mouseScreen / newZoom);
+        }
+
+        // --- Camera: pan. Middle-drag in screen pixels => world delta scaled
+        // by 1/zoom. Arrow keys give the same effect at a fixed rate. ---
+        if (Input::IsMouseDown(MouseButton::Middle)
+            && !Input::IsMousePressed(MouseButton::Middle)) {
+            const Vec2 delta = mouseScreen - m_lastMouseScreen;
+            m_camera.SetPosition(m_camera.Position() - delta / m_camera.Zoom());
+        }
+        m_lastMouseScreen = mouseScreen;
+
+        Vec2 panDir{0.0f, 0.0f};
+        if (Input::IsKeyDown(Key::Left))  panDir.x -= 1.0f;
+        if (Input::IsKeyDown(Key::Right)) panDir.x += 1.0f;
+        if (Input::IsKeyDown(Key::Up))    panDir.y -= 1.0f;
+        if (Input::IsKeyDown(Key::Down))  panDir.y += 1.0f;
+        if (panDir.x != 0.0f || panDir.y != 0.0f) {
+            const float len = std::sqrt(panDir.x * panDir.x + panDir.y * panDir.y);
+            const Vec2 step = panDir
+                * (kArrowPanPxPerSec * dt / (len * m_camera.Zoom()));
+            m_camera.SetPosition(m_camera.Position() + step);
+        }
+
+        // --- Picking: convert screen -> world, then face-pick in terrain. ---
+        const Vec2 mouseWorld = m_camera.Position() + mouseScreen / m_camera.Zoom();
+        const PickResult pick = Pick(mouseWorld.x, mouseWorld.y);
         m_hoverCornerValid = pick.valid;
         m_hoverI     = pick.cornerI;
         m_hoverJ     = pick.cornerJ;
         m_hoverCellX = pick.cellX;
         m_hoverCellY = pick.cellY;
 
-        if (pick.valid) {
+        // Don't terraform on the same frame a middle-pan started, so a quick
+        // accidental left-click while panning doesn't fire.
+        if (pick.valid && !Input::IsMouseDown(MouseButton::Middle)) {
             if (Input::IsMousePressed(MouseButton::Left))
                 m_terrain.AdjustCorner(m_hoverI, m_hoverJ, +1);
             if (Input::IsMousePressed(MouseButton::Right))
@@ -133,13 +186,11 @@ protected:
     }
 
     void OnRender() override {
-        const float w = static_cast<float>(Config().width);
-        const float h = static_cast<float>(Config().height);
         GetDevice().Clear(Color(0.08f, 0.10f, 0.14f, 1.0f));
-        m_renderer.Begin(Renderer2D::ScreenCamera(w, h));
+        m_renderer.Begin(m_camera.ViewProjection());
 
-        // Diagonal back-to-front pass. After each diagonal's terrain cells are
-        // drawn, any building whose front-most footprint cell sits on that
+        // Diagonal back-to-front pass. After each diagonal's terrain cells,
+        // any building whose front-most footprint cell sits on the same
         // diagonal slips in — its sprite covers its own footprint but is
         // covered by cells at higher x+y that visually overlap it.
         for (int sum = 0; sum <= m_terrain.MaxDiagonalSum(); ++sum) {
@@ -152,15 +203,16 @@ protected:
                     DrawBuilding(b);
         }
 
-        // Hover marker on top of everything; clamped to sea level so under-
-        // water corners' markers stay visible at the water surface rather
-        // than disappearing beneath an opaque water tile.
         if (m_hoverCornerValid) {
+            // Clamp to sea level so underwater corners stay visible at the
+            // water surface. Marker scales with zoom so it stays the same
+            // pixel size on screen regardless of how far in/out you are.
             const int hh = Max(0, m_terrain.Corner(m_hoverI, m_hoverJ));
-            const Vec2 p = kOrigin + m_terrain.CornerToScreen(m_hoverI, m_hoverJ, hh);
-            constexpr float kMarker = 8.0f;
-            m_renderer.DrawQuad({ p.x - kMarker * 0.5f, p.y - kMarker * 0.5f },
-                                { kMarker, kMarker },
+            const Vec2 p = m_terrain.CornerToScreen(m_hoverI, m_hoverJ, hh);
+            const float kScreenMarker = 8.0f;
+            const float marker = kScreenMarker / m_camera.Zoom();
+            m_renderer.DrawQuad({ p.x - marker * 0.5f, p.y - marker * 0.5f },
+                                { marker, marker },
                                 Color(1.0f, 0.95f, 0.30f, 1.0f));
         }
 
@@ -184,11 +236,8 @@ private:
         int  cornerJ  = -1;
     };
 
-    // Elevation-aware face picker. For each cell, project the 4 corners with
-    // their CURRENT render heights (water cells are rendered as flat at h=0,
-    // so their corners are clamped), test point-in-quad, keep the camera-
-    // frontmost hit (highest x+y; tiebreak by render elev). The picked corner
-    // is the closest of the cell's 4 in screen space, also elevation-aware.
+    // Same picker as before, just in world coords (no kOrigin offset). Caller
+    // converts screen->world via the camera before calling.
     PickResult Pick(float mx, float my) const {
         PickResult r;
         int bestKey = -1;
@@ -205,10 +254,10 @@ private:
                 const int rR = water ? 0 : hR;
                 const int rB = water ? 0 : hB;
                 const int rL = water ? 0 : hL;
-                const Vec2 sT = kOrigin + m_terrain.CornerToScreen(x,     y,     rT);
-                const Vec2 sR = kOrigin + m_terrain.CornerToScreen(x + 1, y,     rR);
-                const Vec2 sB = kOrigin + m_terrain.CornerToScreen(x + 1, y + 1, rB);
-                const Vec2 sL = kOrigin + m_terrain.CornerToScreen(x,     y + 1, rL);
+                const Vec2 sT = m_terrain.CornerToScreen(x,     y,     rT);
+                const Vec2 sR = m_terrain.CornerToScreen(x + 1, y,     rR);
+                const Vec2 sB = m_terrain.CornerToScreen(x + 1, y + 1, rB);
+                const Vec2 sL = m_terrain.CornerToScreen(x,     y + 1, rL);
                 if (!PointInQuad(mouse, sT, sR, sB, sL))
                     continue;
                 const int renderElev = water ? 0 : s.baseElev;
@@ -242,10 +291,8 @@ private:
     void DrawCell(int x, int y) {
         const IsoCellSlope s = m_terrain.CellSlope(x, y);
         const bool darkCheck = ((x + y) & 1) == 0;
-        const Vec2 center = kOrigin + m_terrain.TileCenterToScreen(x, y);
+        const Vec2 center = m_terrain.TileCenterToScreen(x, y);
 
-        // WATER cell: every corner below sea level. Render as a flat diamond
-        // at h = 0 (the water surface).
         if (s.maxH < 0) {
             const Vec2 topLeft{ center.x - kSpriteW * 0.5f, center.y - kSpriteAnchorY };
             const Color tint = darkCheck
@@ -255,9 +302,6 @@ private:
             return;
         }
 
-        // BEACH or LAND — slope tile drawn at its actual baseElev (which may
-        // be negative for beach tiles). The painter's sort by x+y means the
-        // water tile in front naturally covers any submerged portion.
         const Vec2 topLeft{
             center.x - kSpriteW * 0.5f,
             center.y - kSpriteAnchorY - static_cast<float>(s.baseElev * m_terrain.StepHeight())
@@ -282,8 +326,6 @@ private:
         m_renderer.DrawQuad(topLeft, {kSpriteW, kSpriteH}, m_slopes.At(s.slopeBits), tint);
     }
 
-    // Lowest corner anywhere in a building's footprint. The building sits at
-    // this elevation so it doesn't float above an uneven patch.
     int FootprintBaseElev(const Building& b) const {
         int e = INT_MAX;
         for (int j = b.y; j <= b.y + b.h; ++j)
@@ -293,10 +335,9 @@ private:
     }
 
     void DrawBuilding(const Building& b) {
-        // Footprint center in tile-space -> screen, then drop by baseElev.
         const float mtx = b.x + (b.w - 1) * 0.5f;
         const float mty = b.y + (b.h - 1) * 0.5f;
-        const Vec2 ground = kOrigin + Vec2{
+        const Vec2 ground{
             (mtx - mty) * m_terrain.HalfW(),
             (mtx + mty) * m_terrain.HalfH()
         };
@@ -313,8 +354,6 @@ private:
     }
 
     void PlaceBuilding(int x, int y, int w, int h, const Color& color) {
-        // Reject overlap so a stray key press doesn't quietly stack two
-        // sprites in the same footprint.
         for (const Building& b : m_buildings) {
             const bool overlapX = !(x + w <= b.x || b.x + b.w <= x);
             const bool overlapY = !(y + h <= b.y || b.y + b.h <= y);
@@ -332,10 +371,9 @@ private:
             m_buildings.end());
     }
 
-    // Seed a small lake in the SE corner so the game opens with visible
-    // water + beach. The layout is constructed to satisfy the 1-step cascade
-    // by construction; SetCorner writes raw heights without invoking it.
     void SeedDemoLake() {
+        // Same lake as before, but on the bigger 32x32 grid it now sits in
+        // the upper-left quadrant — pan/zoom to see other empty regions.
         for (int j = 12; j <= 16; ++j)
             for (int i = 12; i <= 16; ++i)
                 m_terrain.SetCorner(i, j, -2);
@@ -350,7 +388,9 @@ private:
     SpriteSheet                 m_slopes;
     IsoTerrain                  m_terrain;
     std::vector<Building>       m_buildings;
+    Camera2D                    m_camera;
 
+    Vec2 m_lastMouseScreen{0.0f, 0.0f};
     int  m_hoverI = -1, m_hoverJ = -1;
     bool m_hoverCornerValid = false;
     int  m_hoverCellX = -1, m_hoverCellY = -1;

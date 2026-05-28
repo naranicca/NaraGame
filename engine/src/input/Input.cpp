@@ -20,7 +20,8 @@ static std::array<bool, static_cast<std::size_t>(Key::Count)> g_keyReleasedThisF
 static std::array<bool, static_cast<std::size_t>(MouseButton::Count)> g_mouseCurrent{};
 static std::array<bool, static_cast<std::size_t>(MouseButton::Count)> g_mousePressedThisFrame{};
 static std::array<bool, static_cast<std::size_t>(MouseButton::Count)> g_mouseReleasedThisFrame{};
-static Vec2 g_mousePosition{};
+static Vec2  g_mousePosition{};
+static float g_mouseWheelThisFrame = 0.0f;
 
 bool Input::IsKeyDown(Key key) {
     return g_keyCurrent[static_cast<std::size_t>(key)];
@@ -50,6 +51,10 @@ Vec2 Input::MousePosition() {
     return g_mousePosition;
 }
 
+float Input::MouseWheelDelta() {
+    return g_mouseWheelThisFrame;
+}
+
 void Input::SetKeyState(Key key, bool down) {
     const std::size_t i = static_cast<std::size_t>(key);
     // Edge-event flag OR'd in so a same-frame down+up pair (or a same-frame
@@ -70,6 +75,12 @@ void Input::SetMousePosition(float x, float y) {
     g_mousePosition = {x, y};
 }
 
+void Input::AddMouseWheel(float deltaNotches) {
+    // Wheel events can fire multiple times between two game frames; sum so
+    // the frame sees the total scroll regardless of OS coalescing.
+    g_mouseWheelThisFrame += deltaNotches;
+}
+
 void Input::NewFrame() {
     // Reset edge-event trackers; "current" carries over because Down state
     // is continuous (button stays held across frames until an up event).
@@ -77,6 +88,7 @@ void Input::NewFrame() {
     g_keyReleasedThisFrame.fill(false);
     g_mousePressedThisFrame.fill(false);
     g_mouseReleasedThisFrame.fill(false);
+    g_mouseWheelThisFrame = 0.0f;
 }
 
 } // namespace NaraGame

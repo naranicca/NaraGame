@@ -51,10 +51,15 @@ public:
     static bool IsMouseReleased(MouseButton button);
     static Vec2 MousePosition();
 
+    // Accumulated scroll wheel delta for this frame, in notches (one wheel
+    // detent ≈ ±1.0). Positive = scrolled toward the user / "up".
+    static float MouseWheelDelta();
+
     // --- Called by the platform layer / engine; not for game code. ---
     static void SetKeyState(Key key, bool down);
     static void SetMouseButton(MouseButton button, bool down);
     static void SetMousePosition(float x, float y);
+    static void AddMouseWheel(float deltaNotches);
     static void NewFrame();
 };
 
