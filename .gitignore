@@ -36,3 +36,7 @@ DerivedData/
 *.lib
 *.dll
 .DS_Store
+
+# Cygwin/bash crash dumps
+*.stackdump
+
