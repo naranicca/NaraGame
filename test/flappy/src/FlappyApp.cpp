@@ -15,6 +15,7 @@
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
 #include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/renderer/ParticleSystem.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/rhi/RHIDevice.h>
 
@@ -100,6 +101,11 @@ protected:
 
         const float dt = Min(dtRaw, 1.0f / 30.0f);  // step cap so a hitch doesn't tunnel the bird through pipes
         const bool flapPressed = Input::IsKeyPressed(Key::Space);
+
+        // Particles tick every frame regardless of state — they're spawned
+        // in Die() right before transitioning to Dead, and need to keep
+        // animating while the GAME OVER overlay is showing.
+        m_particles.Update(dt);
 
         if (m_state == State::Title) {
             if (flapPressed) {
@@ -207,6 +213,9 @@ protected:
         m_renderer.DrawQuad(eyePos,  {6.0f, 6.0f}, pitch, Color(0.10f, 0.10f, 0.12f, 1.0f));
         m_renderer.DrawQuad(beakPos, {6.0f, 6.0f}, pitch, Color(0.95f, 0.45f, 0.15f, 1.0f));
 
+        // Feathers on top of the bird so the burst reads as coming off the body.
+        m_particles.Draw(m_renderer);
+
         // Score (top centre).
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%d", m_score);
@@ -263,6 +272,7 @@ private:
         m_pipes.clear();
         m_score = 0;
         m_newBest = false;
+        m_particles.Clear();
         // Seed one pipe near the right so the title screen doesn't look empty.
         SpawnPipe();
         m_pipes.back().x = kWidth + 60.0f;
@@ -290,6 +300,23 @@ private:
         m_state = State::Dead;
         m_birdVy = 0.0f;
         GetAudio().PlaySound(m_dieClip, 1.0f);
+
+        // Yellow-feather burst out of the bird's centre with gravity, so the
+        // feathers spray outward then settle downward like a real crash.
+        ParticleBurst burst;
+        burst.position  = {kBirdX + kBirdW * 0.5f, m_birdY + kBirdH * 0.5f};
+        burst.count     = 30;
+        burst.minSpeed  = 80.0f;
+        burst.maxSpeed  = 280.0f;
+        burst.minLife   = 0.5f;
+        burst.maxLife   = 1.1f;
+        burst.startSize = 12.0f;
+        burst.endSize   = 2.0f;
+        burst.startColor = Color(0.98f, 0.86f, 0.20f, 1.0f);  // bird yellow
+        burst.endColor   = Color(0.98f, 0.86f, 0.20f, 0.0f);  // fade out
+        burst.gravity    = {0.0f, 800.0f};
+        m_particles.Emit(burst);
+
         m_newBest = false;
         if (m_score > m_highScore) {
             m_highScore = m_score;
@@ -328,6 +355,7 @@ private:
     int m_highScore = 0;
     bool m_newBest = false;
     std::mt19937 m_rng;
+    ParticleSystem m_particles;
 };
 
 Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {
