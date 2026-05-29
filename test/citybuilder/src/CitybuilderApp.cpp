@@ -492,6 +492,24 @@ private:
     }
 
     void PlaceBuilding(int x, int y, int w, int h) {
+        // Bounds — keeps the footprint loop below from reading OOB corners.
+        if (x < 0 || y < 0
+            || x + w > m_terrain.Width()
+            || y + h > m_terrain.Height())
+            return;
+        // Same flat-and-above-water rule as TryPlaceRoad: every cell in the
+        // footprint must be a single flat land tile. Buildings on a slope
+        // would draw at their lowest corner and float; on water they'd sit
+        // below the surface with only the roof poking up.
+        for (int j = y; j < y + h; ++j) {
+            for (int i = x; i < x + w; ++i) {
+                const IsoCellSlope s = m_terrain.CellSlope(i, j);
+                if (s.maxH != s.minH || s.minH < 0)
+                    return;
+            }
+        }
+        // Reject overlap with existing buildings so a stray key press doesn't
+        // quietly stack two sprites in the same footprint.
         for (const Building& b : m_buildings) {
             const bool overlapX = !(x + w <= b.x || b.x + b.w <= x);
             const bool overlapY = !(y + h <= b.y || b.y + b.h <= y);
