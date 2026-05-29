@@ -32,12 +32,26 @@ NaraGame/
 │        ├─ metal/         # Metal         (스텁)
 │        └─ vulkan/        # Vulkan        (스텁)
 ├─ test/                   # 엔진을 사용하는 테스트 게임 (각각 실행 파일)
-│  ├─ breakout/            # 벽돌깨기      (창 + 화면 클리어 동작)
-│  ├─ space_invaders/      # 스페이스 인베이더 (스텁)
-│  └─ mario/               # 슈퍼마리오 클론  (스텁)
+│  ├─ breakout/            # 벽돌깨기
+│  ├─ space_invaders/      # 스페이스 인베이더
+│  ├─ mario/               # 슈퍼마리오 클론
+│  ├─ flappy/              # 플래피버드
+│  └─ citybuilder/         # SC2K 스타일 아이소메트릭 도시 건설 (자체 README)
+├─ tools/                  # MSDF 아틀라스 도구 (gitignored)
+├─ scripts/                # 빌드 헬퍼 (아틀라스 굽기, 셰이더 컴파일)
 ├─ third_party/            # 외부 의존성 자리 (현재 비어 있음 — 직접 구현 원칙)
-└─ docs/                   # 설계 문서
+└─ docs/                   # 설계 문서 + 스크린샷
 ```
+
+## 데모
+
+엔진 위에서 돌아가는 다섯 개의 작은 완성 게임. 각각이 엔진의 한두 가지 기능을 키워내려고 만든 테스트베드입니다.
+
+| | |
+| :---: | :---: |
+| **Flappy Bird**<br>중력/플랩, 파이프 스폰, AABB 충돌, 점수, 점진적 난이도, 메달 시스템, parallax 배경, 깃털 파티클, 하이스코어 영속화<br><img src="docs/screenshots/flappy.png" width="320"> | **Breakout**<br>벽돌 시트(단일 배치), 패들/공 아틀라스, 점수 텍스트, 파티클 디브리, 공용 물리(완전 반발 바디 + 정적 벽돌)<br><img src="docs/screenshots/breakout.png" width="320"> |
+| **Space Invaders**<br>편대 이동/가장자리 낙하, 발사/폭탄, 점수·생명·레벨, 게임오버/재시작, 하이스코어 ConfigFile 영속화<br><img src="docs/screenshots/space_invaders.png" width="320"> | **Super Mario**<br>중력/가변 점프, 타일 AABB 충돌(축별), 코인/물음표 블록(밑에서 치면 코인 팝업), 굼바(밟기·피격), 씬 스택(타이틀↔게임↔일시정지), BGM<br><img src="docs/screenshots/mario.png" width="320"> |
+| **Citybuilder** *(자체 [README](test/citybuilder/README.md))*<br>32×32 아이소메트릭 그리드, 코너 높이 지형, 슬로프 캐스케이드, 자동 연결 도로, 4종 건물 + 드롭 그림자, 카메라(줌 어라운드 커서/팬), 평문 세이브/로드<br><img src="docs/screenshots/citybuilder.png" width="320"> | |
 
 ## 빌드 (Windows)
 
@@ -98,5 +112,10 @@ $env:NARAGAME_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d1
 - [x] 공용 2D 물리 (PhysicsWorld) — 정적/키네마틱/동적 바디 + 중력 + **스윕 AABB 충돌(터널링 방지)** + 반발 계수 + 센서 + 접촉 보고
 - [x] 세 게임 모두 공용 물리로 통일 — Breakout(공=반발 바디, 벽/벽돌=정적), Mario(솔리드 타일=정적, 플레이어·굼바=동적+중력/점프/타일 충돌), Space Invaders(총알·폭탄=동적, 외계인·플레이어=센서 → 겹침 접촉)
 - [x] 파티클/이펙트 (ParticleSystem) — 풀 기반 버스트, 속도/수명/색·크기 보간(페이드아웃)+중력. 벽돌 파괴·외계인 폭발·굼바 밟기·코인 획득에 연결
+- [x] **Flappy Bird** — 중력/플랩 + 스크롤 파이프 + 점진적 난이도 + 메달 시스템 + parallax 구름/산 + 깃털 파티클 + 하이스코어 영속화 + 타이틀 호버 애니메이션
+- [x] **Citybuilder** — SC2K 스타일 아이소메트릭 도시 건설 (코너 높이 지형, 슬로프 캐스케이드, 자동 연결 도로, 건물 4종, 드롭 그림자, 카메라 줌·팬, 평문 세이브/로드). 자세한 내용은 [test/citybuilder/README.md](test/citybuilder/README.md)
+- [x] 회전된 컬러/텍스처 쿼드 (Renderer2D::DrawQuad 각도 오버로드) — Flappy 새 기울기에 사용
+- [x] **Per-texture 샘플러 필터** — TextureDesc::filter (Linear/Point), D3D11 백엔드가 두 샘플러를 BindTexture 시점에 선택
+- [x] **MSDF 텍스트 렌더링** — Multi-channel Signed Distance Field 아틀라스 (msdf-atlas-gen + Inter TTF). Renderer2D의 두 번째 파이프라인이 median(rgb) + fwidth(uv)로 어떤 크기에서도 sharp한 글자를 만듭니다. 다섯 게임 모두 적용
 - [ ] Metal 백엔드 (macOS/iOS)
 - [ ] macOS · Android · iOS 윈도우 실제 구현

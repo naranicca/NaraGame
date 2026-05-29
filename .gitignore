@@ -44,4 +44,5 @@ DerivedData/
 # Packaged demo saves in assets/ are *not* ignored — see demo.save.
 citybuilder.save
 flappy_high.txt
+invaders_save.cfg
 
