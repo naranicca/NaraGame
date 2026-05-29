@@ -131,7 +131,11 @@ protected:
                                      * m_terrain.HalfH() * 0.5f;
         m_camera.CenterOn({0.0f, gridVertCenter});
 
-        SeedDemoLake();
+        // Prefer the packaged demo map (procedurally generated; ships with
+        // the assets folder) so the opening screen shows a richer world than
+        // the bare seeded lake. Fall back to the seed if the file is missing.
+        if (!LoadFrom(assets + "/demo.save"))
+            SeedDemoLake();
         NARAGAME_INFO("Citybuilder: LMB/RMB terraform, MMB-drag pan, wheel zoom, B/V place, X remove, ESC quit");
     }
 
@@ -587,19 +591,25 @@ private:
         NARAGAME_INFO("citybuilder: saved -> %s", kSaveFile);
     }
 
+    // Wrapper: S key uses this for "load the user's last save".
     void Load() {
-        std::ifstream in(kSaveFile);
-        if (!in) {
+        if (!LoadFrom(kSaveFile))
             NARAGAME_WARN("citybuilder: %s not found", kSaveFile);
-            return;
-        }
+    }
+
+    // Returns true on success, false if the file is missing or has the wrong
+    // header. Used both by the user-driven Load() and by OnStart to load the
+    // packaged demo map.
+    bool LoadFrom(const std::string& path) {
+        std::ifstream in(path);
+        if (!in) return false;
         std::string token;
         in >> token;
         int version = 0;
         in >> version;
         if (token != "NaraSave" || version != 1) {
-            NARAGAME_WARN("citybuilder: %s has wrong header", kSaveFile);
-            return;
+            NARAGAME_WARN("citybuilder: %s has wrong header", path.c_str());
+            return false;
         }
 
         while (in >> token) {
@@ -642,7 +652,8 @@ private:
                 std::getline(in, rest);
             }
         }
-        NARAGAME_INFO("citybuilder: loaded <- %s", kSaveFile);
+        NARAGAME_INFO("citybuilder: loaded <- %s", path.c_str());
+        return true;
     }
 
     void SeedDemoLake() {
