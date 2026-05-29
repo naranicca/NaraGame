@@ -231,8 +231,14 @@ protected:
                 if (Input::IsMouseDown(MouseButton::Right)) SetRoad(m_hoverCellX, m_hoverCellY, false);
             } else {
                 // Terraform — edge-triggered so a held click only fires once.
-                if (Input::IsMousePressed(MouseButton::Left))  m_terrain.AdjustCorner(m_hoverI, m_hoverJ, +1);
-                if (Input::IsMousePressed(MouseButton::Right)) m_terrain.AdjustCorner(m_hoverI, m_hoverJ, -1);
+                if (Input::IsMousePressed(MouseButton::Left)) {
+                    m_terrain.AdjustCorner(m_hoverI, m_hoverJ, +1);
+                    CleanupAfterTerraform();
+                }
+                if (Input::IsMousePressed(MouseButton::Right)) {
+                    m_terrain.AdjustCorner(m_hoverI, m_hoverJ, -1);
+                    CleanupAfterTerraform();
+                }
             }
 
             // Building keys are mode-independent.
@@ -516,6 +522,34 @@ private:
             if (overlapX && overlapY) return;
         }
         m_buildings.push_back({x, y, w, h});
+    }
+
+    // Same "flat + above water" predicate used by PlaceBuilding / TryPlaceRoad.
+    bool CellIsBuildable(int x, int y) const {
+        const IsoCellSlope s = m_terrain.CellSlope(x, y);
+        return s.maxH == s.minH && s.minH >= 0;
+    }
+
+    // Called after every user-driven AdjustCorner. Sweeps roads + buildings
+    // and drops anything whose cells just became non-flat or underwater. The
+    // sweep is O(roads + buildings * footprint) per click — trivially fast at
+    // prototype scale, and keeps the rule symmetric: anything you couldn't
+    // *place* on a tile, you can't have *standing on* it either.
+    void CleanupAfterTerraform() {
+        for (int y = 0; y < m_terrain.Height(); ++y)
+            for (int x = 0; x < m_terrain.Width(); ++x)
+                if (HasRoad(x, y) && !CellIsBuildable(x, y))
+                    SetRoad(x, y, false);
+
+        m_buildings.erase(
+            std::remove_if(m_buildings.begin(), m_buildings.end(),
+                           [this](const Building& b) {
+                               for (int j = b.y; j < b.y + b.h; ++j)
+                                   for (int i = b.x; i < b.x + b.w; ++i)
+                                       if (!CellIsBuildable(i, j)) return true;
+                               return false;
+                           }),
+            m_buildings.end());
     }
 
     void RemoveBuildingAt(int cellX, int cellY) {
