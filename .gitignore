@@ -40,6 +40,7 @@ DerivedData/
 # Cygwin/bash crash dumps
 *.stackdump
 
-# Citybuilder save files (written next to the running exe)
-*.save
+# Citybuilder runtime save file (written next to the running exe).
+# Packaged demo saves in assets/ are *not* ignored — see demo.save.
+citybuilder.save
 
