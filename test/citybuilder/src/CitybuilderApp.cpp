@@ -23,6 +23,8 @@
 //                     RMB-drag erases. Terraform LMB/RMB are suppressed
 //                     while in road mode (so clicks while drawing don't
 //                     reshape the land underneath).
+//   S / L             save / load the whole world (terrain + roads + buildings
+//                     + camera) to ./citybuilder.save in plain text.
 //   ESC               quit
 
 #include <NaraGame/assets/TextureLoader.h>
@@ -43,6 +45,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <string>
@@ -194,6 +197,13 @@ protected:
         // R always toggles road mode, regardless of cursor location.
         if (Input::IsKeyPressed(Key::R))
             m_roadMode = !m_roadMode;
+
+        // Save / load work in any mode and don't need a hover. Bind to
+        // letters because the engine Key enum doesn't include function keys.
+        if (Input::IsKeyPressed(Key::S))
+            Save();
+        if (Input::IsKeyPressed(Key::L))
+            Load();
 
         // Don't act on the same frame a middle-pan started, so accidental
         // clicks while panning don't fire.
@@ -532,7 +542,107 @@ private:
         line("MMB drag pan  Wheel zoom", dimmer);
         line("Arrows pan", dimmer);
         line("B 1x1  V 2x2  X del", dimmer);
-        line("ESC quit", dimmer);
+        line("S save   L load   ESC quit", dimmer);
+    }
+
+    // ----------------------------------------------------------------------
+    // Persistence: a single plain-text dump of every authored bit of state
+    // (terrain corners, road bits, building list, camera). Plain text so the
+    // file is readable in a normal editor — a tiny prototype world serialises
+    // to a few KB and the debuggability is worth more than the bytes saved.
+    // Section order is fixed by the writer; the reader tolerates any order
+    // (handy when hand-editing) and skips unknown tokens (forward-compat).
+    // ----------------------------------------------------------------------
+    static constexpr const char* kSaveFile = "citybuilder.save";
+
+    void Save() {
+        std::ofstream out(kSaveFile);
+        if (!out) {
+            NARAGAME_WARN("citybuilder: failed to open %s for write", kSaveFile);
+            return;
+        }
+        out << "NaraSave 1\n";
+        out << "grid "
+            << m_terrain.Width()  << ' ' << m_terrain.Height() << ' '
+            << m_terrain.MinHeight() << ' ' << m_terrain.MaxHeight() << ' '
+            << m_terrain.StepHeight() << '\n';
+        const Vec2 cp = m_camera.Position();
+        out << "camera " << cp.x << ' ' << cp.y << ' ' << m_camera.Zoom() << '\n';
+
+        out << "corners\n";
+        for (int j = 0; j < m_terrain.CornerRows(); ++j)
+            for (int i = 0; i < m_terrain.CornerCols(); ++i)
+                out << m_terrain.Corner(i, j) << (i + 1 == m_terrain.CornerCols() ? '\n' : ' ');
+
+        out << "roads\n";
+        for (int y = 0; y < m_terrain.Height(); ++y)
+            for (int x = 0; x < m_terrain.Width(); ++x)
+                out << (HasRoad(x, y) ? '1' : '0') << (x + 1 == m_terrain.Width() ? '\n' : ' ');
+
+        out << "buildings " << m_buildings.size() << '\n';
+        for (const Building& b : m_buildings)
+            out << b.x << ' ' << b.y << ' ' << b.w << ' ' << b.h << '\n';
+
+        out << "end\n";
+        NARAGAME_INFO("citybuilder: saved -> %s", kSaveFile);
+    }
+
+    void Load() {
+        std::ifstream in(kSaveFile);
+        if (!in) {
+            NARAGAME_WARN("citybuilder: %s not found", kSaveFile);
+            return;
+        }
+        std::string token;
+        in >> token;
+        int version = 0;
+        in >> version;
+        if (token != "NaraSave" || version != 1) {
+            NARAGAME_WARN("citybuilder: %s has wrong header", kSaveFile);
+            return;
+        }
+
+        while (in >> token) {
+            if (token == "grid") {
+                int w, h, mn, mx, step;
+                in >> w >> h >> mn >> mx >> step;
+                if (w != m_terrain.Width() || h != m_terrain.Height())
+                    NARAGAME_WARN("citybuilder: save grid %dx%d differs from app %dx%d",
+                                  w, h, m_terrain.Width(), m_terrain.Height());
+            } else if (token == "camera") {
+                float x, y, z;
+                in >> x >> y >> z;
+                m_camera.SetPosition({x, y});
+                m_camera.SetZoom(z);
+            } else if (token == "corners") {
+                for (int j = 0; j < m_terrain.CornerRows(); ++j)
+                    for (int i = 0; i < m_terrain.CornerCols(); ++i) {
+                        int v; in >> v;
+                        m_terrain.SetCorner(i, j, v);
+                    }
+            } else if (token == "roads") {
+                for (int y = 0; y < m_terrain.Height(); ++y)
+                    for (int x = 0; x < m_terrain.Width(); ++x) {
+                        int v; in >> v;
+                        SetRoad(x, y, v != 0);
+                    }
+            } else if (token == "buildings") {
+                int n; in >> n;
+                m_buildings.clear();
+                m_buildings.reserve(static_cast<size_t>(n));
+                for (int i = 0; i < n; ++i) {
+                    Building b{};
+                    in >> b.x >> b.y >> b.w >> b.h;
+                    m_buildings.push_back(b);
+                }
+            } else if (token == "end") {
+                break;
+            } else {
+                std::string rest;
+                std::getline(in, rest);
+            }
+        }
+        NARAGAME_INFO("citybuilder: loaded <- %s", kSaveFile);
     }
 
     void SeedDemoLake() {

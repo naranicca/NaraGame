@@ -40,3 +40,6 @@ DerivedData/
 # Cygwin/bash crash dumps
 *.stackdump
 
+# Citybuilder save files (written next to the running exe)
+*.save
+
