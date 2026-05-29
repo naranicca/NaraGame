@@ -17,6 +17,9 @@
 //   Mouse wheel       zoom in/out around the cursor
 //   Arrow keys        pan camera (alt)
 //   B / V             place 1x1 / 2x2 building at hovered cell
+//   N / M             place 1x2 / 2x1 building (asymmetric footprints; N
+//                     extends one cell south in tile-space = SW on screen;
+//                     M extends one cell east in tile-space = SE on screen)
 //   X                 remove any building containing the hovered cell
 //   R                 toggle ROAD mode. In road mode, LMB-drag draws roads
 //                     on every flat-above-water cell the cursor crosses;
@@ -78,11 +81,14 @@ constexpr float kZoomMax = 4.0f;
 constexpr float kZoomStep = 1.15f;       // multiplier per wheel notch
 constexpr float kArrowPanPxPerSec = 500.0f;
 
-// Building textures: 64x64 red iso box for 1x1, 128x128 blue iso box for 2x2.
-// Each sprite bakes three-face shading (top base, left 70%, right 50%) so they
-// look 3D without a per-pixel light pass at draw time.
-constexpr float kBuilding1Size = 64.0f;
-constexpr float kBuilding2Size = 128.0f;
+// Building textures, one per supported footprint. All bake the same three-
+// face shading (top base, left 70%, right 50%). Sprite dimensions and the
+// sprite-local position of the box's south-ground corner are kept together in
+// CitybuilderApp::ShapeFor so DrawBuilding can stay uniform across shapes.
+//   1x1 (64x64)  red    — anchor (32, 64)
+//   2x2 (128x128) blue   — anchor (64, 128)
+//   1x2 (96x96)  green  — anchor (32, 95), top diamond skewed toward NE
+//   2x1 (96x96)  orange — anchor (64, 95), top diamond skewed toward NW
 
 struct Building {
     int x, y;   // origin (back-most cell in footprint)
@@ -120,6 +126,10 @@ protected:
         m_building1x1Sheet   = SpriteSheet(m_building1x1Texture.get(), 64, 64);
         m_building2x2Texture = LoadTexture(GetDevice(), assets + "/building_2x2.png");
         m_building2x2Sheet   = SpriteSheet(m_building2x2Texture.get(), 128, 128);
+        m_building1x2Texture = LoadTexture(GetDevice(), assets + "/building_1x2.png");
+        m_building1x2Sheet   = SpriteSheet(m_building1x2Texture.get(), 96, 96);
+        m_building2x1Texture = LoadTexture(GetDevice(), assets + "/building_2x1.png");
+        m_building2x1Sheet   = SpriteSheet(m_building2x1Texture.get(), 96, 96);
 
         m_camera.SetViewport(static_cast<float>(Config().width),
                              static_cast<float>(Config().height));
@@ -145,6 +155,8 @@ protected:
         m_fontTexture.reset();
         m_building1x1Texture.reset();
         m_building2x2Texture.reset();
+        m_building1x2Texture.reset();
+        m_building2x1Texture.reset();
         m_renderer.Shutdown();
     }
 
@@ -230,6 +242,12 @@ protected:
                 && m_hoverCellX <= m_terrain.Width()  - 2
                 && m_hoverCellY <= m_terrain.Height() - 2)
                 PlaceBuilding(m_hoverCellX, m_hoverCellY, 2, 2);
+            if (Input::IsKeyPressed(Key::N)
+                && m_hoverCellY <= m_terrain.Height() - 2)
+                PlaceBuilding(m_hoverCellX, m_hoverCellY, 1, 2);
+            if (Input::IsKeyPressed(Key::M)
+                && m_hoverCellX <= m_terrain.Width()  - 2)
+                PlaceBuilding(m_hoverCellX, m_hoverCellY, 2, 1);
             if (Input::IsKeyPressed(Key::X))
                 RemoveBuildingAt(m_hoverCellX, m_hoverCellY);
         }
@@ -396,42 +414,45 @@ private:
         return e == INT_MAX ? 0 : e;
     }
 
-    void DrawBuilding(const Building& b) {
-        // Footprint centroid in tile space -> world (caller-relative-to-origin).
-        const float mtx = b.x + (b.w - 1) * 0.5f;
-        const float mty = b.y + (b.h - 1) * 0.5f;
-        const Vec2 ground{
-            (mtx - mty) * m_terrain.HalfW(),
-            (mtx + mty) * m_terrain.HalfH()
-        };
-        const int baseElev = FootprintBaseElev(b);
-        const float screenCy = ground.y - static_cast<float>(baseElev * m_terrain.StepHeight());
+    // Per-shape sprite metadata. anchorLocalX/Y is where the box's
+    // south-ground corner sits in sprite-local coords; tying it to the world
+    // south corner of the bounding diamond is enough to place every shape
+    // correctly without per-shape special cases.
+    struct ShapeInfo {
+        const SpriteSheet* sheet;
+        float spriteW;
+        float spriteH;
+        float anchorLocalX;
+        float anchorLocalY;
+    };
+    ShapeInfo ShapeFor(int w, int h) const {
+        if (w == 1 && h == 1) return {&m_building1x1Sheet,  64.0f,  64.0f, 32.0f,  64.0f};
+        if (w == 2 && h == 2) return {&m_building2x2Sheet, 128.0f, 128.0f, 64.0f, 128.0f};
+        if (w == 1 && h == 2) return {&m_building1x2Sheet,  96.0f,  96.0f, 32.0f,  95.0f};
+        if (w == 2 && h == 1) return {&m_building2x1Sheet,  96.0f,  96.0f, 64.0f,  95.0f};
+        return {nullptr, 0.0f, 0.0f, 0.0f, 0.0f};
+    }
 
-        // Anchor: sprite's bottom-center (where the box's south-ground corner
-        // sits) aligns with the centroid's south corner. For a wxh footprint
-        // the south corner is centroid + (0, halfDiamondH) where halfDiamondH
-        // grows with the footprint: 1x1 -> halfH (16 px), 2x2 -> 2*halfH (32).
-        SpriteSheet* sheet = nullptr;
-        float spriteSize = 0.0f;
-        float halfDiamondH = 0.0f;
-        if (b.w == 1 && b.h == 1) {
-            sheet = &m_building1x1Sheet;
-            spriteSize = kBuilding1Size;
-            halfDiamondH = m_terrain.HalfH();          // 16 px
-        } else if (b.w == 2 && b.h == 2) {
-            sheet = &m_building2x2Sheet;
-            spriteSize = kBuilding2Size;
-            halfDiamondH = m_terrain.HalfH() * 2.0f;   // 32 px
-        } else {
-            return; // unsupported footprint for prototype
-        }
+    void DrawBuilding(const Building& b) {
+        const ShapeInfo info = ShapeFor(b.w, b.h);
+        if (info.sheet == nullptr) return;
+
+        // World south corner of the footprint's bounding diamond. The cell
+        // (b.x+w-1, b.y+h-1) is the front-most cell; its south corner is the
+        // box's south-ground point and the natural place to align the sprite.
+        const float halfW = m_terrain.HalfW();
+        const float halfH = m_terrain.HalfH();
+        const float worldSx = (b.x - b.y + b.w - b.h) * halfW;
+        const float worldSy = (b.x + b.y + b.w + b.h - 1) * halfH;
+        const int   baseElev = FootprintBaseElev(b);
+        const float screenSy = worldSy - static_cast<float>(baseElev * m_terrain.StepHeight());
 
         const Vec2 topLeft{
-            ground.x - spriteSize * 0.5f,
-            screenCy - spriteSize + halfDiamondH
+            worldSx  - info.anchorLocalX,
+            screenSy - info.anchorLocalY
         };
-        m_renderer.DrawQuad(topLeft, {spriteSize, spriteSize},
-                            sheet->At(0), Color(1.0f, 1.0f, 1.0f, 1.0f));
+        m_renderer.DrawQuad(topLeft, {info.spriteW, info.spriteH},
+                            info.sheet->At(0), Color(1.0f, 1.0f, 1.0f, 1.0f));
     }
 
     // Per-cell building-shadow overlay. Each building shadows the cells in
@@ -582,7 +603,7 @@ private:
         line("R  toggle road mode", dimmer);
         line("MMB drag pan  Wheel zoom", dimmer);
         line("Arrows pan", dimmer);
-        line("B 1x1  V 2x2  X del", dimmer);
+        line("B 1x1  V 2x2  N 1x2  M 2x1  X del", dimmer);
         line("S save   L load   ESC quit", dimmer);
     }
 
@@ -717,6 +738,10 @@ private:
     SpriteSheet                 m_building1x1Sheet;
     std::unique_ptr<RHITexture> m_building2x2Texture;
     SpriteSheet                 m_building2x2Sheet;
+    std::unique_ptr<RHITexture> m_building1x2Texture;
+    SpriteSheet                 m_building1x2Sheet;
+    std::unique_ptr<RHITexture> m_building2x1Texture;
+    SpriteSheet                 m_building2x1Sheet;
     IsoTerrain                  m_terrain;
     std::vector<Building>       m_buildings;
     Camera2D                    m_camera;
