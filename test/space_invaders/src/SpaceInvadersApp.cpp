@@ -14,7 +14,8 @@
 #include <NaraGame/io/ConfigFile.h>
 #include <NaraGame/math/Math.h>
 #include <NaraGame/physics/Physics2D.h>
-#include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/assets/MSDFFontLoader.h>
+#include <NaraGame/renderer/MSDFFont.h>
 #include <NaraGame/renderer/ParticleSystem.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/TextureAtlas.h>
@@ -94,9 +95,7 @@ protected:
         m_atlas.Add("bullet", 40.0f, 18.0f, 4.0f, 16.0f);
         m_atlas.Add("bomb", 46.0f, 18.0f, 6.0f, 16.0f);
 
-        m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png");
-        m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
-        m_font.SetTracking(-2);
+        m_font = LoadMSDFFont(GetDevice(), assets + "/msdf-inter.json");
 
         m_audio = &GetAudio();
         m_shoot = LoadWav(assets + "/shoot.wav");
@@ -111,7 +110,6 @@ protected:
 
     void OnStop() override {
         m_spritesTexture.reset();
-        m_fontTexture.reset();
         m_renderer.Shutdown();
     }
 
@@ -170,10 +168,10 @@ protected:
 
         DrawHud();
         if (m_gameOver) {
-            DrawCentered("GAME  OVER", 380.0f, 4.0f, Color(1.0f, 0.35f, 0.3f));
-            DrawCentered("FINAL SCORE " + std::to_string(m_score), 450.0f, 1.6f,
+            DrawCentered("GAME  OVER", 370.0f, 90.0f, Color(1.0f, 0.35f, 0.3f));
+            DrawCentered("FINAL SCORE " + std::to_string(m_score), 470.0f, 30.0f,
                          Color(0.9f, 0.9f, 1.0f));
-            DrawCentered("PRESS ENTER TO RESTART", 500.0f, 1.4f, Color(0.6f, 0.6f, 0.7f));
+            DrawCentered("PRESS ENTER TO RESTART", 520.0f, 26.0f, Color(0.6f, 0.6f, 0.7f));
         }
         m_renderer.End();
     }
@@ -426,14 +424,14 @@ private:
     }
 
     void DrawHud() {
-        m_renderer.DrawText(m_font, "SCORE " + std::to_string(m_score), {16.0f, 16.0f},
-                            Color(0.95f, 0.95f, 1.0f), 1.4f);
+        m_renderer.DrawText(m_font, "SCORE " + std::to_string(m_score), {16.0f, 14.0f},
+                            Color(0.95f, 0.95f, 1.0f), 28.0f);
         m_renderer.DrawText(m_font, "LEVEL " + std::to_string(m_level), {16.0f, 46.0f},
-                            Color(0.7f, 0.8f, 1.0f), 1.0f);
+                            Color(0.7f, 0.8f, 1.0f), 22.0f);
         const std::string hi = "HI-SCORE " + std::to_string(m_hiScore);
-        const float hiW = m_font.Measure(hi, 1.4f).x;
-        m_renderer.DrawText(m_font, hi, {(kWidth - hiW) * 0.5f, 16.0f}, Color(1.0f, 0.85f, 0.3f),
-                            1.4f);
+        const float hiW = m_font.Measure(hi, 28.0f).x;
+        m_renderer.DrawText(m_font, hi, {(kWidth - hiW) * 0.5f, 14.0f}, Color(1.0f, 0.85f, 0.3f),
+                            28.0f);
         for (int i = 0; i < m_lives; ++i) {
             const Vec2 pos{kWidth - 40.0f - i * 40.0f, 18.0f};
             m_renderer.DrawQuad(pos, {32.0f, 20.0f}, m_atlas.Get("player"),
@@ -441,16 +439,15 @@ private:
         }
     }
 
-    void DrawCentered(const std::string& text, float y, float scale, const Color& color) {
-        const float textWidth = m_font.Measure(text, scale).x;
-        m_renderer.DrawText(m_font, text, {(kWidth - textWidth) * 0.5f, y}, color, scale);
+    void DrawCentered(const std::string& text, float y, float pixelSize, const Color& color) {
+        const float textWidth = m_font.Measure(text, pixelSize).x;
+        m_renderer.DrawText(m_font, text, {(kWidth - textWidth) * 0.5f, y}, color, pixelSize);
     }
 
     Renderer2D m_renderer;
     std::unique_ptr<RHITexture> m_spritesTexture;
-    std::unique_ptr<RHITexture> m_fontTexture;
     TextureAtlas m_atlas;
-    BitmapFont m_font;
+    MSDFFont m_font;
 
     PhysicsWorld m_world;
     ParticleSystem m_particles;

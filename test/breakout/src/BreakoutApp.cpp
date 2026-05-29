@@ -11,7 +11,8 @@
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
 #include <NaraGame/physics/Physics2D.h>
-#include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/assets/MSDFFontLoader.h>
+#include <NaraGame/renderer/MSDFFont.h>
 #include <NaraGame/renderer/ParticleSystem.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/SpriteSheet.h>
@@ -64,9 +65,7 @@ protected:
         m_atlas.Add("ball", 0.0f, 0.0f, 32.0f, 32.0f);
         m_atlas.Add("paddle", 0.0f, 32.0f, 120.0f, 20.0f);
 
-        m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png");
-        m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
-        m_font.SetTracking(-2);
+        m_font = LoadMSDFFont(GetDevice(), assets + "/msdf-inter.json");
 
         BuildWorld();
         NARAGAME_INFO("Breakout: Left/Right to move, ESC to quit (physics-driven)");
@@ -75,7 +74,6 @@ protected:
     void OnStop() override {
         m_brickSheetTexture.reset();
         m_spritesTexture.reset();
-        m_fontTexture.reset();
         m_renderer.Shutdown();
     }
 
@@ -128,10 +126,10 @@ protected:
 
         m_particles.Draw(m_renderer);
 
-        m_renderer.DrawText(m_font, "SCORE " + std::to_string(m_score), {16.0f, 18.0f},
-                            Color(0.95f, 0.95f, 1.0f), 1.5f);
-        DrawCentered("NARAGAME  BREAKOUT", 300.0f, 3.0f, Color(0.35f, 0.45f, 0.7f));
-        DrawCentered("ARROW KEYS  -  MOVE      ESC  -  QUIT", 360.0f, 1.3f,
+        m_renderer.DrawText(m_font, "SCORE " + std::to_string(m_score), {16.0f, 14.0f},
+                            Color(0.95f, 0.95f, 1.0f), 30.0f);
+        DrawCentered("NARAGAME  BREAKOUT", 290.0f, 64.0f, Color(0.35f, 0.45f, 0.7f));
+        DrawCentered("ARROW KEYS  -  MOVE      ESC  -  QUIT", 370.0f, 24.0f,
                      Color(0.5f, 0.5f, 0.6f));
         m_renderer.End();
     }
@@ -276,19 +274,18 @@ private:
         return true;
     }
 
-    void DrawCentered(const std::string& text, float y, float scale, const Color& color) {
+    void DrawCentered(const std::string& text, float y, float pixelSize, const Color& color) {
         const float w = static_cast<float>(Config().width);
-        const float textWidth = m_font.Measure(text, scale).x;
-        m_renderer.DrawText(m_font, text, {(w - textWidth) * 0.5f, y}, color, scale);
+        const float textWidth = m_font.Measure(text, pixelSize).x;
+        m_renderer.DrawText(m_font, text, {(w - textWidth) * 0.5f, y}, color, pixelSize);
     }
 
     Renderer2D m_renderer;
     std::unique_ptr<RHITexture> m_brickSheetTexture;
     std::unique_ptr<RHITexture> m_spritesTexture;
-    std::unique_ptr<RHITexture> m_fontTexture;
     SpriteSheet m_brickSheet;
     TextureAtlas m_atlas;
-    BitmapFont m_font;
+    MSDFFont m_font;
 
     PhysicsWorld m_world;
     ParticleSystem m_particles;

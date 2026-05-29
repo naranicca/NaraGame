@@ -16,7 +16,8 @@
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
 #include <NaraGame/physics/Physics2D.h>
-#include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/assets/MSDFFontLoader.h>
+#include <NaraGame/renderer/MSDFFont.h>
 #include <NaraGame/renderer/Camera2D.h>
 #include <NaraGame/renderer/Font.h>
 #include <NaraGame/renderer/ParticleSystem.h>
@@ -86,8 +87,7 @@ struct Goomba {
 // Shared resources + scene factories, owned by the Application.
 struct GameContext {
     Renderer2D* renderer = nullptr;
-    BitmapFont* font = nullptr;
-    Font* propFont = nullptr; // proportional BMFont
+    MSDFFont* font = nullptr;   // also serves the old propFont tagline path
     TextureAtlas* chars = nullptr;
     RHITexture* tilesTexture = nullptr;
     SpriteSheet tileset;
@@ -113,9 +113,9 @@ struct GameContext {
     std::function<std::unique_ptr<Scene>()> makeTitle;
     std::function<std::unique_ptr<Scene>(int)> makeGame;
 
-    void DrawTextCentered(const std::string& text, float y, float scale, const Color& color) {
-        const float w = font->Measure(text, scale).x;
-        renderer->DrawText(*font, text, {(screenW - w) * 0.5f, y}, color, scale);
+    void DrawTextCentered(const std::string& text, float y, float pixelSize, const Color& color) {
+        const float w = font->Measure(text, pixelSize).x;
+        renderer->DrawText(*font, text, {(screenW - w) * 0.5f, y}, color, pixelSize);
     }
 };
 } // namespace
@@ -141,9 +141,9 @@ public:
         Renderer2D& r = *m_ctx->renderer;
         r.Begin(Renderer2D::ScreenCamera(m_ctx->screenW, m_ctx->screenH));
         r.DrawQuad({0.0f, 0.0f}, {m_ctx->screenW, m_ctx->screenH}, Color(0.0f, 0.0f, 0.0f, 0.6f));
-        m_ctx->DrawTextCentered("PAUSED", 210.0f, 4.0f, Color(1.0f, 1.0f, 1.0f));
-        m_ctx->DrawTextCentered("ENTER  RESUME", 300.0f, 1.6f, Color(0.85f, 0.95f, 0.85f));
-        m_ctx->DrawTextCentered("ESC  QUIT TO TITLE", 340.0f, 1.6f, Color(0.95f, 0.85f, 0.8f));
+        m_ctx->DrawTextCentered("PAUSED", 200.0f, 96.0f, Color(1.0f, 1.0f, 1.0f));
+        m_ctx->DrawTextCentered("ENTER  RESUME", 310.0f, 36.0f, Color(0.85f, 0.95f, 0.85f));
+        m_ctx->DrawTextCentered("ESC  QUIT TO TITLE", 360.0f, 36.0f, Color(0.95f, 0.85f, 0.8f));
         r.End();
     }
 
@@ -282,13 +282,13 @@ public:
 
         r.Begin(Renderer2D::ScreenCamera(m_ctx->screenW, m_ctx->screenH));
         r.DrawText(*m_ctx->font, "SCORE " + std::to_string(m_ctx->score), {16.0f, 14.0f},
-                   Color(1.0f, 1.0f, 1.0f), 1.4f);
-        r.DrawText(*m_ctx->font, "COINS " + std::to_string(m_ctx->coins), {300.0f, 14.0f},
-                   Color(1.0f, 0.9f, 0.4f), 1.4f);
-        r.DrawText(*m_ctx->font, "WORLD " + std::to_string(m_level), {540.0f, 14.0f},
-                   Color(0.8f, 0.9f, 1.0f), 1.4f);
+                   Color(1.0f, 1.0f, 1.0f), 22.0f);
+        r.DrawText(*m_ctx->font, "COINS " + std::to_string(m_ctx->coins), {280.0f, 14.0f},
+                   Color(1.0f, 0.9f, 0.4f), 22.0f);
+        r.DrawText(*m_ctx->font, "WORLD " + std::to_string(m_level), {520.0f, 14.0f},
+                   Color(0.8f, 0.9f, 1.0f), 22.0f);
         r.DrawText(*m_ctx->font, "LIVES " + std::to_string(m_ctx->lives),
-                   {m_ctx->screenW - 170.0f, 14.0f}, Color(0.8f, 1.0f, 0.8f), 1.4f);
+                   {m_ctx->screenW - 130.0f, 14.0f}, Color(0.8f, 1.0f, 0.8f), 22.0f);
         r.End();
     }
 
@@ -598,21 +598,22 @@ public:
         Application::Get().GetDevice().Clear(Color(0.10f, 0.12f, 0.28f, 1.0f));
         Renderer2D& r = *m_ctx->renderer;
         r.Begin(Renderer2D::ScreenCamera(m_ctx->screenW, m_ctx->screenH));
-        m_ctx->DrawTextCentered("N A R A", 150.0f, 5.0f, Color(0.95f, 0.3f, 0.3f));
-        m_ctx->DrawTextCentered("SUPER MARIO", 240.0f, 3.0f, Color(1.0f, 1.0f, 1.0f));
+        m_ctx->DrawTextCentered("N A R A", 130.0f, 120.0f, Color(0.95f, 0.3f, 0.3f));
+        m_ctx->DrawTextCentered("SUPER MARIO", 250.0f, 72.0f, Color(1.0f, 1.0f, 1.0f));
         // Blink the prompt.
         if (std::fmod(m_time, 1.0f) < 0.65f)
-            m_ctx->DrawTextCentered("PRESS ENTER TO START", 360.0f, 1.6f,
+            m_ctx->DrawTextCentered("PRESS ENTER TO START", 360.0f, 36.0f,
                                     Color(0.9f, 0.9f, 0.6f));
-        m_ctx->DrawTextCentered("A/D MOVE   SPACE JUMP   P PAUSE", 470.0f, 1.1f,
+        m_ctx->DrawTextCentered("A/D MOVE   SPACE JUMP   P PAUSE", 470.0f, 24.0f,
                                 Color(0.6f, 0.65f, 0.8f));
-        // Proportional (variable-width) BMFont tagline.
-        if (m_ctx->propFont != nullptr && m_ctx->propFont->Valid()) {
+        // Tagline now uses the same MSDF font as the rest -- Inter handles
+        // proportional widths natively, no separate BMFont needed.
+        {
             const std::string tag = "Built from scratch with the NaraGame engine";
-            const float s = 0.9f;
-            const float w = m_ctx->propFont->Measure(tag, s).x;
-            r.DrawText(*m_ctx->propFont, tag, {(m_ctx->screenW - w) * 0.5f, 410.0f},
-                       Color(0.7f, 0.85f, 1.0f), s);
+            const float px = 18.0f;
+            const float w = m_ctx->font->Measure(tag, px).x;
+            r.DrawText(*m_ctx->font, tag, {(m_ctx->screenW - w) * 0.5f, 530.0f},
+                       Color(0.7f, 0.85f, 1.0f), px);
         }
         r.End();
     }
@@ -636,11 +637,7 @@ protected:
 
         m_tilesTexture = LoadTexture(GetDevice(), assets + "/tiles.png");
         m_charTexture = LoadTexture(GetDevice(), assets + "/characters.png");
-        m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png");
-        m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
-        m_font.SetTracking(-2);
-
-        m_propFont = LoadBMFont(GetDevice(), assets + "/propfont.fnt");
+        m_font = LoadMSDFFont(GetDevice(), assets + "/msdf-inter.json");
 
         m_jump = LoadWav(assets + "/jump.wav");
         m_coin = LoadWav(assets + "/coin.wav");
@@ -657,7 +654,6 @@ protected:
 
         m_ctx.renderer = &m_renderer;
         m_ctx.font = &m_font;
-        m_ctx.propFont = &m_propFont;
         m_ctx.chars = &m_chars;
         m_ctx.tilesTexture = m_tilesTexture.get();
         m_ctx.tileset = SpriteSheet(m_tilesTexture.get(), kTile, kTile);
@@ -677,7 +673,6 @@ protected:
     void OnStop() override {
         m_tilesTexture.reset();
         m_charTexture.reset();
-        m_fontTexture.reset();
         m_renderer.Shutdown();
     }
 
@@ -696,9 +691,7 @@ private:
     Renderer2D m_renderer;
     std::unique_ptr<RHITexture> m_tilesTexture;
     std::unique_ptr<RHITexture> m_charTexture;
-    std::unique_ptr<RHITexture> m_fontTexture;
-    BitmapFont m_font;
-    Font m_propFont;
+    MSDFFont m_font;
     TextureAtlas m_chars;
     AudioClip m_jump;
     AudioClip m_coin;

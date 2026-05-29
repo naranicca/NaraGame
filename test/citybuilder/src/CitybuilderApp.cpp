@@ -37,7 +37,8 @@
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
 #include <NaraGame/math/Vec2.h>
-#include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/assets/MSDFFontLoader.h>
+#include <NaraGame/renderer/MSDFFont.h>
 #include <NaraGame/renderer/Camera2D.h>
 #include <NaraGame/renderer/IsoTerrain.h>
 #include <NaraGame/renderer/Renderer2D.h>
@@ -118,9 +119,7 @@ protected:
         m_roadsSheet   = SpriteSheet(m_roadsTexture.get(), 64, 40);
         m_roadCells.assign(static_cast<size_t>(m_terrain.Width()) * m_terrain.Height(), false);
 
-        m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png");
-        m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
-        m_font.SetTracking(-2);
+        m_font = LoadMSDFFont(GetDevice(), assets + "/msdf-inter.json");
 
         m_building1x1Texture = LoadTexture(GetDevice(), assets + "/building_1x1.png");
         m_building1x1Sheet   = SpriteSheet(m_building1x1Texture.get(), 64, 64);
@@ -152,7 +151,6 @@ protected:
     void OnStop() override {
         m_slopesTexture.reset();
         m_roadsTexture.reset();
-        m_fontTexture.reset();
         m_building1x1Texture.reset();
         m_building2x2Texture.reset();
         m_building1x2Texture.reset();
@@ -611,15 +609,15 @@ private:
     // coords, so the layout doesn't have to undo the camera transform.
     void DrawHud() {
         constexpr float kPad = 12.0f;
-        constexpr float kScale = 1.0f;
-        const float lineH = static_cast<float>(m_font.LineHeight()) * kScale;
+        constexpr float kPixelSize = 22.0f;
+        const float lineH = m_font.LineHeight() * kPixelSize;
         const Color white {1.00f, 1.00f, 1.00f, 1.0f};
         const Color dim   {0.78f, 0.80f, 0.85f, 1.0f};
         const Color dimmer{0.55f, 0.57f, 0.62f, 1.0f};
 
         float y = kPad;
         auto line = [&](const std::string& s, const Color& c) {
-            m_renderer.DrawText(m_font, s, {kPad, y}, c, kScale);
+            m_renderer.DrawText(m_font, s, {kPad, y}, c, kPixelSize);
             y += lineH;
         };
 
@@ -784,8 +782,7 @@ private:
     std::unique_ptr<RHITexture> m_roadsTexture;
     SpriteSheet                 m_roadsSheet;
     std::vector<bool>           m_roadCells;
-    std::unique_ptr<RHITexture> m_fontTexture;
-    BitmapFont                  m_font;
+    MSDFFont                    m_font;
     std::unique_ptr<RHITexture> m_building1x1Texture;
     SpriteSheet                 m_building1x1Sheet;
     std::unique_ptr<RHITexture> m_building2x2Texture;
