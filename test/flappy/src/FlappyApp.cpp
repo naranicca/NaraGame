@@ -72,6 +72,12 @@ constexpr float kHillsW   = 480.0f;
 constexpr float kHillsH   = 80.0f;
 constexpr float kHillsVx  = -12.0f;
 
+// Medals — single sprite sheet with four 64x64 frames (bronze, silver, gold,
+// platinum). Earned at 5 / 10 / 20 / 30 score thresholds; below 5 no medal
+// shows, so the worst run isn't celebrated.
+constexpr float kMedalPx   = 64.0f;     // source frame size in medals.png
+constexpr float kMedalSize = 80.0f;     // display size on the Dead overlay
+
 // AABB intersection — half-open rects, standard.
 bool RectsOverlap(float ax, float ay, float aw, float ah,
                   float bx, float by, float bw, float bh) {
@@ -105,6 +111,12 @@ protected:
         m_hillsTexture = LoadTexture(GetDevice(), assets + "/hills.png");
         m_hillsRegion  = TextureRegion::FromPixels(
             m_hillsTexture.get(), 0.0f, 0.0f, kHillsW, kHillsH);
+
+        m_medalsTexture = LoadTexture(GetDevice(), assets + "/medals.png");
+        for (int i = 0; i < 4; ++i) {
+            m_medalRegions[i] = TextureRegion::FromPixels(
+                m_medalsTexture.get(), i * kMedalPx, 0.0f, kMedalPx, kMedalPx);
+        }
 
         // Pre-populate the cloud pool spread across the screen so the title
         // doesn't open with an empty sky and clouds drifting in from the right.
@@ -278,17 +290,26 @@ protected:
                 DrawCentered(hs, kHeight * 0.54f, 1.2f, Color(1.0f, 0.95f, 0.40f, 1.0f));
             }
         } else if (m_state == State::Dead) {
-            DrawCentered("GAME OVER", kHeight * 0.30f, 2.5f, Color(1.0f, 0.45f, 0.45f, 1.0f));
+            DrawCentered("GAME OVER", kHeight * 0.20f, 2.5f, Color(1.0f, 0.45f, 0.45f, 1.0f));
+            // Medal sits between GAME OVER and the score line. Skipped
+            // entirely when the run didn't clear the bronze threshold —
+            // a sub-5 round shouldn't feel rewarded.
+            const int tier = MedalTier();
+            if (tier >= 0) {
+                m_renderer.DrawQuad(
+                    {(kWidth - kMedalSize) * 0.5f, kHeight * 0.27f},
+                    {kMedalSize, kMedalSize}, m_medalRegions[tier]);
+            }
             if (m_newBest) {
                 std::snprintf(hs, sizeof(hs), "NEW BEST  %d", m_highScore);
-                DrawCentered(hs, kHeight * 0.40f, 1.5f, Color(1.0f, 0.95f, 0.40f, 1.0f));
+                DrawCentered(hs, kHeight * 0.46f, 1.5f, Color(1.0f, 0.95f, 0.40f, 1.0f));
             } else {
                 std::snprintf(hs, sizeof(hs), "BEST  %d", m_highScore);
-                DrawCentered(hs, kHeight * 0.40f, 1.3f, Color(0.90f, 0.90f, 0.95f, 1.0f));
+                DrawCentered(hs, kHeight * 0.46f, 1.3f, Color(0.90f, 0.90f, 0.95f, 1.0f));
             }
             // Suppress the restart hint while the lockout is active.
             if (m_deadTimer <= 0.0f)
-                DrawCentered("SPACE TO RESTART", kHeight * 0.48f, 1.4f, Color(1, 1, 1, 1));
+                DrawCentered("SPACE TO RESTART", kHeight * 0.54f, 1.4f, Color(1, 1, 1, 1));
         }
 
         m_renderer.End();
@@ -334,6 +355,17 @@ private:
     float CurrentScrollSpeed() const { return kScrollVx + (-110.0f) * Difficulty(); }
     float CurrentSpawnDx()    const { return kSpawnDx + (-35.0f)  * Difficulty(); }
     float CurrentGapH()       const { return kGapH    + (-50.0f)  * Difficulty(); }
+
+    // -1 = no medal, 0 = bronze, 1 = silver, 2 = gold, 3 = platinum.
+    // Thresholds are tuned to the difficulty curve: 5 is "you saw a few
+    // pipes", 10 is "you're getting it", 20 is solid, 30 = at the cap.
+    int MedalTier() const {
+        if (m_score >= 30) return 3;
+        if (m_score >= 20) return 2;
+        if (m_score >= 10) return 1;
+        if (m_score >=  5) return 0;
+        return -1;
+    }
 
     Cloud SpawnCloud(float x) {
         std::uniform_real_distribution<float> yDist(20.0f, kHeight * 0.45f);
@@ -404,6 +436,8 @@ private:
     TextureRegion m_cloudRegion;
     std::unique_ptr<RHITexture> m_hillsTexture;
     TextureRegion m_hillsRegion;
+    std::unique_ptr<RHITexture> m_medalsTexture;
+    TextureRegion m_medalRegions[4];
     std::vector<Cloud> m_clouds;
     float m_hillsOffsetX = 0.0f;
     BitmapFont m_font;
