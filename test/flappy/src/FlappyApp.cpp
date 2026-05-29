@@ -159,6 +159,7 @@ protected:
         }
 
         if (m_state == State::Title) {
+            m_titleTimer += dt;
             if (flapPressed) {
                 m_state = State::Playing;
                 m_birdVy = kFlapVy; // first flap starts the round
@@ -266,8 +267,21 @@ protected:
         // up on a flap and drops on a fall. Eye/beak/wing detail is baked
         // into bird.png, so one rotated textured quad replaces what used to
         // be three coloured quads with manual rotation math.
-        const Vec2 birdCenter{kBirdX + kBirdW * 0.5f, m_birdY + kBirdH * 0.5f};
-        const float pitch = Clamp(m_birdVy / 500.0f, -0.6f, 1.4f);
+        //
+        // On the title screen the bird isn't being simulated, so it would
+        // sit dead still — instead we offset it by a small sine bob and
+        // give the pitch the cosine of the same wave, so the nose lifts on
+        // the way up and dips on the way down, just like an in-flight flap.
+        float drawBirdY = m_birdY;
+        float pitch = Clamp(m_birdVy / 500.0f, -0.6f, 1.4f);
+        if (m_state == State::Title) {
+            constexpr float kHoverFreq = 4.0f;   // rad/s — gentle ~1.5s period
+            constexpr float kHoverAmp  = 8.0f;   // pixels
+            const float w = m_titleTimer * kHoverFreq;
+            drawBirdY = m_birdY + std::sin(w) * kHoverAmp;
+            pitch     = std::cos(w) * 0.22f;
+        }
+        const Vec2 birdCenter{kBirdX + kBirdW * 0.5f, drawBirdY + kBirdH * 0.5f};
         m_renderer.DrawQuad(birdCenter, {kBirdW, kBirdH}, pitch, m_birdRegion);
 
         // Feathers on top of the bird so the burst reads as coming off the body.
@@ -339,6 +353,7 @@ private:
         m_state = State::Title;
         m_birdY = kHeight * 0.45f;
         m_birdVy = 0.0f;
+        m_titleTimer = 0.0f;
         m_pipes.clear();
         m_score = 0;
         m_newBest = false;
@@ -453,6 +468,7 @@ private:
     int m_highScore = 0;
     bool m_newBest = false;
     float m_deadTimer = 0.0f;
+    float m_titleTimer = 0.0f;
     std::mt19937 m_rng;
     ParticleSystem m_particles;
 };
