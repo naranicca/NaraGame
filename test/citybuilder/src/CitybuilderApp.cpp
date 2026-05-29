@@ -18,8 +18,11 @@
 //   Arrow keys        pan camera (alt)
 //   B / V             place 1x1 / 2x2 building at hovered cell
 //   X                 remove any building containing the hovered cell
-//   R                 toggle road on hovered cell (flat + above water only;
-//                     16-variant sprite auto-connects to neighbouring roads)
+//   R                 toggle ROAD mode. In road mode, LMB-drag draws roads
+//                     on every flat-above-water cell the cursor crosses;
+//                     RMB-drag erases. Terraform LMB/RMB are suppressed
+//                     while in road mode (so clicks while drawing don't
+//                     reshape the land underneath).
 //   ESC               quit
 
 #include <NaraGame/assets/TextureLoader.h>
@@ -188,14 +191,25 @@ protected:
         m_hoverCellX = pick.cellX;
         m_hoverCellY = pick.cellY;
 
-        // Don't terraform on the same frame a middle-pan started, so a quick
-        // accidental left-click while panning doesn't fire.
-        if (pick.valid && !Input::IsMouseDown(MouseButton::Middle)) {
-            if (Input::IsMousePressed(MouseButton::Left))
-                m_terrain.AdjustCorner(m_hoverI, m_hoverJ, +1);
-            if (Input::IsMousePressed(MouseButton::Right))
-                m_terrain.AdjustCorner(m_hoverI, m_hoverJ, -1);
+        // R always toggles road mode, regardless of cursor location.
+        if (Input::IsKeyPressed(Key::R))
+            m_roadMode = !m_roadMode;
 
+        // Don't act on the same frame a middle-pan started, so accidental
+        // clicks while panning don't fire.
+        if (pick.valid && !Input::IsMouseDown(MouseButton::Middle)) {
+            if (m_roadMode) {
+                // Road draw / erase. IsMouseDown (not Pressed) so a held drag
+                // applies on every frame the cursor enters a new cell.
+                if (Input::IsMouseDown(MouseButton::Left))  TryPlaceRoad(m_hoverCellX, m_hoverCellY);
+                if (Input::IsMouseDown(MouseButton::Right)) SetRoad(m_hoverCellX, m_hoverCellY, false);
+            } else {
+                // Terraform — edge-triggered so a held click only fires once.
+                if (Input::IsMousePressed(MouseButton::Left))  m_terrain.AdjustCorner(m_hoverI, m_hoverJ, +1);
+                if (Input::IsMousePressed(MouseButton::Right)) m_terrain.AdjustCorner(m_hoverI, m_hoverJ, -1);
+            }
+
+            // Building keys are mode-independent.
             if (Input::IsKeyPressed(Key::B))
                 PlaceBuilding(m_hoverCellX, m_hoverCellY, 1, 1);
             if (Input::IsKeyPressed(Key::V)
@@ -204,8 +218,6 @@ protected:
                 PlaceBuilding(m_hoverCellX, m_hoverCellY, 2, 2);
             if (Input::IsKeyPressed(Key::X))
                 RemoveBuildingAt(m_hoverCellX, m_hoverCellY);
-            if (Input::IsKeyPressed(Key::R))
-                ToggleRoad(m_hoverCellX, m_hoverCellY);
         }
     }
 
@@ -433,11 +445,12 @@ private:
         m_roadCells[static_cast<size_t>(y) * m_terrain.Width() + x] = v;
     }
 
-    // Toggle road on a cell. Reject placement on non-flat or underwater cells —
-    // the road sprite is a 64x40 flat-diamond decal anchored at baseElev, so a
+    // Idempotent road placement. No-op if a road is already here; otherwise
+    // place it only when the cell is flat and at or above sea level — a
     // sloped cell would render a flat road floating off the actual surface.
-    void ToggleRoad(int x, int y) {
-        if (HasRoad(x, y)) { SetRoad(x, y, false); return; }
+    // (Separate from removal so LMB-drag and RMB-drag never collide.)
+    void TryPlaceRoad(int x, int y) {
+        if (HasRoad(x, y)) return;
         const IsoCellSlope s = m_terrain.CellSlope(x, y);
         const bool flat = (s.maxH == s.minH);
         const bool aboveWater = s.minH >= 0;
@@ -488,6 +501,13 @@ private:
 
         line("CITYBUILDER", white);
 
+        // Mode line right under the title — yellow when the user is in road
+        // mode so it's hard to miss that LMB no longer terraforms.
+        const Color modeColor = m_roadMode ? Color{1.0f, 0.85f, 0.30f, 1.0f} : white;
+        line(m_roadMode ? "Mode  ROAD (LMB draw, RMB erase)"
+                        : "Mode  TERRAFORM (LMB raise, RMB lower)",
+             modeColor);
+
         char buf[96];
         if (m_hoverCornerValid) {
             std::snprintf(buf, sizeof(buf), "Cell %d,%d  Corner %d,%d h=%d",
@@ -508,10 +528,10 @@ private:
         line(buf, dim);
 
         y += lineH * 0.4f;
-        line("LMB raise  RMB lower", dimmer);
+        line("R  toggle road mode", dimmer);
         line("MMB drag pan  Wheel zoom", dimmer);
         line("Arrows pan", dimmer);
-        line("B 1x1  V 2x2  X del  R road", dimmer);
+        line("B 1x1  V 2x2  X del", dimmer);
         line("ESC quit", dimmer);
     }
 
@@ -547,6 +567,7 @@ private:
     int  m_hoverI = -1, m_hoverJ = -1;
     bool m_hoverCornerValid = false;
     int  m_hoverCellX = -1, m_hoverCellY = -1;
+    bool m_roadMode = false;
 };
 
 Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {
