@@ -180,12 +180,26 @@ protected:
         m_renderer.DrawQuad({0.0f, kFloor}, {kWidth, kGroundH}, Color(0.78f, 0.62f, 0.28f, 1.0f));
         m_renderer.DrawQuad({0.0f, kFloor}, {kWidth, 4.0f},     Color(0.40f, 0.78f, 0.32f, 1.0f));
 
-        // Bird — body, eye, beak. A few rectangles make a recognisable
-        // shape without a sprite asset.
-        const float bx = kBirdX, by = m_birdY;
-        m_renderer.DrawQuad({bx, by}, {kBirdW, kBirdH}, Color(0.98f, 0.86f, 0.20f, 1.0f));
-        m_renderer.DrawQuad({bx + kBirdW - 8.0f, by + 4.0f}, {6.0f, 6.0f}, Color(0.10f, 0.10f, 0.12f, 1.0f));
-        m_renderer.DrawQuad({bx + kBirdW, by + 10.0f}, {6.0f, 6.0f}, Color(0.95f, 0.45f, 0.15f, 1.0f));
+        // Bird — body, eye, beak, all pitched by current vertical velocity so
+        // the nose comes up on a flap and drops on a fall. Eye and beak are
+        // rotated around the bird centre too so they ride with the body.
+        const Vec2 birdCenter{kBirdX + kBirdW * 0.5f, m_birdY + kBirdH * 0.5f};
+        const float pitch = Clamp(m_birdVy / 500.0f, -0.6f, 1.4f);
+        m_renderer.DrawQuad(birdCenter, {kBirdW, kBirdH}, pitch,
+                            Color(0.98f, 0.86f, 0.20f, 1.0f));
+        const float c = std::cos(pitch);
+        const float s = std::sin(pitch);
+        // Eye + beak centres relative to bird centre, then rotated into world.
+        const Vec2 eyeLocal { kBirdW * 0.5f - 5.0f, -kBirdH * 0.5f + 7.0f };
+        const Vec2 beakLocal{ kBirdW * 0.5f + 3.0f, 0.0f };
+        const Vec2 eyePos {
+            birdCenter.x + c * eyeLocal.x - s * eyeLocal.y,
+            birdCenter.y + s * eyeLocal.x + c * eyeLocal.y };
+        const Vec2 beakPos{
+            birdCenter.x + c * beakLocal.x - s * beakLocal.y,
+            birdCenter.y + s * beakLocal.x + c * beakLocal.y };
+        m_renderer.DrawQuad(eyePos,  {6.0f, 6.0f}, pitch, Color(0.10f, 0.10f, 0.12f, 1.0f));
+        m_renderer.DrawQuad(beakPos, {6.0f, 6.0f}, pitch, Color(0.95f, 0.45f, 0.15f, 1.0f));
 
         // Score (top centre).
         char buf[32];

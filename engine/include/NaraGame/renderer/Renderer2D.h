@@ -40,6 +40,12 @@ public:
     // Solid-color quad: top-left corner `position`, extent `size`.
     void DrawQuad(const Vec2& position, const Vec2& size, const Color& color);
 
+    // Solid-color quad rotated around its CENTER. `angleRad` is screen-space
+    // radians: positive rotates the +x side toward +y (down on screen);
+    // negative tilts the +x side toward -y (up on screen). Used by Flappy
+    // for the bird's pitch — same draw path as the white-texture quad above.
+    void DrawQuad(const Vec2& center, const Vec2& size, float angleRad, const Color& color);
+
     // Textured quad with optional tint and UV sub-rect (u0, v0, u1, v1).
     void DrawQuad(const Vec2& position, const Vec2& size, RHITexture* texture,
                   const Color& tint = Color::White(), const Vec4& uvRect = {0.0f, 0.0f, 1.0f, 1.0f});

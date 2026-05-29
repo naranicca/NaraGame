@@ -7,6 +7,7 @@
 #include "renderer/SpriteSpirv.h" // precompiled Vulkan sprite shader
 
 #include <array>
+#include <cmath>
 #include <cstddef> // offsetof
 #include <cstdint>
 
@@ -166,6 +167,34 @@ void Renderer2D::StartBatch() {
 
 void Renderer2D::DrawQuad(const Vec2& position, const Vec2& size, const Color& color) {
     DrawQuad(position, size, m_whiteTexture.get(), color);
+}
+
+void Renderer2D::DrawQuad(const Vec2& center, const Vec2& size, float angleRad,
+                          const Color& color) {
+    if (!m_inScene)
+        return;
+
+    RHITexture* tex = m_whiteTexture.get();
+    if ((m_currentTexture != nullptr && m_currentTexture != tex) || m_quadCount >= kMaxQuads) {
+        Flush();
+        StartBatch();
+    }
+    m_currentTexture = tex;
+
+    const float c = std::cos(angleRad);
+    const float s = std::sin(angleRad);
+    const float hw = size.x * 0.5f;
+    const float hh = size.y * 0.5f;
+    // Rotate the 4 local corners (±hw, ±hh) and translate by center.
+    auto rot = [&](float lx, float ly) -> Vec3 {
+        return {center.x + c * lx - s * ly, center.y + s * lx + c * ly, 0.0f};
+    };
+    const Vec4 col{color.r, color.g, color.b, color.a};
+    m_vertices.push_back({rot(-hw, -hh), col, {0.0f, 0.0f}});
+    m_vertices.push_back({rot( hw, -hh), col, {1.0f, 0.0f}});
+    m_vertices.push_back({rot( hw,  hh), col, {1.0f, 1.0f}});
+    m_vertices.push_back({rot(-hw,  hh), col, {0.0f, 1.0f}});
+    ++m_quadCount;
 }
 
 void Renderer2D::DrawQuad(const Vec2& position, const Vec2& size, RHITexture* texture,
