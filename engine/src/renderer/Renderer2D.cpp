@@ -197,6 +197,34 @@ void Renderer2D::DrawQuad(const Vec2& center, const Vec2& size, float angleRad,
     ++m_quadCount;
 }
 
+void Renderer2D::DrawQuad(const Vec2& center, const Vec2& size, float angleRad,
+                          const TextureRegion& region, const Color& tint) {
+    if (!m_inScene)
+        return;
+
+    RHITexture* tex = region.texture ? region.texture : m_whiteTexture.get();
+    if ((m_currentTexture != nullptr && m_currentTexture != tex) || m_quadCount >= kMaxQuads) {
+        Flush();
+        StartBatch();
+    }
+    m_currentTexture = tex;
+
+    const float c = std::cos(angleRad);
+    const float s = std::sin(angleRad);
+    const float hw = size.x * 0.5f;
+    const float hh = size.y * 0.5f;
+    auto rot = [&](float lx, float ly) -> Vec3 {
+        return {center.x + c * lx - s * ly, center.y + s * lx + c * ly, 0.0f};
+    };
+    const Vec4 col{tint.r, tint.g, tint.b, tint.a};
+    const Vec4 uv = region.uv;
+    m_vertices.push_back({rot(-hw, -hh), col, {uv.x, uv.y}});
+    m_vertices.push_back({rot( hw, -hh), col, {uv.z, uv.y}});
+    m_vertices.push_back({rot( hw,  hh), col, {uv.z, uv.w}});
+    m_vertices.push_back({rot(-hw,  hh), col, {uv.x, uv.w}});
+    ++m_quadCount;
+}
+
 void Renderer2D::DrawQuad(const Vec2& position, const Vec2& size, RHITexture* texture,
                           const Color& tint, const Vec4& uvRect) {
     if (!m_inScene)

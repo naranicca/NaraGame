@@ -60,6 +60,8 @@ constexpr float kSpawnDx   = 230.0f;     // closer spawning toward 195 at full d
 constexpr float kGapMargin = 90.0f;      // min distance gap stays from ceiling/floor
 constexpr float kDifficultyScoreCap = 30.0f;  // score at which scaling maxes out
 
+constexpr float kDeadLockoutS = 3.0f;    // ignore Space for this long after death
+
 // AABB intersection — half-open rects, standard.
 bool RectsOverlap(float ax, float ay, float aw, float ah,
                   float bx, float by, float bw, float bh) {
@@ -80,6 +82,12 @@ protected:
         m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png");
         m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
         m_font.SetTracking(-2);
+
+        m_birdTexture = LoadTexture(GetDevice(), assets + "/bird.png");
+        m_birdRegion  = TextureRegion::FromPixels(
+            m_birdTexture.get(), 0.0f, 0.0f,
+            static_cast<float>(m_birdTexture->Width()),
+            static_cast<float>(m_birdTexture->Height()));
 
         m_flapClip  = LoadWav(assets + "/flap.wav");
         m_scoreClip = LoadWav(assets + "/score.wav");
@@ -117,7 +125,11 @@ protected:
         }
 
         if (m_state == State::Dead) {
-            if (flapPressed) ResetRound();
+            // Brief lockout so a Space held at the moment of impact doesn't
+            // immediately consume the death frame and restart. The HUD hides
+            // "SPACE TO RESTART" until the timer clears.
+            m_deadTimer = Max(0.0f, m_deadTimer - dt);
+            if (flapPressed && m_deadTimer <= 0.0f) ResetRound();
             return;
         }
 
@@ -192,26 +204,13 @@ protected:
         m_renderer.DrawQuad({0.0f, kFloor}, {kWidth, kGroundH}, Color(0.78f, 0.62f, 0.28f, 1.0f));
         m_renderer.DrawQuad({0.0f, kFloor}, {kWidth, 4.0f},     Color(0.40f, 0.78f, 0.32f, 1.0f));
 
-        // Bird — body, eye, beak, all pitched by current vertical velocity so
-        // the nose comes up on a flap and drops on a fall. Eye and beak are
-        // rotated around the bird centre too so they ride with the body.
+        // Bird sprite, pitched by current vertical velocity so the nose comes
+        // up on a flap and drops on a fall. Eye/beak/wing detail is baked
+        // into bird.png, so one rotated textured quad replaces what used to
+        // be three coloured quads with manual rotation math.
         const Vec2 birdCenter{kBirdX + kBirdW * 0.5f, m_birdY + kBirdH * 0.5f};
         const float pitch = Clamp(m_birdVy / 500.0f, -0.6f, 1.4f);
-        m_renderer.DrawQuad(birdCenter, {kBirdW, kBirdH}, pitch,
-                            Color(0.98f, 0.86f, 0.20f, 1.0f));
-        const float c = std::cos(pitch);
-        const float s = std::sin(pitch);
-        // Eye + beak centres relative to bird centre, then rotated into world.
-        const Vec2 eyeLocal { kBirdW * 0.5f - 5.0f, -kBirdH * 0.5f + 7.0f };
-        const Vec2 beakLocal{ kBirdW * 0.5f + 3.0f, 0.0f };
-        const Vec2 eyePos {
-            birdCenter.x + c * eyeLocal.x - s * eyeLocal.y,
-            birdCenter.y + s * eyeLocal.x + c * eyeLocal.y };
-        const Vec2 beakPos{
-            birdCenter.x + c * beakLocal.x - s * beakLocal.y,
-            birdCenter.y + s * beakLocal.x + c * beakLocal.y };
-        m_renderer.DrawQuad(eyePos,  {6.0f, 6.0f}, pitch, Color(0.10f, 0.10f, 0.12f, 1.0f));
-        m_renderer.DrawQuad(beakPos, {6.0f, 6.0f}, pitch, Color(0.95f, 0.45f, 0.15f, 1.0f));
+        m_renderer.DrawQuad(birdCenter, {kBirdW, kBirdH}, pitch, m_birdRegion);
 
         // Feathers on top of the bird so the burst reads as coming off the body.
         m_particles.Draw(m_renderer);
@@ -241,7 +240,9 @@ protected:
                 std::snprintf(hs, sizeof(hs), "BEST  %d", m_highScore);
                 DrawCentered(hs, kHeight * 0.40f, 1.3f, Color(0.90f, 0.90f, 0.95f, 1.0f));
             }
-            DrawCentered("SPACE TO RESTART", kHeight * 0.48f, 1.4f, Color(1, 1, 1, 1));
+            // Suppress the restart hint while the lockout is active.
+            if (m_deadTimer <= 0.0f)
+                DrawCentered("SPACE TO RESTART", kHeight * 0.48f, 1.4f, Color(1, 1, 1, 1));
         }
 
         m_renderer.End();
@@ -299,6 +300,7 @@ private:
     void Die() {
         m_state = State::Dead;
         m_birdVy = 0.0f;
+        m_deadTimer = kDeadLockoutS;
         GetAudio().PlaySound(m_dieClip, 1.0f);
 
         // Yellow-feather burst out of the bird's centre with gravity, so the
@@ -342,6 +344,8 @@ private:
 
     Renderer2D m_renderer;
     std::unique_ptr<RHITexture> m_fontTexture;
+    std::unique_ptr<RHITexture> m_birdTexture;
+    TextureRegion m_birdRegion;
     BitmapFont m_font;
     AudioClip  m_flapClip;
     AudioClip  m_scoreClip;
@@ -354,6 +358,7 @@ private:
     int m_score = 0;
     int m_highScore = 0;
     bool m_newBest = false;
+    float m_deadTimer = 0.0f;
     std::mt19937 m_rng;
     ParticleSystem m_particles;
 };

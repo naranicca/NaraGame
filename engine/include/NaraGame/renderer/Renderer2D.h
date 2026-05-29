@@ -46,6 +46,11 @@ public:
     // for the bird's pitch — same draw path as the white-texture quad above.
     void DrawQuad(const Vec2& center, const Vec2& size, float angleRad, const Color& color);
 
+    // Textured quad rotated around its CENTER. Same rotation convention as
+    // the colored overload; sprite UVs come from the region.
+    void DrawQuad(const Vec2& center, const Vec2& size, float angleRad,
+                  const TextureRegion& region, const Color& tint = Color::White());
+
     // Textured quad with optional tint and UV sub-rect (u0, v0, u1, v1).
     void DrawQuad(const Vec2& position, const Vec2& size, RHITexture* texture,
                   const Color& tint = Color::White(), const Vec4& uvRect = {0.0f, 0.0f, 1.0f, 1.0f});
