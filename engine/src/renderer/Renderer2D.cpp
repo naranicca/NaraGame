@@ -6,6 +6,7 @@
 #include "NaraGame/renderer/rhi/RHIDevice.h"
 #include "renderer/SpriteSpirv.h" // precompiled Vulkan sprite shader
 
+#include <array>
 #include <cstddef> // offsetof
 #include <cstdint>
 
@@ -51,12 +52,23 @@ Renderer2D::~Renderer2D() {
 void Renderer2D::Init(RHIDevice& device) {
     m_device = &device;
 
-    // 1x1 white texture so solid-color quads reuse the textured path.
-    const uint32_t whitePixel = 0xFFFFFFFFu;
+    // 4x4 white texture so solid-color quads reuse the textured path.
+    // Using 1x1 here triggered a D3D11 sampling quirk: after sampling a 1x1
+    // texture, the next *different* texture (e.g., a BitmapFont atlas) read
+    // back as fully opaque, turning every text glyph into a solid white
+    // rectangle. The same draw sequence with anything >= 2x2 works fine.
+    // Suspected LOD / derivative interaction with a single-texel level-0,
+    // and the byte cost (64 bytes) is negligible.
+    constexpr uint32_t kWhiteSide = 4;
+    const std::array<uint32_t, kWhiteSide * kWhiteSide> whitePixels = []() {
+        std::array<uint32_t, kWhiteSide * kWhiteSide> a{};
+        a.fill(0xFFFFFFFFu);
+        return a;
+    }();
     TextureDesc whiteDesc;
-    whiteDesc.width = 1;
-    whiteDesc.height = 1;
-    whiteDesc.pixels = &whitePixel;
+    whiteDesc.width = kWhiteSide;
+    whiteDesc.height = kWhiteSide;
+    whiteDesc.pixels = whitePixels.data();
     m_whiteTexture = device.CreateTexture(whiteDesc);
 
     // Shader + pipeline.

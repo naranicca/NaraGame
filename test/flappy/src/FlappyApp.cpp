@@ -142,15 +142,6 @@ protected:
         }
     }
 
-    // KNOWN ISSUE: drawing the solid-color DrawQuad path before BitmapFont
-    // text in the same frame causes the text to render as opaque white
-    // rectangles instead of glyph shapes. Reproduces with a single 30x30
-    // red quad followed by any DrawText. Splitting into two Begin/End
-    // passes does NOT fix it. The engine's other test apps don't hit this
-    // — Breakout uses textured quads throughout, citybuilder uses a
-    // different camera per pass. Suspected D3D11 sampler/SRV state cache
-    // somewhere. Leaving the gameplay code intact; the score and title
-    // overlays look blocky but the game is playable.
     void OnRender() override {
         GetDevice().Clear(Color(0.45f, 0.70f, 0.92f, 1.0f));   // sky
         m_renderer.Begin(Renderer2D::ScreenCamera(kWidth, kHeight));
@@ -183,14 +174,6 @@ protected:
         m_renderer.DrawQuad({bx, by}, {kBirdW, kBirdH}, Color(0.98f, 0.86f, 0.20f, 1.0f));
         m_renderer.DrawQuad({bx + kBirdW - 8.0f, by + 4.0f}, {6.0f, 6.0f}, Color(0.10f, 0.10f, 0.12f, 1.0f));
         m_renderer.DrawQuad({bx + kBirdW, by + 10.0f}, {6.0f, 6.0f}, Color(0.95f, 0.45f, 0.15f, 1.0f));
-
-        m_renderer.End();
-
-        // Second pass for text — separates the textured-glyph batch from the
-        // solid-quad batch above so the renderer's per-frame state can't be
-        // contaminated by whatever the world pass left bound. Same pattern as
-        // citybuilder's HUD pass.
-        m_renderer.Begin(Renderer2D::ScreenCamera(kWidth, kHeight));
 
         // Score (top centre).
         char buf[32];
