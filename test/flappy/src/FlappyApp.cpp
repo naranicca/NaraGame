@@ -62,6 +62,16 @@ constexpr float kDifficultyScoreCap = 30.0f;  // score at which scaling maxes ou
 
 constexpr float kDeadLockoutS = 3.0f;    // ignore Space for this long after death
 
+// Parallax background. Hills sit just above the ground line and drift slowly;
+// clouds float a bit faster, halfway between hills and the foreground pipes.
+constexpr float kCloudW   = 60.0f;
+constexpr float kCloudH   = 30.0f;
+constexpr float kCloudVx  = -30.0f;
+constexpr int   kCloudCnt = 5;
+constexpr float kHillsW   = 480.0f;
+constexpr float kHillsH   = 80.0f;
+constexpr float kHillsVx  = -12.0f;
+
 // AABB intersection — half-open rects, standard.
 bool RectsOverlap(float ax, float ay, float aw, float ah,
                   float bx, float by, float bw, float bh) {
@@ -89,6 +99,18 @@ protected:
             static_cast<float>(m_birdTexture->Width()),
             static_cast<float>(m_birdTexture->Height()));
 
+        m_cloudTexture = LoadTexture(GetDevice(), assets + "/cloud.png");
+        m_cloudRegion  = TextureRegion::FromPixels(
+            m_cloudTexture.get(), 0.0f, 0.0f, kCloudW, kCloudH);
+        m_hillsTexture = LoadTexture(GetDevice(), assets + "/hills.png");
+        m_hillsRegion  = TextureRegion::FromPixels(
+            m_hillsTexture.get(), 0.0f, 0.0f, kHillsW, kHillsH);
+
+        // Pre-populate the cloud pool spread across the screen so the title
+        // doesn't open with an empty sky and clouds drifting in from the right.
+        std::uniform_real_distribution<float> xDist(0.0f, kWidth);
+        for (int i = 0; i < kCloudCnt; ++i) m_clouds.push_back(SpawnCloud(xDist(m_rng)));
+
         m_flapClip  = LoadWav(assets + "/flap.wav");
         m_scoreClip = LoadWav(assets + "/score.wav");
         m_dieClip   = LoadWav(assets + "/die.wav");
@@ -114,6 +136,15 @@ protected:
         // in Die() right before transitioning to Dead, and need to keep
         // animating while the GAME OVER overlay is showing.
         m_particles.Update(dt);
+
+        // Parallax always animates — clouds drift and hills creep on every
+        // screen, including Title and Dead, so the world never freezes.
+        m_hillsOffsetX += kHillsVx * dt;
+        if (m_hillsOffsetX <= -kHillsW) m_hillsOffsetX += kHillsW;
+        for (Cloud& cl : m_clouds) {
+            cl.x += kCloudVx * dt;
+            if (cl.x + kCloudW * cl.scale < 0.0f) cl = SpawnCloud(kWidth + 20.0f);
+        }
 
         if (m_state == State::Title) {
             if (flapPressed) {
@@ -181,6 +212,21 @@ protected:
     void OnRender() override {
         GetDevice().Clear(Color(0.45f, 0.70f, 0.92f, 1.0f));   // sky
         m_renderer.Begin(Renderer2D::ScreenCamera(kWidth, kHeight));
+
+        // Parallax background — hills behind, clouds in front of hills,
+        // pipes/ground/bird in front of both. Hills are 480 wide and drawn
+        // twice side-by-side so the wrap is seamless as m_hillsOffsetX
+        // marches from 0 to -kHillsW and rolls back.
+        const float hillsY = kFloor - kHillsH;
+        m_renderer.DrawQuad({m_hillsOffsetX, hillsY},
+                            {kHillsW, kHillsH}, m_hillsRegion);
+        m_renderer.DrawQuad({m_hillsOffsetX + kHillsW, hillsY},
+                            {kHillsW, kHillsH}, m_hillsRegion);
+        for (const Cloud& cl : m_clouds) {
+            m_renderer.DrawQuad({cl.x, cl.y},
+                                {kCloudW * cl.scale, kCloudH * cl.scale},
+                                m_cloudRegion);
+        }
 
         // Pipes
         const Color pipeBody{0.28f, 0.70f, 0.30f, 1.0f};
@@ -258,6 +304,8 @@ private:
         bool  scored = false;
     };
 
+    struct Cloud { float x, y, scale; };
+
     static AppConfig MakeConfig() {
         AppConfig c;
         c.title = "NaraGame - Flappy";
@@ -286,6 +334,12 @@ private:
     float CurrentScrollSpeed() const { return kScrollVx + (-110.0f) * Difficulty(); }
     float CurrentSpawnDx()    const { return kSpawnDx + (-35.0f)  * Difficulty(); }
     float CurrentGapH()       const { return kGapH    + (-50.0f)  * Difficulty(); }
+
+    Cloud SpawnCloud(float x) {
+        std::uniform_real_distribution<float> yDist(20.0f, kHeight * 0.45f);
+        std::uniform_real_distribution<float> sDist(0.7f, 1.3f);
+        return Cloud{ x, yDist(m_rng), sDist(m_rng) };
+    }
 
     void SpawnPipe() {
         Pipe p;
@@ -346,6 +400,12 @@ private:
     std::unique_ptr<RHITexture> m_fontTexture;
     std::unique_ptr<RHITexture> m_birdTexture;
     TextureRegion m_birdRegion;
+    std::unique_ptr<RHITexture> m_cloudTexture;
+    TextureRegion m_cloudRegion;
+    std::unique_ptr<RHITexture> m_hillsTexture;
+    TextureRegion m_hillsRegion;
+    std::vector<Cloud> m_clouds;
+    float m_hillsOffsetX = 0.0f;
     BitmapFont m_font;
     AudioClip  m_flapClip;
     AudioClip  m_scoreClip;
