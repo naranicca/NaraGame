@@ -43,4 +43,5 @@ DerivedData/
 # Citybuilder runtime save file (written next to the running exe).
 # Packaged demo saves in assets/ are *not* ignored — see demo.save.
 citybuilder.save
+flappy_high.txt
 

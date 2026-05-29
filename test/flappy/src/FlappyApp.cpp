@@ -20,6 +20,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <memory>
 #include <random>
 #include <string>
@@ -81,6 +82,7 @@ protected:
         m_scoreClip = LoadWav(assets + "/score.wav");
         m_dieClip   = LoadWav(assets + "/die.wav");
 
+        LoadHighScore();
         ResetRound();
         NARAGAME_INFO("Flappy: Space to flap / start / restart, ESC to quit");
     }
@@ -209,12 +211,24 @@ protected:
                             Color(1.0f, 1.0f, 1.0f, 1.0f), 2.0f);
 
         // Overlays per state.
+        char hs[32];
         if (m_state == State::Title) {
             DrawCentered("FLAPPY", kHeight * 0.32f, 3.5f, Color(1, 1, 1, 1));
             DrawCentered("SPACE TO START", kHeight * 0.46f, 1.4f, Color(1, 1, 1, 1));
+            if (m_highScore > 0) {
+                std::snprintf(hs, sizeof(hs), "BEST  %d", m_highScore);
+                DrawCentered(hs, kHeight * 0.54f, 1.2f, Color(1.0f, 0.95f, 0.40f, 1.0f));
+            }
         } else if (m_state == State::Dead) {
-            DrawCentered("GAME OVER", kHeight * 0.32f, 2.5f, Color(1.0f, 0.45f, 0.45f, 1.0f));
-            DrawCentered("SPACE TO RESTART", kHeight * 0.46f, 1.4f, Color(1, 1, 1, 1));
+            DrawCentered("GAME OVER", kHeight * 0.30f, 2.5f, Color(1.0f, 0.45f, 0.45f, 1.0f));
+            if (m_newBest) {
+                std::snprintf(hs, sizeof(hs), "NEW BEST  %d", m_highScore);
+                DrawCentered(hs, kHeight * 0.40f, 1.5f, Color(1.0f, 0.95f, 0.40f, 1.0f));
+            } else {
+                std::snprintf(hs, sizeof(hs), "BEST  %d", m_highScore);
+                DrawCentered(hs, kHeight * 0.40f, 1.3f, Color(0.90f, 0.90f, 0.95f, 1.0f));
+            }
+            DrawCentered("SPACE TO RESTART", kHeight * 0.48f, 1.4f, Color(1, 1, 1, 1));
         }
 
         m_renderer.End();
@@ -243,6 +257,7 @@ private:
         m_birdVy = 0.0f;
         m_pipes.clear();
         m_score = 0;
+        m_newBest = false;
         // Seed one pipe near the right so the title screen doesn't look empty.
         SpawnPipe();
         m_pipes.back().x = kWidth + 60.0f;
@@ -261,6 +276,22 @@ private:
         m_state = State::Dead;
         m_birdVy = 0.0f;
         GetAudio().PlaySound(m_dieClip, 1.0f);
+        m_newBest = false;
+        if (m_score > m_highScore) {
+            m_highScore = m_score;
+            SaveHighScore();
+            m_newBest = true;
+        }
+    }
+
+    static constexpr const char* kHighScorePath = "flappy_high.txt";
+    void LoadHighScore() {
+        std::ifstream in(kHighScorePath);
+        if (in) in >> m_highScore;
+    }
+    void SaveHighScore() {
+        std::ofstream out(kHighScorePath);
+        if (out) out << m_highScore << '\n';
     }
 
     void DrawCentered(const std::string& s, float y, float scale, const Color& c) {
@@ -280,6 +311,8 @@ private:
     float m_birdVy = 0.0f;
     std::vector<Pipe> m_pipes;
     int m_score = 0;
+    int m_highScore = 0;
+    bool m_newBest = false;
     std::mt19937 m_rng;
 };
 
