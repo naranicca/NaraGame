@@ -7,6 +7,8 @@
 // Controls: Space jump / start / restart, ESC quit.
 
 #include <NaraGame/assets/TextureLoader.h>
+#include <NaraGame/audio/AudioClip.h>
+#include <NaraGame/audio/AudioDevice.h>
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
 #include <NaraGame/core/Log.h>
@@ -74,6 +76,11 @@ protected:
         m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png");
         m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
         m_font.SetTracking(-2);
+
+        m_flapClip  = LoadWav(assets + "/flap.wav");
+        m_scoreClip = LoadWav(assets + "/score.wav");
+        m_dieClip   = LoadWav(assets + "/die.wav");
+
         ResetRound();
         NARAGAME_INFO("Flappy: Space to flap / start / restart, ESC to quit");
     }
@@ -94,6 +101,7 @@ protected:
             if (flapPressed) {
                 m_state = State::Playing;
                 m_birdVy = kFlapVy; // first flap starts the round
+                GetAudio().PlaySound(m_flapClip, 0.7f);
             }
             return;
         }
@@ -104,7 +112,10 @@ protected:
         }
 
         // --- Playing ---
-        if (flapPressed) m_birdVy = kFlapVy;
+        if (flapPressed) {
+            m_birdVy = kFlapVy;
+            GetAudio().PlaySound(m_flapClip, 0.7f);
+        }
         m_birdVy = Clamp(m_birdVy + kGravity * dt, -kVyClamp, kVyClamp);
         m_birdY += m_birdVy * dt;
 
@@ -138,6 +149,7 @@ protected:
             if (!p.scored && p.x + kPipeW < kBirdX) {
                 p.scored = true;
                 ++m_score;
+                GetAudio().PlaySound(m_scoreClip, 0.8f);
             }
         }
     }
@@ -234,6 +246,7 @@ private:
     void Die() {
         m_state = State::Dead;
         m_birdVy = 0.0f;
+        GetAudio().PlaySound(m_dieClip, 1.0f);
     }
 
     void DrawCentered(const std::string& s, float y, float scale, const Color& c) {
@@ -244,6 +257,9 @@ private:
     Renderer2D m_renderer;
     std::unique_ptr<RHITexture> m_fontTexture;
     BitmapFont m_font;
+    AudioClip  m_flapClip;
+    AudioClip  m_scoreClip;
+    AudioClip  m_dieClip;
 
     State m_state = State::Title;
     float m_birdY = 0.0f;
