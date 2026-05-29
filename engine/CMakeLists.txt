@@ -6,6 +6,7 @@
 set(NARAGAME_SOURCES
     src/assets/BMFont.cpp
     src/assets/Inflate.cpp
+    src/assets/MSDFFontLoader.cpp
     src/assets/Png.cpp
     src/assets/TextureLoader.cpp
     src/assets/TileLevel.cpp
@@ -21,6 +22,7 @@ set(NARAGAME_SOURCES
     src/renderer/Camera2D.cpp
     src/renderer/Font.cpp
     src/renderer/IsoTerrain.cpp
+    src/renderer/MSDFFont.cpp
     src/renderer/ParticleSystem.cpp
     src/renderer/Renderer2D.cpp
     src/renderer/SpriteSheet.cpp

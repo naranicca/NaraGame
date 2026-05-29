@@ -18,6 +18,7 @@ class RHIPipeline;
 class RHITexture;
 class BitmapFont;
 class Font;
+class MSDFFont;
 
 // Batched 2D sprite renderer built on the RHI. Accumulates quads into a single
 // dynamic vertex buffer and flushes them in as few draw calls as possible
@@ -74,6 +75,15 @@ public:
     void DrawText(const Font& font, const std::string& text, const Vec2& position,
                   const Color& color = Color::White(), float scale = 1.0f);
 
+    // MSDF text -- stays sharp at any size because the fragment shader
+    // reconstructs glyph edges from a distance field. `pixelSize` is the
+    // em-box height in screen pixels (note: pixel size, not a multiplier --
+    // MSDF has no native baked size to scale from). Triggers a pipeline
+    // switch inside the batch; sprites drawn after revert to the sprite
+    // pipeline at the next DrawQuad.
+    void DrawText(const MSDFFont& font, const std::string& text, const Vec2& position,
+                  const Color& color = Color::White(), float pixelSize = 32.0f);
+
     RHITexture* WhiteTexture() const { return m_whiteTexture.get(); }
 
     // Orthographic camera with (0,0) at the top-left and +Y downward.
@@ -89,9 +99,18 @@ private:
     void StartBatch();
     void Flush();
 
+    // Two pipelines share everything (vertex layout, camera UBO, sampler,
+    // index buffer) except the fragment shader. The current batch tracks
+    // which pipeline its quads belong to; changing modes flushes first so
+    // sprite quads and MSDF glyphs never end up in the same draw call.
+    enum class PipelineMode { Sprite, MSDF };
+    void EnsureMode(PipelineMode mode);
+
     RHIDevice* m_device = nullptr;
     std::unique_ptr<RHIShader> m_shader;
+    std::unique_ptr<RHIShader> m_msdfShader;
     std::unique_ptr<RHIPipeline> m_pipeline;
+    std::unique_ptr<RHIPipeline> m_msdfPipeline;
     std::unique_ptr<RHIBuffer> m_vertexBuffer;
     std::unique_ptr<RHIBuffer> m_indexBuffer;
     std::unique_ptr<RHIBuffer> m_cameraBuffer;
@@ -100,6 +119,7 @@ private:
     std::vector<Vertex> m_vertices;
     uint32_t m_quadCount = 0;
     RHITexture* m_currentTexture = nullptr;
+    PipelineMode m_currentMode = PipelineMode::Sprite;
     bool m_inScene = false;
 
     static constexpr uint32_t kMaxQuads = 20000;

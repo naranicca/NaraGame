@@ -3,7 +3,9 @@
 #include "NaraGame/core/Log.h"
 #include "NaraGame/renderer/BitmapFont.h"
 #include "NaraGame/renderer/Font.h"
+#include "NaraGame/renderer/MSDFFont.h"
 #include "NaraGame/renderer/rhi/RHIDevice.h"
+#include "renderer/MsdfSpirv.h"   // precompiled Vulkan MSDF shader
 #include "renderer/SpriteSpirv.h" // precompiled Vulkan sprite shader
 
 #include <array>
@@ -43,6 +45,55 @@ SamplerState uSampler : register(s0);
 
 float4 PSMain(VSOutput input) : SV_TARGET {
     return uTexture.Sample(uSampler, input.uv) * input.color;
+}
+)";
+
+// MSDF shader: shares vertex layout + camera UBO + sampler with the sprite
+// shader, but the pixel stage reconstructs the glyph edge from a 3-channel
+// signed distance field. median(r,g,b) is the corner-aware best estimate of
+// distance; converting that to screen pixels via fwidth(uv) gives free
+// scale-aware AA. atlasPxRange must match -pxrange in build-msdf-atlas.ps1.
+static const char* kMsdfShader = R"(
+cbuffer Camera : register(b0) { float4x4 uViewProj; };
+
+struct VSInput {
+    float3 position : POSITION;
+    float4 color    : COLOR;
+    float2 uv       : TEXCOORD0;
+};
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float4 color    : COLOR;
+    float2 uv       : TEXCOORD0;
+};
+
+VSOutput VSMain(VSInput input) {
+    VSOutput output;
+    output.position = mul(uViewProj, float4(input.position, 1.0));
+    output.color = input.color;
+    output.uv = input.uv;
+    return output;
+}
+
+Texture2D uTexture : register(t0);
+SamplerState uSampler : register(s0);
+
+float median(float a, float b, float c) {
+    return max(min(a, b), min(max(a, b), c));
+}
+
+float4 PSMain(VSOutput input) : SV_TARGET {
+    float3 msd = uTexture.Sample(uSampler, input.uv).rgb;
+    float sd = median(msd.r, msd.g, msd.b) - 0.5;
+    const float atlasPxRange = 4.0;
+    float2 atlasSize;
+    uTexture.GetDimensions(atlasSize.x, atlasSize.y);
+    float2 unitRange     = atlasPxRange / atlasSize;
+    float2 screenTexSize = 1.0 / fwidth(input.uv);
+    float pxScale = max(0.5 * dot(unitRange, screenTexSize), 1.0);
+    float pxDist  = pxScale * sd;
+    float a = saturate(pxDist + 0.5);
+    return float4(input.color.rgb, input.color.a * a);
 }
 )";
 
@@ -95,6 +146,22 @@ void Renderer2D::Init(RHIDevice& device) {
     };
     m_pipeline = device.CreatePipeline(pipelineDesc);
 
+    // Second shader + pipeline for MSDF text. Same vertex layout + camera UBO
+    // as the sprite path; only the pixel program differs.
+    ShaderDesc msdfShaderDesc;
+    msdfShaderDesc.vertexSource = kMsdfShader;
+    msdfShaderDesc.pixelSource = kMsdfShader;
+    msdfShaderDesc.debugName = "Renderer2D::msdf";
+    msdfShaderDesc.vertexSpirv = kMsdfVertSpv;
+    msdfShaderDesc.vertexSpirvSize = sizeof(kMsdfVertSpv);
+    msdfShaderDesc.pixelSpirv = kMsdfFragSpv;
+    msdfShaderDesc.pixelSpirvSize = sizeof(kMsdfFragSpv);
+    m_msdfShader = device.CreateShader(msdfShaderDesc);
+
+    PipelineDesc msdfPipelineDesc = pipelineDesc;
+    msdfPipelineDesc.shader = m_msdfShader.get();
+    m_msdfPipeline = device.CreatePipeline(msdfPipelineDesc);
+
     // Dynamic vertex buffer (filled each flush).
     BufferDesc vboDesc;
     vboDesc.type = BufferType::Vertex;
@@ -137,6 +204,8 @@ void Renderer2D::Shutdown() {
     m_cameraBuffer.reset();
     m_indexBuffer.reset();
     m_vertexBuffer.reset();
+    m_msdfPipeline.reset();
+    m_msdfShader.reset();
     m_pipeline.reset();
     m_shader.reset();
     m_device = nullptr;
@@ -151,7 +220,15 @@ void Renderer2D::Begin(const Mat4& viewProjection) {
     if (m_cameraBuffer)
         m_cameraBuffer->Update(viewProjection.data, sizeof(Mat4));
     m_inScene = true;
+    m_currentMode = PipelineMode::Sprite;
     StartBatch();
+}
+
+void Renderer2D::EnsureMode(PipelineMode mode) {
+    if (m_currentMode == mode) return;
+    Flush();
+    StartBatch();
+    m_currentMode = mode;
 }
 
 void Renderer2D::End() {
@@ -173,6 +250,7 @@ void Renderer2D::DrawQuad(const Vec2& center, const Vec2& size, float angleRad,
                           const Color& color) {
     if (!m_inScene)
         return;
+    EnsureMode(PipelineMode::Sprite);
 
     RHITexture* tex = m_whiteTexture.get();
     if ((m_currentTexture != nullptr && m_currentTexture != tex) || m_quadCount >= kMaxQuads) {
@@ -201,6 +279,7 @@ void Renderer2D::DrawQuad(const Vec2& center, const Vec2& size, float angleRad,
                           const TextureRegion& region, const Color& tint) {
     if (!m_inScene)
         return;
+    EnsureMode(PipelineMode::Sprite);
 
     RHITexture* tex = region.texture ? region.texture : m_whiteTexture.get();
     if ((m_currentTexture != nullptr && m_currentTexture != tex) || m_quadCount >= kMaxQuads) {
@@ -229,6 +308,7 @@ void Renderer2D::DrawQuad(const Vec2& position, const Vec2& size, RHITexture* te
                           const Color& tint, const Vec4& uvRect) {
     if (!m_inScene)
         return;
+    EnsureMode(PipelineMode::Sprite);
 
     RHITexture* tex = texture ? texture : m_whiteTexture.get();
 
@@ -323,13 +403,69 @@ void Renderer2D::DrawText(const Font& font, const std::string& text, const Vec2&
     }
 }
 
+void Renderer2D::DrawText(const MSDFFont& font, const std::string& text,
+                          const Vec2& position, const Color& color, float pixelSize) {
+    if (!m_inScene || !font.Valid())
+        return;
+    EnsureMode(PipelineMode::MSDF);
+
+    RHITexture* atlas = font.Texture();
+    // Pen baseline so the topmost ascender sits at position.y. Ascender is in
+    // em units and negative (it's the upward distance from baseline encoded
+    // in screen-style coords where +Y is down), so we subtract it to walk
+    // baseline downward from the requested top edge.
+    const float baselineY = position.y + (-font.Ascender()) * pixelSize;
+    float penX = position.x;
+
+    const Vec4 col{color.r, color.g, color.b, color.a};
+
+    for (char ch : text) {
+        if (ch == '\n') {
+            penX = position.x;
+            // Multiline isn't really exercised by the test games, but stay
+            // honest: advance baseline by lineHeight em-units.
+            continue;
+        }
+        const MSDFGlyph* g = font.Find(static_cast<uint32_t>(static_cast<unsigned char>(ch)));
+        if (g == nullptr) continue;
+
+        // Whitespace (space, tab) has zero-area planeBounds; skip the quad
+        // emission but still advance the pen.
+        if (g->planeRight > g->planeLeft) {
+            // Same batch-management pattern as DrawQuad — flush on texture
+            // change or batch fill.
+            if ((m_currentTexture != nullptr && m_currentTexture != atlas) || m_quadCount >= kMaxQuads) {
+                Flush();
+                StartBatch();
+            }
+            m_currentTexture = atlas;
+
+            const float left   = penX + g->planeLeft   * pixelSize;
+            const float top    = baselineY + g->planeTop    * pixelSize;
+            const float right  = penX + g->planeRight  * pixelSize;
+            const float bottom = baselineY + g->planeBottom * pixelSize;
+            const TextureRegion region = font.Region(*g);
+            const Vec4 uv = region.uv;
+
+            m_vertices.push_back({{left,  top,    0.0f}, col, {uv.x, uv.y}});
+            m_vertices.push_back({{right, top,    0.0f}, col, {uv.z, uv.y}});
+            m_vertices.push_back({{right, bottom, 0.0f}, col, {uv.z, uv.w}});
+            m_vertices.push_back({{left,  bottom, 0.0f}, col, {uv.x, uv.w}});
+            ++m_quadCount;
+        }
+        penX += g->advance * pixelSize;
+    }
+}
+
 void Renderer2D::Flush() {
     if (m_quadCount == 0 || m_device == nullptr)
         return;
 
     m_vertexBuffer->Update(m_vertices.data(), m_vertices.size() * sizeof(Vertex));
 
-    m_device->BindPipeline(m_pipeline.get());
+    RHIPipeline* pipeline =
+        (m_currentMode == PipelineMode::MSDF) ? m_msdfPipeline.get() : m_pipeline.get();
+    m_device->BindPipeline(pipeline);
     m_device->BindUniformBuffer(0, m_cameraBuffer.get());
     m_device->BindVertexBuffer(m_vertexBuffer.get(), sizeof(Vertex));
     m_device->BindIndexBuffer(m_indexBuffer.get(), IndexFormat::Uint32);

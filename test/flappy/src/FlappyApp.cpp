@@ -6,6 +6,7 @@
 //
 // Controls: Space jump / start / restart, ESC quit.
 
+#include <NaraGame/assets/MSDFFontLoader.h>
 #include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/audio/AudioClip.h>
 #include <NaraGame/audio/AudioDevice.h>
@@ -14,7 +15,7 @@
 #include <NaraGame/core/Log.h>
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
-#include <NaraGame/renderer/BitmapFont.h>
+#include <NaraGame/renderer/MSDFFont.h>
 #include <NaraGame/renderer/ParticleSystem.h>
 #include <NaraGame/renderer/Renderer2D.h>
 #include <NaraGame/renderer/rhi/RHIDevice.h>
@@ -95,11 +96,7 @@ protected:
     void OnStart() override {
         m_renderer.Init(GetDevice());
         const std::string assets = NARAGAME_ASSETS_DIR;
-        // Bitmap font glyphs at non-integer scales blur badly under the
-        // default linear sampler — force Point so 14x24 cells stay crisp.
-        m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png", TextureFilter::Point);
-        m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
-        m_font.SetTracking(-2);
+        m_font = LoadMSDFFont(GetDevice(), assets + "/msdf-inter.json");
 
         m_birdTexture = LoadTexture(GetDevice(), assets + "/bird.png");
         m_birdRegion  = TextureRegion::FromPixels(
@@ -135,7 +132,6 @@ protected:
     }
 
     void OnStop() override {
-        m_fontTexture.reset();
         m_renderer.Shutdown();
     }
 
@@ -289,25 +285,28 @@ protected:
         // Feathers on top of the bird so the burst reads as coming off the body.
         m_particles.Draw(m_renderer);
 
-        // Score (top centre). Integer scales throughout so the bitmap font
-        // is rasterised with consistent pixel widths column to column.
+        // Score (top centre). MSDFFont takes pixel-size directly (em-box
+        // height in pixels), so these numbers are the actual rendered size.
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%d", m_score);
-        const Vec2 size = m_font.Measure(buf, 2.0f);
-        m_renderer.DrawText(m_font, buf, {(kWidth - size.x) * 0.5f, 24.0f},
-                            Color(1.0f, 1.0f, 1.0f, 1.0f), 2.0f);
+        const Vec2 scoreSize = m_font.Measure(buf, 56.0f);
+        m_renderer.DrawText(m_font, buf, {(kWidth - scoreSize.x) * 0.5f, 18.0f},
+                            Color(1.0f, 1.0f, 1.0f, 1.0f), 56.0f);
 
         // Overlays per state.
         char hs[32];
         if (m_state == State::Title) {
-            DrawCentered("FLAPPY", kHeight * 0.30f, 4.0f, Color(1, 1, 1, 1));
-            DrawCentered("SPACE TO START", kHeight * 0.46f, 1.0f, Color(1, 1, 1, 1));
+            // FLAPPY at the top; bird hovers in the middle band; SPACE/BEST
+            // sit below the bird's hover zone so the iconic hovering bird
+            // isn't covered by text.
+            DrawCentered("FLAPPY", kHeight * 0.18f, 100.0f, Color(1, 1, 1, 1));
+            DrawCentered("SPACE TO START", kHeight * 0.58f, 28.0f, Color(1, 1, 1, 1));
             if (m_highScore > 0) {
                 std::snprintf(hs, sizeof(hs), "BEST  %d", m_highScore);
-                DrawCentered(hs, kHeight * 0.54f, 1.0f, Color(1.0f, 0.95f, 0.40f, 1.0f));
+                DrawCentered(hs, kHeight * 0.66f, 26.0f, Color(1.0f, 0.95f, 0.40f, 1.0f));
             }
         } else if (m_state == State::Dead) {
-            DrawCentered("GAME OVER", kHeight * 0.20f, 2.0f, Color(1.0f, 0.45f, 0.45f, 1.0f));
+            DrawCentered("GAME OVER", kHeight * 0.20f, 64.0f, Color(1.0f, 0.45f, 0.45f, 1.0f));
             // Medal sits between GAME OVER and the score line. Skipped
             // entirely when the run didn't clear the bronze threshold —
             // a sub-5 round shouldn't feel rewarded.
@@ -319,14 +318,14 @@ protected:
             }
             if (m_newBest) {
                 std::snprintf(hs, sizeof(hs), "NEW BEST  %d", m_highScore);
-                DrawCentered(hs, kHeight * 0.46f, 1.0f, Color(1.0f, 0.95f, 0.40f, 1.0f));
+                DrawCentered(hs, kHeight * 0.46f, 32.0f, Color(1.0f, 0.95f, 0.40f, 1.0f));
             } else {
                 std::snprintf(hs, sizeof(hs), "BEST  %d", m_highScore);
-                DrawCentered(hs, kHeight * 0.46f, 1.0f, Color(0.90f, 0.90f, 0.95f, 1.0f));
+                DrawCentered(hs, kHeight * 0.46f, 30.0f, Color(0.90f, 0.90f, 0.95f, 1.0f));
             }
             // Suppress the restart hint while the lockout is active.
             if (m_deadTimer <= 0.0f)
-                DrawCentered("SPACE TO RESTART", kHeight * 0.54f, 1.0f, Color(1, 1, 1, 1));
+                DrawCentered("SPACE TO RESTART", kHeight * 0.54f, 28.0f, Color(1, 1, 1, 1));
         }
 
         m_renderer.End();
@@ -441,13 +440,12 @@ private:
         if (out) out << m_highScore << '\n';
     }
 
-    void DrawCentered(const std::string& s, float y, float scale, const Color& c) {
-        const Vec2 size = m_font.Measure(s, scale);
-        m_renderer.DrawText(m_font, s, {(kWidth - size.x) * 0.5f, y}, c, scale);
+    void DrawCentered(const std::string& s, float y, float pixelSize, const Color& c) {
+        const Vec2 size = m_font.Measure(s, pixelSize);
+        m_renderer.DrawText(m_font, s, {(kWidth - size.x) * 0.5f, y}, c, pixelSize);
     }
 
     Renderer2D m_renderer;
-    std::unique_ptr<RHITexture> m_fontTexture;
     std::unique_ptr<RHITexture> m_birdTexture;
     TextureRegion m_birdRegion;
     std::unique_ptr<RHITexture> m_cloudTexture;
@@ -458,7 +456,7 @@ private:
     TextureRegion m_medalRegions[4];
     std::vector<Cloud> m_clouds;
     float m_hillsOffsetX = 0.0f;
-    BitmapFont m_font;
+    MSDFFont   m_font;
     AudioClip  m_flapClip;
     AudioClip  m_scoreClip;
     AudioClip  m_dieClip;
