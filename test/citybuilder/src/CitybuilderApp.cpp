@@ -72,13 +72,15 @@ constexpr float kZoomMax = 4.0f;
 constexpr float kZoomStep = 1.15f;       // multiplier per wheel notch
 constexpr float kArrowPanPxPerSec = 500.0f;
 
-const Color kColor1x1{0.86f, 0.34f, 0.22f, 1.0f};
-const Color kColor2x2{0.30f, 0.50f, 0.85f, 1.0f};
+// Building textures: 64x64 red iso box for 1x1, 128x128 blue iso box for 2x2.
+// Each sprite bakes three-face shading (top base, left 70%, right 50%) so they
+// look 3D without a per-pixel light pass at draw time.
+constexpr float kBuilding1Size = 64.0f;
+constexpr float kBuilding2Size = 128.0f;
 
 struct Building {
-    int   x, y;
-    int   w, h;
-    Color color;
+    int x, y;   // origin (back-most cell in footprint)
+    int w, h;   // footprint size in cells (>=1)
 };
 
 bool BuildingContains(const Building& b, int cellX, int cellY) {
@@ -108,6 +110,11 @@ protected:
         m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
         m_font.SetTracking(-2);
 
+        m_building1x1Texture = LoadTexture(GetDevice(), assets + "/building_1x1.png");
+        m_building1x1Sheet   = SpriteSheet(m_building1x1Texture.get(), 64, 64);
+        m_building2x2Texture = LoadTexture(GetDevice(), assets + "/building_2x2.png");
+        m_building2x2Sheet   = SpriteSheet(m_building2x2Texture.get(), 128, 128);
+
         m_camera.SetViewport(static_cast<float>(Config().width),
                              static_cast<float>(Config().height));
         m_camera.SetZoom(1.0f);
@@ -126,6 +133,8 @@ protected:
         m_slopesTexture.reset();
         m_roadsTexture.reset();
         m_fontTexture.reset();
+        m_building1x1Texture.reset();
+        m_building2x2Texture.reset();
         m_renderer.Shutdown();
     }
 
@@ -188,11 +197,11 @@ protected:
                 m_terrain.AdjustCorner(m_hoverI, m_hoverJ, -1);
 
             if (Input::IsKeyPressed(Key::B))
-                PlaceBuilding(m_hoverCellX, m_hoverCellY, 1, 1, kColor1x1);
+                PlaceBuilding(m_hoverCellX, m_hoverCellY, 1, 1);
             if (Input::IsKeyPressed(Key::V)
                 && m_hoverCellX <= m_terrain.Width()  - 2
                 && m_hoverCellY <= m_terrain.Height() - 2)
-                PlaceBuilding(m_hoverCellX, m_hoverCellY, 2, 2, kColor2x2);
+                PlaceBuilding(m_hoverCellX, m_hoverCellY, 2, 2);
             if (Input::IsKeyPressed(Key::X))
                 RemoveBuildingAt(m_hoverCellX, m_hoverCellY);
             if (Input::IsKeyPressed(Key::R))
@@ -361,6 +370,7 @@ private:
     }
 
     void DrawBuilding(const Building& b) {
+        // Footprint centroid in tile space -> world (caller-relative-to-origin).
         const float mtx = b.x + (b.w - 1) * 0.5f;
         const float mty = b.y + (b.h - 1) * 0.5f;
         const Vec2 ground{
@@ -368,24 +378,42 @@ private:
             (mtx + mty) * m_terrain.HalfH()
         };
         const int baseElev = FootprintBaseElev(b);
-        const float screenBottomY = ground.y - static_cast<float>(baseElev * m_terrain.StepHeight());
+        const float screenCy = ground.y - static_cast<float>(baseElev * m_terrain.StepHeight());
 
-        float boxW = 0.0f, boxH = 0.0f;
-        if      (b.w == 1 && b.h == 1) { boxW = 30.0f; boxH = 36.0f; }
-        else if (b.w == 2 && b.h == 2) { boxW = 72.0f; boxH = 60.0f; }
-        else                           { boxW = 24.0f * (b.w + b.h); boxH = 28.0f * Max(b.w, b.h); }
+        // Anchor: sprite's bottom-center (where the box's south-ground corner
+        // sits) aligns with the centroid's south corner. For a wxh footprint
+        // the south corner is centroid + (0, halfDiamondH) where halfDiamondH
+        // grows with the footprint: 1x1 -> halfH (16 px), 2x2 -> 2*halfH (32).
+        SpriteSheet* sheet = nullptr;
+        float spriteSize = 0.0f;
+        float halfDiamondH = 0.0f;
+        if (b.w == 1 && b.h == 1) {
+            sheet = &m_building1x1Sheet;
+            spriteSize = kBuilding1Size;
+            halfDiamondH = m_terrain.HalfH();          // 16 px
+        } else if (b.w == 2 && b.h == 2) {
+            sheet = &m_building2x2Sheet;
+            spriteSize = kBuilding2Size;
+            halfDiamondH = m_terrain.HalfH() * 2.0f;   // 32 px
+        } else {
+            return; // unsupported footprint for prototype
+        }
 
-        m_renderer.DrawQuad({ ground.x - boxW * 0.5f, screenBottomY - boxH },
-                            { boxW, boxH }, b.color);
+        const Vec2 topLeft{
+            ground.x - spriteSize * 0.5f,
+            screenCy - spriteSize + halfDiamondH
+        };
+        m_renderer.DrawQuad(topLeft, {spriteSize, spriteSize},
+                            sheet->At(0), Color(1.0f, 1.0f, 1.0f, 1.0f));
     }
 
-    void PlaceBuilding(int x, int y, int w, int h, const Color& color) {
+    void PlaceBuilding(int x, int y, int w, int h) {
         for (const Building& b : m_buildings) {
             const bool overlapX = !(x + w <= b.x || b.x + b.w <= x);
             const bool overlapY = !(y + h <= b.y || b.y + b.h <= y);
             if (overlapX && overlapY) return;
         }
-        m_buildings.push_back({x, y, w, h, color});
+        m_buildings.push_back({x, y, w, h});
     }
 
     void RemoveBuildingAt(int cellX, int cellY) {
@@ -507,6 +535,10 @@ private:
     std::vector<bool>           m_roadCells;
     std::unique_ptr<RHITexture> m_fontTexture;
     BitmapFont                  m_font;
+    std::unique_ptr<RHITexture> m_building1x1Texture;
+    SpriteSheet                 m_building1x1Sheet;
+    std::unique_ptr<RHITexture> m_building2x2Texture;
+    SpriteSheet                 m_building2x2Sheet;
     IsoTerrain                  m_terrain;
     std::vector<Building>       m_buildings;
     Camera2D                    m_camera;
