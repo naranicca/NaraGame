@@ -250,6 +250,7 @@ protected:
                 const int y = sum - x;
                 DrawCell(x, y);
                 if (HasRoad(x, y)) DrawRoad(x, y);
+                DrawShadowsOn(x, y);
             }
             for (const Building& b : m_buildings)
                 if ((b.x + b.w - 1) + (b.y + b.h - 1) == sum)
@@ -431,6 +432,42 @@ private:
         };
         m_renderer.DrawQuad(topLeft, {spriteSize, spriteSize},
                             sheet->At(0), Color(1.0f, 1.0f, 1.0f, 1.0f));
+    }
+
+    // Per-cell building-shadow overlay. Each building shadows the cells in
+    // its footprint's "+1 SE" bounding box minus the footprint itself — i.e.
+    // 1x1 buildings shadow 3 cells (E, S, SE) and 2x2 shadow 5 cells
+    // (E*2, S*2, SE). Drawn AFTER the cell terrain + road so the overlay
+    // tints whatever is underneath; the slope atlas's tile 0/N is reused so
+    // the shadow automatically follows the cell's actual slope shape.
+    //
+    // Multiple buildings on the same shadow cell are not stacked — first hit
+    // wins. That keeps the overlay from going opaque-black in dense clusters
+    // and is fine for a prototype.
+    void DrawShadowsOn(int cx, int cy) {
+        bool shadowed = false;
+        for (const Building& b : m_buildings) {
+            const bool inExtBox = cx >= b.x && cx <= b.x + b.w
+                               && cy >= b.y && cy <= b.y + b.h;
+            const bool inFootprint = cx >= b.x && cx <  b.x + b.w
+                                  && cy >= b.y && cy <  b.y + b.h;
+            if (inExtBox && !inFootprint) { shadowed = true; break; }
+        }
+        if (!shadowed) return;
+
+        const IsoCellSlope s = m_terrain.CellSlope(cx, cy);
+        // Don't shadow water tiles — they're drawn at h=0 with their own
+        // tint and adding a black overlay would just murk the water.
+        if (s.maxH < 0) return;
+
+        const Vec2 center = m_terrain.TileCenterToScreen(cx, cy);
+        const Vec2 topLeft{
+            center.x - kSpriteW * 0.5f,
+            center.y - kSpriteAnchorY - static_cast<float>(s.baseElev * m_terrain.StepHeight())
+        };
+        m_renderer.DrawQuad(topLeft, {kSpriteW, kSpriteH},
+                            m_slopes.At(s.slopeBits),
+                            Color(0.0f, 0.0f, 0.0f, 0.35f));
     }
 
     void PlaceBuilding(int x, int y, int w, int h) {
