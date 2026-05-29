@@ -38,6 +38,7 @@ public:
 
     uint32_t Width() const override { return m_width; }
     uint32_t Height() const override { return m_height; }
+    TextureFilter Filter() const override { return m_filter; }
 
     ID3D11ShaderResourceView* SRV() const { return m_srv.Get(); }
 
@@ -45,6 +46,7 @@ private:
     ComPtr<ID3D11ShaderResourceView> m_srv;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
+    TextureFilter m_filter = TextureFilter::Linear;
 };
 
 // --- Shader ---------------------------------------------------------------

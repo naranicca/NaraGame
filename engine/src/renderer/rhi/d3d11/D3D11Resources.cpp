@@ -67,7 +67,7 @@ void D3D11Buffer::Update(const void* data, size_t size, size_t offset) {
 // D3D11Texture
 // ===========================================================================
 D3D11Texture::D3D11Texture(ID3D11Device* device, const TextureDesc& desc)
-    : m_width(desc.width), m_height(desc.height) {
+    : m_width(desc.width), m_height(desc.height), m_filter(desc.filter) {
 
     D3D11_TEXTURE2D_DESC td{};
     td.Width = desc.width;

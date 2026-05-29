@@ -80,13 +80,15 @@ void D3D11Device::CreateDefaultStates() {
     m_device->CreateDepthStencilState(&ds, m_depthState.GetAddressOf());
 
     D3D11_SAMPLER_DESC sd{};
-    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
     sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
     sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
     sd.MaxLOD = D3D11_FLOAT32_MAX;
-    m_device->CreateSamplerState(&sd, m_sampler.GetAddressOf());
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    m_device->CreateSamplerState(&sd, m_linearSampler.GetAddressOf());
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    m_device->CreateSamplerState(&sd, m_pointSampler.GetAddressOf());
 }
 
 void D3D11Device::CreateRenderTarget() {
@@ -126,7 +128,9 @@ void D3D11Device::BeginFrame() {
 
     m_context->RSSetState(m_rasterizer.Get());
     m_context->OMSetDepthStencilState(m_depthState.Get(), 0);
-    ID3D11SamplerState* samplers[] = {m_sampler.Get()};
+    // Default sampler so any draw that fires before a BindTexture (e.g. a
+    // colored quad using the renderer's white texture) still samples cleanly.
+    ID3D11SamplerState* samplers[] = {m_linearSampler.Get()};
     m_context->PSSetSamplers(0, 1, samplers);
 }
 
@@ -196,6 +200,17 @@ void D3D11Device::BindTexture(uint32_t slot, RHITexture* texture) {
         texture ? static_cast<D3D11Texture*>(texture)->SRV() : nullptr;
     ID3D11ShaderResourceView* views[] = {srv};
     m_context->PSSetShaderResources(slot, 1, views);
+
+    // Pick the sampler that matches this texture's filter pref. Renderer2D
+    // batches per-texture, so each batch's first BindTexture sets the right
+    // sampler before its draw. Slot 0 mirrors the shader's single sSampler.
+    const TextureFilter filter =
+        texture ? texture->Filter() : TextureFilter::Linear;
+    ID3D11SamplerState* samplers[] = {
+        filter == TextureFilter::Point ? m_pointSampler.Get()
+                                       : m_linearSampler.Get()
+    };
+    m_context->PSSetSamplers(0, 1, samplers);
 }
 
 void D3D11Device::DrawIndexed(uint32_t indexCount, uint32_t firstIndex) {

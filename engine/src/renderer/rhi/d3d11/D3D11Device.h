@@ -60,7 +60,10 @@ private:
     // Fixed-function states shared by 2D rendering.
     ComPtr<ID3D11RasterizerState> m_rasterizer;   // cull none, solid fill
     ComPtr<ID3D11DepthStencilState> m_depthState; // depth test disabled
-    ComPtr<ID3D11SamplerState> m_sampler;         // linear, clamp
+    // One sampler per filter mode; BindTexture picks the matching one from
+    // the texture's TextureDesc::filter. Both clamp on every axis.
+    ComPtr<ID3D11SamplerState> m_linearSampler;
+    ComPtr<ID3D11SamplerState> m_pointSampler;
 };
 
 } // namespace NaraGame

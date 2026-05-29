@@ -95,7 +95,9 @@ protected:
     void OnStart() override {
         m_renderer.Init(GetDevice());
         const std::string assets = NARAGAME_ASSETS_DIR;
-        m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png");
+        // Bitmap font glyphs at non-integer scales blur badly under the
+        // default linear sampler — force Point so 14x24 cells stay crisp.
+        m_fontTexture = LoadTexture(GetDevice(), assets + "/font.png", TextureFilter::Point);
         m_font = BitmapFont(m_fontTexture.get(), ' ', 16, 14, 24);
         m_font.SetTracking(-2);
 
@@ -287,7 +289,8 @@ protected:
         // Feathers on top of the bird so the burst reads as coming off the body.
         m_particles.Draw(m_renderer);
 
-        // Score (top centre).
+        // Score (top centre). Integer scales throughout so the bitmap font
+        // is rasterised with consistent pixel widths column to column.
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%d", m_score);
         const Vec2 size = m_font.Measure(buf, 2.0f);
@@ -297,14 +300,14 @@ protected:
         // Overlays per state.
         char hs[32];
         if (m_state == State::Title) {
-            DrawCentered("FLAPPY", kHeight * 0.32f, 3.5f, Color(1, 1, 1, 1));
-            DrawCentered("SPACE TO START", kHeight * 0.46f, 1.4f, Color(1, 1, 1, 1));
+            DrawCentered("FLAPPY", kHeight * 0.30f, 4.0f, Color(1, 1, 1, 1));
+            DrawCentered("SPACE TO START", kHeight * 0.46f, 1.0f, Color(1, 1, 1, 1));
             if (m_highScore > 0) {
                 std::snprintf(hs, sizeof(hs), "BEST  %d", m_highScore);
-                DrawCentered(hs, kHeight * 0.54f, 1.2f, Color(1.0f, 0.95f, 0.40f, 1.0f));
+                DrawCentered(hs, kHeight * 0.54f, 1.0f, Color(1.0f, 0.95f, 0.40f, 1.0f));
             }
         } else if (m_state == State::Dead) {
-            DrawCentered("GAME OVER", kHeight * 0.20f, 2.5f, Color(1.0f, 0.45f, 0.45f, 1.0f));
+            DrawCentered("GAME OVER", kHeight * 0.20f, 2.0f, Color(1.0f, 0.45f, 0.45f, 1.0f));
             // Medal sits between GAME OVER and the score line. Skipped
             // entirely when the run didn't clear the bronze threshold —
             // a sub-5 round shouldn't feel rewarded.
@@ -316,14 +319,14 @@ protected:
             }
             if (m_newBest) {
                 std::snprintf(hs, sizeof(hs), "NEW BEST  %d", m_highScore);
-                DrawCentered(hs, kHeight * 0.46f, 1.5f, Color(1.0f, 0.95f, 0.40f, 1.0f));
+                DrawCentered(hs, kHeight * 0.46f, 1.0f, Color(1.0f, 0.95f, 0.40f, 1.0f));
             } else {
                 std::snprintf(hs, sizeof(hs), "BEST  %d", m_highScore);
-                DrawCentered(hs, kHeight * 0.46f, 1.3f, Color(0.90f, 0.90f, 0.95f, 1.0f));
+                DrawCentered(hs, kHeight * 0.46f, 1.0f, Color(0.90f, 0.90f, 0.95f, 1.0f));
             }
             // Suppress the restart hint while the lockout is active.
             if (m_deadTimer <= 0.0f)
-                DrawCentered("SPACE TO RESTART", kHeight * 0.54f, 1.4f, Color(1, 1, 1, 1));
+                DrawCentered("SPACE TO RESTART", kHeight * 0.54f, 1.0f, Color(1, 1, 1, 1));
         }
 
         m_renderer.End();

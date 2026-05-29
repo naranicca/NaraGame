@@ -273,16 +273,22 @@ void Renderer2D::DrawText(const BitmapFont& font, const std::string& text, const
     if (!font.Valid())
         return;
 
-    const float advance = static_cast<float>(font.Advance()) * scale;
-    const float lineHeight = static_cast<float>(font.LineHeight()) * scale;
-    const Vec2 glyphSize{static_cast<float>(font.GlyphWidth()) * scale,
-                         static_cast<float>(font.GlyphHeight()) * scale};
+    // Round every per-glyph dimension to whole pixels before laying glyphs out.
+    // Non-integer scale (e.g. 1.4) would otherwise produce fractional glyph
+    // quads, and even with a point sampler that creates uneven pixel widths
+    // column to column — the "fuzzy bitmap font" look. Snapping the starting
+    // position too keeps text on the same pixel grid as the rest of the UI.
+    const float advance    = std::round(static_cast<float>(font.Advance())    * scale);
+    const float lineHeight = std::round(static_cast<float>(font.LineHeight()) * scale);
+    const Vec2  glyphSize{std::round(static_cast<float>(font.GlyphWidth())  * scale),
+                          std::round(static_cast<float>(font.GlyphHeight()) * scale)};
 
-    float x = position.x;
-    float y = position.y;
+    const float startX = std::round(position.x);
+    float x = startX;
+    float y = std::round(position.y);
     for (char c : text) {
         if (c == '\n') {
-            x = position.x;
+            x = startX;
             y += lineHeight;
             continue;
         }

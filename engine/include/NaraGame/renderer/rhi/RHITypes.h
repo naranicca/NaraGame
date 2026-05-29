@@ -35,6 +35,14 @@ enum class TextureFormat { RGBA8 };
 enum class PrimitiveTopology { TriangleList };
 enum class BlendMode { None, Alpha };             // Alpha = src-over
 
+// Sampler filter mode chosen per-texture at creation time. Linear blurs on
+// upscale (good for soft sprites and photos); Point keeps pixels crisp (right
+// for pixel-art bitmap fonts and tile sheets that the engine should never
+// interpolate). The D3D11 backend keeps both samplers ready and selects on
+// BindTexture; the Vulkan backend currently honors the field via its own
+// sampler set (or falls back to Linear if not implemented).
+enum class TextureFilter { Linear, Point };
+
 // Vertex attribute element type.
 enum class VertexFormat { Float, Float2, Float3, Float4, UByte4Norm };
 

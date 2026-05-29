@@ -6,7 +6,8 @@
 
 namespace NaraGame {
 
-std::unique_ptr<RHITexture> CreateTexture(RHIDevice& device, const Image& image) {
+std::unique_ptr<RHITexture> CreateTexture(RHIDevice& device, const Image& image,
+                                          TextureFilter filter) {
     if (!image.Valid()) {
         NARAGAME_ERROR("CreateTexture: invalid image");
         return nullptr;
@@ -15,18 +16,20 @@ std::unique_ptr<RHITexture> CreateTexture(RHIDevice& device, const Image& image)
     desc.width = image.width;
     desc.height = image.height;
     desc.format = TextureFormat::RGBA8;
+    desc.filter = filter;
     desc.pixels = image.pixels.data();
     return device.CreateTexture(desc);
 }
 
-std::unique_ptr<RHITexture> LoadTexture(RHIDevice& device, const std::string& path) {
+std::unique_ptr<RHITexture> LoadTexture(RHIDevice& device, const std::string& path,
+                                        TextureFilter filter) {
     const Image image = LoadImageFile(path);
     if (!image.Valid()) {
         NARAGAME_ERROR("LoadTexture: failed to load '%s'", path.c_str());
         return nullptr;
     }
     NARAGAME_INFO("Loaded texture '%s' (%ux%u)", path.c_str(), image.width, image.height);
-    return CreateTexture(device, image);
+    return CreateTexture(device, image, filter);
 }
 
 } // namespace NaraGame

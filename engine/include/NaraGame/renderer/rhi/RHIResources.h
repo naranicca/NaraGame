@@ -34,6 +34,7 @@ struct TextureDesc {
     uint32_t width = 0;
     uint32_t height = 0;
     TextureFormat format = TextureFormat::RGBA8;
+    TextureFilter filter = TextureFilter::Linear;
     const void* pixels = nullptr;  // tightly packed, top-to-bottom
 };
 
@@ -42,6 +43,7 @@ public:
     virtual ~RHITexture() = default;
     virtual uint32_t Width() const = 0;
     virtual uint32_t Height() const = 0;
+    virtual TextureFilter Filter() const { return TextureFilter::Linear; }
 };
 
 // ---------------------------------------------------------------------------
