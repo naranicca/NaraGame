@@ -49,13 +49,15 @@ constexpr float kGravity   = 1700.0f;   // px/s^2
 constexpr float kFlapVy    = -520.0f;   // upward impulse per flap
 constexpr float kVyClamp   = 800.0f;    // terminal-ish velocity, both ways
 
-// Pipes.
+// Pipes — base values (used when difficulty = 0). Per-round numbers are
+// scaled up/down by Difficulty() so the game gets harder as the score climbs.
 constexpr float kPipeW     = 70.0f;
 constexpr float kPipeCapH  = 22.0f;
-constexpr float kGapH      = 170.0f;
-constexpr float kScrollVx  = -200.0f;   // px/s, pipes move left
-constexpr float kSpawnDx   = 230.0f;    // distance between adjacent pipes
-constexpr float kGapMargin = 90.0f;     // min distance gap-center stays from ceiling/floor
+constexpr float kGapH      = 195.0f;     // gap shrinks toward 145 at full difficulty
+constexpr float kScrollVx  = -200.0f;    // speeds up toward -310 at full difficulty
+constexpr float kSpawnDx   = 230.0f;     // closer spawning toward 195 at full difficulty
+constexpr float kGapMargin = 90.0f;      // min distance gap stays from ceiling/floor
+constexpr float kDifficultyScoreCap = 30.0f;  // score at which scaling maxes out
 
 // AABB intersection — half-open rects, standard.
 bool RectsOverlap(float ax, float ay, float aw, float ah,
@@ -123,9 +125,11 @@ protected:
 
         // Move + spawn pipes. The deque is roughly ordered by x descending
         // (left to right); when the rightmost pipe has scrolled in far
-        // enough, push a new one off-screen to the right.
-        for (Pipe& p : m_pipes) p.x += kScrollVx * dt;
-        if (m_pipes.empty() || m_pipes.back().x < kWidth - kSpawnDx)
+        // enough, push a new one off-screen to the right. Speed and spacing
+        // shrink with score via CurrentScrollSpeed / CurrentSpawnDx.
+        const float scroll = CurrentScrollSpeed();
+        for (Pipe& p : m_pipes) p.x += scroll * dt;
+        if (m_pipes.empty() || m_pipes.back().x < kWidth - CurrentSpawnDx())
             SpawnPipe();
         while (!m_pipes.empty() && m_pipes.front().x + kPipeW < 0.0f)
             m_pipes.erase(m_pipes.begin());
@@ -137,7 +141,7 @@ protected:
         }
         for (const Pipe& p : m_pipes) {
             const float topH = p.gapY;                       // pipe extends from y=0 down to gapY
-            const float botY = p.gapY + kGapH;               // bottom pipe starts here
+            const float botY = p.gapY + p.gapH;              // bottom pipe starts here
             const float botH = kFloor - botY;
             if (RectsOverlap(kBirdX, m_birdY, kBirdW, kBirdH, p.x, 0.0f, kPipeW, topH) ||
                 RectsOverlap(kBirdX, m_birdY, kBirdW, kBirdH, p.x, botY, kPipeW, botH)) {
@@ -166,7 +170,7 @@ protected:
         const Color pipeRim {0.10f, 0.35f, 0.14f, 1.0f};
         for (const Pipe& p : m_pipes) {
             const float topH = p.gapY;
-            const float botY = p.gapY + kGapH;
+            const float botY = p.gapY + p.gapH;
             const float botH = kFloor - botY;
             // Top pipe.
             m_renderer.DrawQuad({p.x, 0.0f}, {kPipeW, topH}, pipeBody);
@@ -240,6 +244,7 @@ private:
     struct Pipe {
         float x;
         float gapY;     // y of the top of the gap (top pipe extends 0..gapY)
+        float gapH;     // captured at spawn — preserves the gap a pipe was born with
         bool  scored = false;
     };
 
@@ -263,11 +268,20 @@ private:
         m_pipes.back().x = kWidth + 60.0f;
     }
 
+    // 0 at score 0, ramps to 1 by kDifficultyScoreCap, then plateaus.
+    float Difficulty() const {
+        return Min(1.0f, m_score / kDifficultyScoreCap);
+    }
+    float CurrentScrollSpeed() const { return kScrollVx + (-110.0f) * Difficulty(); }
+    float CurrentSpawnDx()    const { return kSpawnDx + (-35.0f)  * Difficulty(); }
+    float CurrentGapH()       const { return kGapH    + (-50.0f)  * Difficulty(); }
+
     void SpawnPipe() {
-        std::uniform_real_distribution<float> dist(
-            kGapMargin, kFloor - kGapH - kGapMargin);
         Pipe p;
         p.x = kWidth;
+        p.gapH = CurrentGapH();
+        std::uniform_real_distribution<float> dist(
+            kGapMargin, kFloor - p.gapH - kGapMargin);
         p.gapY = dist(m_rng);
         m_pipes.push_back(p);
     }
