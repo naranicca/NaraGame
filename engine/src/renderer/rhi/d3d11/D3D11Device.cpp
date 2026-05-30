@@ -155,7 +155,7 @@ std::unique_ptr<RHIBuffer> D3D11Device::CreateBuffer(const BufferDesc& desc) {
 }
 
 std::unique_ptr<RHITexture> D3D11Device::CreateTexture(const TextureDesc& desc) {
-    return std::make_unique<D3D11Texture>(m_device.Get(), desc);
+    return std::make_unique<D3D11Texture>(m_device.Get(), m_context.Get(), desc);
 }
 
 std::unique_ptr<RHIShader> D3D11Device::CreateShader(const ShaderDesc& desc) {

@@ -44,6 +44,13 @@ public:
     virtual uint32_t Width() const = 0;
     virtual uint32_t Height() const = 0;
     virtual TextureFilter Filter() const { return TextureFilter::Linear; }
+
+    // Replace pixels in place. The new data MUST match the texture's current
+    // width, height, and RGBA8 stride; mismatched calls fail and leave the
+    // texture unchanged. Used by asset hot reload so atlases / SRVs that
+    // already hold this texture's address stay valid across the swap.
+    // Backends that don't implement live updates return false.
+    virtual bool UpdatePixels(const void* /*pixels*/) { return false; }
 };
 
 // ---------------------------------------------------------------------------

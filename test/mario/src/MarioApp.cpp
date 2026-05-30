@@ -5,6 +5,7 @@
 // step. Controls: Enter start, Left/Right or A/D move, Space/Up jump, P pause,
 // Esc quit (to title from pause, or close from title).
 
+#include <NaraGame/assets/AssetWatcher.h>
 #include <NaraGame/assets/BMFont.h>
 #include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/assets/TileLevel.h>
@@ -244,6 +245,12 @@ struct GameContext {
     int coins = 0;
     int lives = 3;
 
+    // Bumped by MarioApp whenever an asset watcher event for a level<N>.txt
+    // fires. GameScene caches its last-seen value and re-runs OnEnter() when
+    // the counter changes -- a simple cross-class signal that avoids
+    // surfacing the watcher API to the scene layer.
+    int levelReloadCounter = 0;
+
     std::function<std::unique_ptr<Scene>()> makeTitle;
     std::function<std::unique_ptr<Scene>(int)> makeGame;
 
@@ -294,6 +301,11 @@ public:
     GameScene(GameContext* ctx, int level) : m_ctx(ctx), m_level(level) {}
 
     void OnEnter() override {
+        // Sync the reload watermark so any counter bumps that happened while
+        // we were on the title/pause screen don't trigger an immediate
+        // re-entry on the next OnUpdate.
+        m_seenLevelReload = m_ctx->levelReloadCounter;
+
         const std::unordered_map<char, int> legend = {
             {'#', GROUND}, {'=', DIRT}, {'b', BRICK}, {'?', QUESTION}, {'(', PIPE_TL},
             {')', PIPE_TR}, {'{', PIPE_BL}, {'}', PIPE_BR}, {'X', HARD}, {'o', COIN}};
@@ -385,6 +397,16 @@ public:
         }
         if (Input::IsKeyPressed(Key::F1)) m_debugCollisions = !m_debugCollisions;
         if (Input::IsKeyPressed(Key::F2)) m_debugStats = !m_debugStats;
+
+        // Hot-reload check: the watcher (running in MarioApp) bumps the ctx
+        // counter when level<N>.txt changes on disk. Re-running OnEnter()
+        // tears the world back down and reloads the file -- effectively a
+        // level restart, which is the right behaviour for a live edit.
+        if (m_ctx->levelReloadCounter != m_seenLevelReload) {
+            m_seenLevelReload = m_ctx->levelReloadCounter;
+            OnEnter();
+            return;
+        }
 
         const float dt = Min(dtRaw, 1.0f / 30.0f);
         if (m_invulnTimer > 0.0f) m_invulnTimer -= dt;
@@ -1334,6 +1356,7 @@ private:
     std::set<std::pair<int,int>> m_fireFlowerBlocks;
     bool m_debugCollisions = false;
     bool m_debugStats = false;
+    int  m_seenLevelReload = 0;
     MarioForm m_form = MarioForm::Small;
     float m_invulnTimer = 0.0f;
     float m_transformTimer = 0.0f;    // > 0 while grow/shrink animation runs
@@ -1455,16 +1478,38 @@ protected:
         m_ctx.makeGame = [this](int level) { return std::make_unique<GameScene>(&m_ctx, level); };
 
         m_scenes.Change(m_ctx.makeTitle());
+
+        // Asset hot reload: watch the assets dir, reload textures in place,
+        // bump the level counter so GameScene re-runs OnEnter(). Path comes
+        // back relative to `assets` with forward slashes, so we match the
+        // basename directly without further normalisation.
+        m_watcher.Watch(assets, [this, assets](const std::string& rel) {
+            if (rel == "characters.png") {
+                ReloadTexture(*m_charTexture, assets + "/characters.png");
+            } else if (rel == "tiles.png") {
+                ReloadTexture(*m_tilesTexture, assets + "/tiles.png");
+            } else if (rel.rfind("level", 0) == 0 &&
+                       rel.size() > 4 && rel.substr(rel.size() - 4) == ".txt") {
+                ++m_ctx.levelReloadCounter;
+                NARAGAME_INFO("Hot reload: %s -> level counter %d",
+                              rel.c_str(), m_ctx.levelReloadCounter);
+            }
+        });
+
         NARAGAME_INFO("Mario: scene/state demo (title -> game <-> pause, file-loaded levels)");
     }
 
     void OnStop() override {
+        m_watcher.Stop();
         m_tilesTexture.reset();
         m_charTexture.reset();
         m_renderer.Shutdown();
     }
 
-    void OnUpdate(float dt) override { m_scenes.Update(dt); }
+    void OnUpdate(float dt) override {
+        m_watcher.Poll();
+        m_scenes.Update(dt);
+    }
     void OnRender() override { m_scenes.Render(); }
 
 private:
@@ -1487,6 +1532,7 @@ private:
     AudioClip m_bgm;
     GameContext m_ctx;
     SceneManager m_scenes;
+    AssetWatcher m_watcher;
 };
 
 Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {

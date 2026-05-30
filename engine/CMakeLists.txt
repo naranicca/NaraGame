@@ -4,6 +4,7 @@
 
 # Platform-agnostic sources (compiled everywhere).
 set(NARAGAME_SOURCES
+    src/assets/AssetWatcher.cpp
     src/assets/BMFont.cpp
     src/assets/Inflate.cpp
     src/assets/MSDFFontLoader.cpp

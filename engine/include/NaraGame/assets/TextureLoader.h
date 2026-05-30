@@ -21,4 +21,12 @@ std::unique_ptr<RHITexture> CreateTexture(RHIDevice& device, const Image& image,
 std::unique_ptr<RHITexture> LoadTexture(RHIDevice& device, const std::string& path,
                                         TextureFilter filter = TextureFilter::Linear);
 
+// Load `path` and push its pixels into an existing texture without replacing
+// the GPU object. Used by hot reload so atlas region pointers and SRVs that
+// already reference `texture` stay valid. Fails (returning false and leaving
+// the texture untouched) when the file can't be loaded or its dimensions
+// no longer match the live texture -- a resized art file needs a real
+// re-create, not a pixel swap.
+bool ReloadTexture(RHITexture& texture, const std::string& path);
+
 } // namespace NaraGame

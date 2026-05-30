@@ -66,8 +66,9 @@ void D3D11Buffer::Update(const void* data, size_t size, size_t offset) {
 // ===========================================================================
 // D3D11Texture
 // ===========================================================================
-D3D11Texture::D3D11Texture(ID3D11Device* device, const TextureDesc& desc)
-    : m_width(desc.width), m_height(desc.height), m_filter(desc.filter) {
+D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
+                           const TextureDesc& desc)
+    : m_context(context), m_width(desc.width), m_height(desc.height), m_filter(desc.filter) {
 
     D3D11_TEXTURE2D_DESC td{};
     td.Width = desc.width;
@@ -83,17 +84,26 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, const TextureDesc& desc)
     init.pSysMem = desc.pixels;
     init.SysMemPitch = desc.width * 4; // RGBA8
 
-    ComPtr<ID3D11Texture2D> texture;
     HRESULT hr =
-        device->CreateTexture2D(&td, desc.pixels ? &init : nullptr, texture.GetAddressOf());
+        device->CreateTexture2D(&td, desc.pixels ? &init : nullptr, m_texture.GetAddressOf());
     if (FAILED(hr)) {
         NARAGAME_ERROR("CreateTexture2D failed (0x%08lX)", static_cast<unsigned long>(hr));
         return;
     }
 
-    hr = device->CreateShaderResourceView(texture.Get(), nullptr, m_srv.GetAddressOf());
+    hr = device->CreateShaderResourceView(m_texture.Get(), nullptr, m_srv.GetAddressOf());
     if (FAILED(hr))
         NARAGAME_ERROR("CreateShaderResourceView failed (0x%08lX)", static_cast<unsigned long>(hr));
+}
+
+bool D3D11Texture::UpdatePixels(const void* pixels) {
+    if (!pixels || !m_texture || !m_context) return false;
+    // RGBA8 only (matches the DXGI_FORMAT in the constructor). Caller must
+    // hand us tightly packed top-down pixel data of exactly the texture's
+    // current width x height; a mismatched size would silently land on the
+    // wrong rows.
+    m_context->UpdateSubresource(m_texture.Get(), 0, nullptr, pixels, m_width * 4, 0);
+    return true;
 }
 
 // ===========================================================================

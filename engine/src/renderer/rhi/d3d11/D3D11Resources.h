@@ -34,15 +34,19 @@ private:
 // --- Texture --------------------------------------------------------------
 class D3D11Texture final : public RHITexture {
 public:
-    D3D11Texture(ID3D11Device* device, const TextureDesc& desc);
+    D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context, const TextureDesc& desc);
 
     uint32_t Width() const override { return m_width; }
     uint32_t Height() const override { return m_height; }
     TextureFilter Filter() const override { return m_filter; }
 
+    bool UpdatePixels(const void* pixels) override;
+
     ID3D11ShaderResourceView* SRV() const { return m_srv.Get(); }
 
 private:
+    ComPtr<ID3D11DeviceContext> m_context;
+    ComPtr<ID3D11Texture2D> m_texture;
     ComPtr<ID3D11ShaderResourceView> m_srv;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
