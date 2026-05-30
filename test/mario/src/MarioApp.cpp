@@ -137,7 +137,19 @@ constexpr float kBrickBumpLife   = 0.20f;
 constexpr float kBrickBumpHeight = 12.0f;
 constexpr int   kBrickBreakScore = 50;
 
-enum BodyTag : uint32_t { TagTile = 1, TagPlayer = 2, TagGoomba = 3, TagMushroom = 4 };
+// Fireball physics. Travels at kFireballVx in the facing direction, gravity
+// pulls it down, and it bounces with this restitution when it touches a
+// solid below. Despawns on wall hit or after kFireballLifeSeconds.
+constexpr float kFireballSize    = kT * 0.6f;
+constexpr float kFireballVx      = 360.0f;
+constexpr float kFireballBounce  = 420.0f;
+constexpr float kFireballLifeS   = 2.5f;
+constexpr int   kMaxFireballs    = 2;
+
+enum BodyTag : uint32_t {
+    TagTile = 1, TagPlayer = 2, TagGoomba = 3, TagMushroom = 4,
+    TagFireFlower = 5, TagFireball = 6
+};
 
 struct Goomba {
     int bodyId = -1;
@@ -180,9 +192,24 @@ struct BrickBump {
     float t = 0.0f; // 0..kBrickBumpLife
 };
 
+struct FireFlower {
+    int bodyId = -1;
+    bool alive = true;
+    float spawnTimer = 0.0f;
+    Vec2 spawnAt;
+};
+
+struct Fireball {
+    int bodyId = -1;
+    float life = 0.0f;  // counts up; kill at kFireballLifeS
+    float dir = 1.0f;   // -1 / +1 facing when shot
+    bool alive = true;
+};
+
 // Player size mode. Affects hitbox (32x32 vs 32x64), sprite source rect, head
-// height (for bumping blocks), and damage handling.
-enum class MarioForm { Small, Super };
+// height (for bumping blocks), and damage handling. Fire is the same shape as
+// Super but uses a recoloured sprite and grants the fireball shot.
+enum class MarioForm { Small, Super, Fire };
 
 // Shared resources + scene factories, owned by the Application.
 struct GameContext {
@@ -275,20 +302,26 @@ public:
 
         m_goombas.clear();
         m_mushrooms.clear();
+        m_fireFlowers.clear();
+        m_fireballs.clear();
         m_mushroomBlocks.clear();
+        m_fireFlowerBlocks.clear();
         m_brickBumps.clear();
         m_form = MarioForm::Small;
         m_invulnTimer = 0.0f;
         m_spawn = {120.0f, kT * 14.0f};
 
-        // First pass: any '!' marker is a mushroom block. Promote it to a
-        // QUESTION tile NOW so the next step's BuildTileColliders sees it as
-        // solid; remember the position so the bump handler knows to spawn a
-        // mushroom there instead of a coin.
+        // First pass: '!' = mushroom block, '*' = fire-flower block. Both
+        // promote to QUESTION tiles now so BuildTileColliders sees them as
+        // solid; remember the positions so the bump handler knows which
+        // power-up to spawn when each is hit.
         for (const LevelObject& obj : level.objects) {
             if (obj.symbol == '!') {
                 m_map.SetTile(obj.tileX, obj.tileY, QUESTION);
                 m_mushroomBlocks.insert({obj.tileX, obj.tileY});
+            } else if (obj.symbol == '*') {
+                m_map.SetTile(obj.tileX, obj.tileY, QUESTION);
+                m_fireFlowerBlocks.insert({obj.tileX, obj.tileY});
             }
         }
 
@@ -367,14 +400,18 @@ public:
         ControlPlayer(dt);
         ControlGoombas(dt);
         ControlMushrooms(dt);
+        ControlFireFlowers(dt);
+        ControlFireballs(dt);
 
         m_world.Step(dt); // integrates gravity + resolves tile collisions
 
         TurnGoombasAtWalls();
         TurnMushroomsAtWalls();
+        ResolveFireballContacts();
         BumpBlocks();
         CollectCoins();
         CollectMushrooms();
+        CollectFireFlowers();
         ResolveGoombaHits();
         m_particles.Update(dt);
 
@@ -409,13 +446,28 @@ public:
                            m_ctx->chars->Get(g.frame ? "goomba1" : "goomba0"));
             }
         }
-        // Mushrooms (drawn under the player so a mushroom emerging from a
-        // block reads as "behind" the action briefly).
+        // Mushrooms + Fire Flowers (drawn under the player so the reveal
+        // animation reads as "behind" the action briefly).
         for (const Mushroom& mu : m_mushrooms) {
             if (!mu.alive) continue;
             if (const Body* mb = m_world.Get(mu.bodyId)) {
                 r.DrawQuad(mb->position, {kMushroomW, kMushroomH},
                            m_ctx->chars->Get("mushroom"));
+            }
+        }
+        for (const FireFlower& fl : m_fireFlowers) {
+            if (!fl.alive) continue;
+            if (const Body* fb = m_world.Get(fl.bodyId)) {
+                r.DrawQuad(fb->position, {kMushroomW, kMushroomH},
+                           m_ctx->chars->Get("fireFlower"));
+            }
+        }
+        // Fireballs draw over the player so they read as projectiles.
+        for (const Fireball& fb : m_fireballs) {
+            if (!fb.alive) continue;
+            if (const Body* b = m_world.Get(fb.bodyId)) {
+                r.DrawQuad(b->position, {kFireballSize, kFireballSize},
+                           m_ctx->chars->Get("fireball"));
             }
         }
 
@@ -434,20 +486,20 @@ public:
                 const bool airborne = !p->onGround && m_transformTimer <= 0.0f;
                 const bool moving   = std::fabs(p->velocity.x) > 5.0f && m_walkFrame;
                 const char* name;
-                if (renderForm == MarioForm::Super)
+                if (renderForm == MarioForm::Fire)
+                    name = airborne ? "fireJump" : (moving ? "fireWalk" : "fireStand");
+                else if (renderForm == MarioForm::Super)
                     name = airborne ? "superJump" : (moving ? "superWalk" : "superStand");
                 else
                     name = airborne ? "jump" : (moving ? "walk" : "stand");
-                // When we're flashing the old (smaller) Small form during a
-                // grow animation, drop the quad size so the Small sprite
-                // doesn't stretch to fill the Super hitbox; keep the feet
-                // pinned to the body bottom either way.
+                // When flashing a Small form during a Super/Fire grow, render
+                // at Small dimensions; otherwise use the current AABB size.
                 Vec2 spriteSize = p->size;
                 Vec2 spritePos  = p->position;
-                if (renderForm == MarioForm::Small && m_form == MarioForm::Super) {
+                if (renderForm == MarioForm::Small && m_form != MarioForm::Small) {
                     spriteSize = {kPlayerSmallW, kPlayerSmallH};
                     spritePos.y = p->position.y + (p->size.y - kPlayerSmallH);
-                } else if (renderForm == MarioForm::Super && m_form == MarioForm::Small) {
+                } else if (renderForm != MarioForm::Small && m_form == MarioForm::Small) {
                     spriteSize = {kPlayerSuperW, kPlayerSuperH};
                     spritePos.y = p->position.y + (p->size.y - kPlayerSuperH);
                 }
@@ -620,6 +672,11 @@ private:
             m_coyoteTimer = 0.0f;
         }
 
+        // X key shoots a fireball when Mario is in Fire form (edge-triggered).
+        if (Input::IsKeyPressed(Key::X)) {
+            ShootFireball();
+        }
+
         // Variable-height jump: heavier gravity while rising without holding jump.
         p->gravityScale = (p->velocity.y < 0.0f && !jumpHeld) ? kFastFall : 1.0f;
         if (p->velocity.y > kMaxFall)
@@ -719,6 +776,55 @@ private:
         }
     }
 
+    void CollectFireFlowers() {
+        Body* p = m_world.Get(m_playerId);
+        if (p == nullptr) return;
+        for (FireFlower& fl : m_fireFlowers) {
+            if (!fl.alive) continue;
+            Body* fb = m_world.Get(fl.bodyId);
+            if (fb == nullptr) continue;
+            // Tick spawn animation (flower floats up briefly).
+            float dt_local = 0.0f; // updated in ControlFireFlowers
+            const bool overlap = p->position.x < fb->position.x + kMushroomW &&
+                                 p->position.x + p->size.x > fb->position.x &&
+                                 p->position.y < fb->position.y + kMushroomH &&
+                                 p->position.y + p->size.y > fb->position.y;
+            if (!overlap) continue;
+            fl.alive = false;
+            m_world.RemoveBody(fl.bodyId);
+            m_ctx->score += 1000;
+            m_ctx->Sfx(m_ctx->sfxCoin);
+            SpawnScorePop({fb->position.x + kMushroomW * 0.5f,
+                           fb->position.y - 4.0f}, 1000);
+            GrowToFire();
+        }
+    }
+
+    void ControlFireFlowers(float dt) {
+        for (FireFlower& fl : m_fireFlowers) {
+            if (!fl.alive) continue;
+            Body* fb = m_world.Get(fl.bodyId);
+            if (fb == nullptr) continue;
+            if (fl.spawnTimer > 0.0f) {
+                fl.spawnTimer -= dt;
+                fb->gravityScale = 0.0f;
+                fb->velocity = {0.0f, -45.0f};
+                if (fl.spawnTimer <= 0.0f) {
+                    fb->gravityScale = 1.0f;
+                    fb->velocity.y = 0.0f;
+                }
+                continue;
+            }
+            // Static once grounded -- no horizontal motion.
+            fb->velocity.x = 0.0f;
+            if (fb->velocity.y > kMaxFall) fb->velocity.y = kMaxFall;
+            if (fb->position.y > m_worldSize.y + 80.0f) {
+                fl.alive = false;
+                m_world.RemoveBody(fl.bodyId);
+            }
+        }
+    }
+
     void SpawnMushroom(int tx, int ty) {
         // Comes out of the top of the bumped block. The mushroom briefly
         // floats up before physics takes over, like the SMB1 reveal.
@@ -737,23 +843,169 @@ private:
         m_mushrooms.push_back(mu);
     }
 
-    // Resize the player's AABB to Super dimensions. Body bottom stays put so
-    // the top (and rendered sprite) extends upward by an extra tile. The
-    // transform timer kicks off the SMB-style flash + freeze.
-    void GrowToSuper() {
-        if (m_form == MarioForm::Super) return;
+    void SpawnFireFlower(int tx, int ty) {
+        // Fire flower sits in place once revealed (no horizontal movement) --
+        // matches SMB1 behaviour. It still floats up briefly before physics
+        // grounds it on the block beneath.
+        Body fb;
+        fb.type = BodyType::Dynamic;
+        fb.tag = TagFireFlower;
+        fb.size = {kMushroomW, kMushroomH};
+        fb.position = {tx * kT + (kT - kMushroomW) * 0.5f,
+                       ty * kT - kMushroomH};
+        fb.gravityScale = 0.0f;
+        FireFlower fl;
+        fl.bodyId = m_world.AddBody(fb);
+        fl.spawnTimer = 0.45f;
+        fl.spawnAt = fb.position;
+        m_fireFlowers.push_back(fl);
+    }
+
+    void ControlFireballs(float dt) {
+        for (Fireball& fb : m_fireballs) {
+            if (!fb.alive) continue;
+            Body* b = m_world.Get(fb.bodyId);
+            if (b == nullptr) continue;
+            fb.life += dt;
+            b->velocity.x = fb.dir * kFireballVx;
+            if (b->velocity.y > kMaxFall) b->velocity.y = kMaxFall;
+            if (fb.life >= kFireballLifeS) {
+                fb.alive = false;
+                m_world.RemoveBody(fb.bodyId);
+            }
+        }
+    }
+
+    // Bounce on the ground; despawn on wall hits or pit falls. Goomba hits
+    // are handled in a separate kill scan below.
+    void ResolveFireballContacts() {
+        for (const Contact& c : m_world.Contacts()) {
+            for (Fireball& fb : m_fireballs) {
+                if (!fb.alive || fb.bodyId != c.a) continue;
+                if (std::fabs(c.normal.x) > 0.5f) {
+                    fb.alive = false;
+                    m_world.RemoveBody(fb.bodyId);
+                } else if (c.normal.y < 0.0f) {
+                    Body* b = m_world.Get(fb.bodyId);
+                    if (b != nullptr) b->velocity.y = -kFireballBounce;
+                }
+            }
+        }
+        for (Fireball& fb : m_fireballs) {
+            if (!fb.alive) continue;
+            Body* b = m_world.Get(fb.bodyId);
+            if (b != nullptr && b->position.y > m_worldSize.y + 80.0f) {
+                fb.alive = false;
+                m_world.RemoveBody(fb.bodyId);
+            }
+        }
+        // Fireballs vs goombas. A hit kills the goomba and the fireball.
+        for (Fireball& fb : m_fireballs) {
+            if (!fb.alive) continue;
+            Body* fbb = m_world.Get(fb.bodyId);
+            if (fbb == nullptr) continue;
+            for (Goomba& g : m_goombas) {
+                if (!g.alive || g.squashTimer > 0.0f) continue;
+                Body* gb = m_world.Get(g.bodyId);
+                if (gb == nullptr || !gb->active) continue;
+                const bool overlap =
+                    fbb->position.x < gb->position.x + kGoombaW &&
+                    fbb->position.x + fbb->size.x > gb->position.x &&
+                    fbb->position.y < gb->position.y + kGoombaH &&
+                    fbb->position.y + fbb->size.y > gb->position.y;
+                if (!overlap) continue;
+                fb.alive = false;
+                m_world.RemoveBody(fb.bodyId);
+                g.alive = false;
+                g.lastPos = gb->position;
+                m_world.RemoveBody(g.bodyId);
+                m_ctx->score += 200;
+                m_ctx->Sfx(m_ctx->sfxStomp);
+                SpawnScorePop({gb->position.x + kGoombaW * 0.5f,
+                               gb->position.y - 4.0f}, 200);
+                ParticleBurst burst;
+                burst.position = {gb->position.x + kGoombaW * 0.5f,
+                                  gb->position.y + kGoombaH * 0.5f};
+                burst.count = 16;
+                burst.minSpeed = 80.0f;
+                burst.maxSpeed = 280.0f;
+                burst.minLife = 0.4f;
+                burst.maxLife = 0.9f;
+                burst.startSize = 7.0f;
+                burst.startColor = Color(1.0f, 0.6f, 0.2f);
+                burst.endColor   = Color(1.0f, 0.6f, 0.2f, 0.0f);
+                burst.gravity = {0.0f, 800.0f};
+                m_particles.Emit(burst);
+            }
+        }
+    }
+
+    void ShootFireball() {
+        if (m_form != MarioForm::Fire) return;
+        // Cap concurrent fireballs (max 2 -- matches SMB1).
+        int live = 0;
+        for (const Fireball& fb : m_fireballs) if (fb.alive) ++live;
+        if (live >= kMaxFireballs) return;
         Body* p = m_world.Get(m_playerId);
         if (p == nullptr) return;
-        const float feetY = p->position.y + p->size.y;
-        p->size = {kPlayerSuperW, kPlayerSuperH};
-        p->position.y = feetY - kPlayerSuperH;
-        m_transformFrom = MarioForm::Small;
+        Body bb;
+        bb.type = BodyType::Dynamic;
+        bb.tag = TagFireball;
+        bb.size = {kFireballSize, kFireballSize};
+        bb.position = {p->position.x + (m_facing > 0.0f ? p->size.x - kFireballSize : 0.0f),
+                       p->position.y + p->size.y * 0.45f};
+        bb.gravityScale = 1.0f;
+        bb.restitution = 0.0f; // we handle bounce manually
+        Fireball fb;
+        fb.bodyId = m_world.AddBody(bb);
+        fb.dir = m_facing;
+        m_fireballs.push_back(fb);
+        m_ctx->Sfx(m_ctx->sfxJump);
+    }
+
+    // Grow Small->Super or Super->Fire (Fire stays Fire). Body bottom stays
+    // anchored so the top extends upward by an extra tile only on the first
+    // transformation. The transform timer drives the SMB-style flash.
+    void GrowToSuper() {
+        if (m_form == MarioForm::Small) {
+            Body* p = m_world.Get(m_playerId);
+            if (p == nullptr) return;
+            const float feetY = p->position.y + p->size.y;
+            p->size = {kPlayerSuperW, kPlayerSuperH};
+            p->position.y = feetY - kPlayerSuperH;
+        }
+        m_transformFrom = m_form;
         m_form = MarioForm::Super;
         m_transformTimer = kTransformSeconds;
     }
 
+    void GrowToFire() {
+        // Small picks up the flower as if it were a mushroom (see BumpBlocks),
+        // so by the time this fires Mario is at least Super-sized already.
+        if (m_form == MarioForm::Small) {
+            Body* p = m_world.Get(m_playerId);
+            if (p == nullptr) return;
+            const float feetY = p->position.y + p->size.y;
+            p->size = {kPlayerSuperW, kPlayerSuperH};
+            p->position.y = feetY - kPlayerSuperH;
+        }
+        m_transformFrom = m_form;
+        m_form = MarioForm::Fire;
+        m_transformTimer = kTransformSeconds;
+    }
+
+    // Damage drop. Fire shrinks to Super; Super shrinks to Small. Either way
+    // we get mercy invuln frames.
     void ShrinkToSmall() {
         if (m_form == MarioForm::Small) return;
+        if (m_form == MarioForm::Fire) {
+            m_transformFrom = MarioForm::Fire;
+            m_form = MarioForm::Super;
+            m_transformTimer = kTransformSeconds;
+            m_invulnTimer = kInvulnSeconds;
+            return;
+        }
+        // Super -> Small: shrink body
         Body* p = m_world.Get(m_playerId);
         if (p == nullptr) return;
         const float feetY = p->position.y + p->size.y;
@@ -946,9 +1198,17 @@ private:
             if (tile == QUESTION) {
                 m_map.SetTile(tx, row, USED);
                 const bool isMushroomBlock = m_mushroomBlocks.count({tx, row}) > 0;
+                const bool isFireFlowerBlock = m_fireFlowerBlocks.count({tx, row}) > 0;
                 m_mushroomBlocks.erase({tx, row});
+                m_fireFlowerBlocks.erase({tx, row});
                 if (isMushroomBlock) {
                     SpawnMushroom(tx, row);
+                    m_ctx->Sfx(m_ctx->sfxCoin);
+                } else if (isFireFlowerBlock) {
+                    // SMB1 adapts the contents to Mario's form: a flower block
+                    // hands a mushroom to small Mario so he becomes Super first.
+                    if (m_form == MarioForm::Small) SpawnMushroom(tx, row);
+                    else                            SpawnFireFlower(tx, row);
                     m_ctx->Sfx(m_ctx->sfxCoin);
                 } else {
                     ++m_ctx->coins;
@@ -1010,6 +1270,7 @@ private:
         m_form = MarioForm::Small;
         m_invulnTimer = kInvulnSeconds; // brief grace after respawn too
         m_facing = 1.0f;
+        m_fireballs.clear();
         m_camera.CenterOn(m_spawn);
     }
 
@@ -1039,10 +1300,13 @@ private:
     int m_playerId = -1;
     std::vector<Goomba> m_goombas;
     std::vector<Mushroom> m_mushrooms;
+    std::vector<FireFlower> m_fireFlowers;
+    std::vector<Fireball> m_fireballs;
     std::vector<CoinPop> m_coinPops;
     std::vector<ScorePop> m_scorePops;
     std::vector<BrickBump> m_brickBumps;
     std::set<std::pair<int,int>> m_mushroomBlocks;
+    std::set<std::pair<int,int>> m_fireFlowerBlocks;
     MarioForm m_form = MarioForm::Small;
     float m_invulnTimer = 0.0f;
     float m_transformTimer = 0.0f;    // > 0 while grow/shrink animation runs
@@ -1143,6 +1407,11 @@ protected:
         m_chars.Add("superStand",     0.0f,  kT*2, kT, kT*2);
         m_chars.Add("superWalk",      kT,    kT*2, kT, kT*2);
         m_chars.Add("superJump",      kT*2,  kT*2, kT, kT*2);
+        m_chars.Add("fireFlower",     kT*4,  0.0f, kT, kT);
+        m_chars.Add("fireball",       kT*5,  0.0f, kT, kT);
+        m_chars.Add("fireStand",      kT*3,  kT*2, kT, kT*2);
+        m_chars.Add("fireWalk",       kT*4,  kT*2, kT, kT*2);
+        m_chars.Add("fireJump",       kT*5,  kT*2, kT, kT*2);
 
         m_ctx.renderer = &m_renderer;
         m_ctx.font = &m_font;
