@@ -60,16 +60,23 @@ enum Tile { EMPTY = -1, GROUND = 0, DIRT = 1, BRICK = 2, QUESTION = 3,
 // USED is what a ? block becomes after it is bumped — still solid.
 bool IsSolidTile(int id) { return (id >= GROUND && id <= HARD) || id == USED; }
 
+// Physics tuned to feel like SMB rather than the looser previous numbers:
+// * small Mario is a 1-tile square (kT x kT), matching the new 16x16 NES
+//   sprite drawn 2x into a 32x32 atlas cell
+// * standing jump clears ~3.5 tiles -- v^2 / 2g = (720^2)/(2*2300) ~ 113 px
+// * running adds horizontal speed *and* lifts the jump apex via the gravity
+//   carry from forward momentum (we just inherit it through kRunSpeed)
 constexpr float kGravity = 2300.0f;
 constexpr float kFastFall = 2.1f;
 constexpr float kMaxFall = 950.0f;
-constexpr float kMoveSpeed = 260.0f;
-constexpr float kJumpSpeed = 900.0f; // ~176px (5.5 tiles) high — clears the tallest pipe
-constexpr float kStompBounce = 430.0f;
-constexpr float kPlayerW = 26.0f;
-constexpr float kPlayerH = 34.0f;
-constexpr float kGoombaW = 26.0f;
-constexpr float kGoombaH = 24.0f;
+constexpr float kWalkSpeed = 180.0f;
+constexpr float kRunSpeed  = 320.0f;
+constexpr float kJumpSpeed = 720.0f;
+constexpr float kStompBounce = 380.0f;
+constexpr float kPlayerW = kT;
+constexpr float kPlayerH = kT;
+constexpr float kGoombaW = kT;
+constexpr float kGoombaH = kT;
 constexpr float kGoombaSpeed = 60.0f;
 
 enum BodyTag : uint32_t { TagTile = 1, TagPlayer = 2, TagGoomba = 3 };
@@ -347,7 +354,9 @@ private:
             dir -= 1.0f;
         if (Input::IsKeyDown(Key::Right) || Input::IsKeyDown(Key::D))
             dir += 1.0f;
-        p->velocity.x = dir * kMoveSpeed;
+        // Shift = run, like the B button in SMB.
+        const bool running = Input::IsKeyDown(Key::LeftShift);
+        p->velocity.x = dir * (running ? kRunSpeed : kWalkSpeed);
         if (dir != 0.0f)
             m_facing = dir;
 
@@ -635,8 +644,10 @@ protected:
         m_renderer.Init(GetDevice());
         const std::string assets = NARAGAME_ASSETS_DIR;
 
-        m_tilesTexture = LoadTexture(GetDevice(), assets + "/tiles.png");
-        m_charTexture = LoadTexture(GetDevice(), assets + "/characters.png");
+        // Point sampling on both atlases so the SMB-style pixel art stays
+        // crisp at any zoom -- linear would smear the 2x source pixels.
+        m_tilesTexture = LoadTexture(GetDevice(), assets + "/tiles.png", TextureFilter::Point);
+        m_charTexture  = LoadTexture(GetDevice(), assets + "/characters.png", TextureFilter::Point);
         m_font = LoadMSDFFont(GetDevice(), assets + "/msdf-inter.json");
 
         m_jump = LoadWav(assets + "/jump.wav");
@@ -644,13 +655,15 @@ protected:
         m_stomp = LoadWav(assets + "/stomp.wav");
         m_bgm = LoadWav(assets + "/bgm.wav");
 
+        // New atlas layout: 3x32 mario frames on row 0, 3x32 goomba frames
+        // on row 1. Each cell is one tile (kT x kT).
         m_chars = TextureAtlas(m_charTexture.get());
-        m_chars.Add("stand", 0.0f, 0.0f, 24.0f, 32.0f);
-        m_chars.Add("walk", 24.0f, 0.0f, 24.0f, 32.0f);
-        m_chars.Add("jump", 48.0f, 0.0f, 24.0f, 32.0f);
-        m_chars.Add("goomba0", 0.0f, 34.0f, 24.0f, 22.0f);
-        m_chars.Add("goomba1", 24.0f, 34.0f, 24.0f, 22.0f);
-        m_chars.Add("goombaSquashed", 48.0f, 46.0f, 24.0f, 10.0f);
+        m_chars.Add("stand",          0.0f,  0.0f, kT, kT);
+        m_chars.Add("walk",           kT,    0.0f, kT, kT);
+        m_chars.Add("jump",           kT*2,  0.0f, kT, kT);
+        m_chars.Add("goomba0",        0.0f,  kT,   kT, kT);
+        m_chars.Add("goomba1",        kT,    kT,   kT, kT);
+        m_chars.Add("goombaSquashed", kT*2,  kT,   kT, kT);
 
         m_ctx.renderer = &m_renderer;
         m_ctx.font = &m_font;
