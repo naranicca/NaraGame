@@ -18,10 +18,15 @@ float Swept(const Vec2& aMin, const Vec2& aMax, const Vec2& delta, const Vec2& b
 
     // An axis with no motion can only collide if the boxes already overlap on it
     // (used by the per-axis resolution below; without this a horizontal-only move
-    // would falsely collide with tiles above/below).
-    if (delta.x == 0.0f && (aMax.x <= bMin.x || aMin.x >= bMax.x))
+    // would falsely collide with tiles above/below). A small tolerance absorbs
+    // the post-collision skin nudge (kSkin) -- otherwise standing on a floor
+    // leaves the body 0.01 px proud of the ground, and walking under a tile
+    // sitting exactly one body-height above the floor reads as a sliver of
+    // perpendicular overlap and blocks horizontal motion.
+    constexpr float kAxisOverlapEps = 0.05f;
+    if (delta.x == 0.0f && (aMax.x <= bMin.x + kAxisOverlapEps || aMin.x >= bMax.x - kAxisOverlapEps))
         return 1.0f;
-    if (delta.y == 0.0f && (aMax.y <= bMin.y || aMin.y >= bMax.y))
+    if (delta.y == 0.0f && (aMax.y <= bMin.y + kAxisOverlapEps || aMin.y >= bMax.y - kAxisOverlapEps))
         return 1.0f;
 
     const float inf = std::numeric_limits<float>::infinity();
