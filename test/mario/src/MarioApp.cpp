@@ -29,7 +29,9 @@
 #include <NaraGame/scene/Scene.h>
 #include <NaraGame/scene/SceneManager.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <set>
@@ -95,6 +97,19 @@ constexpr float kMushroomSpeed = 90.0f;
 // to Small. The HUD flashes for this long so the player has time to retreat.
 constexpr float kInvulnSeconds = 1.5f;
 
+// While growing or shrinking, SMB freezes the world for a short beat and
+// alternates the Mario sprite between Small and Super forms. The pause is
+// short enough that runs still flow but long enough to read.
+constexpr float kTransformSeconds = 0.55f;
+
+// Floating "+200" / "+1000" tags rise this far over their lifetime before
+// fading. The world-space distance is in screen pixels at zoom 1, so it
+// reads at ~half a tile of travel at zoom 2.
+constexpr float kScorePopRise   = 28.0f;
+constexpr float kScorePopLife   = 0.8f;
+constexpr float kCoinPopRise    = 48.0f;
+constexpr float kCoinPopLife    = 0.45f;
+
 enum BodyTag : uint32_t { TagTile = 1, TagPlayer = 2, TagGoomba = 3, TagMushroom = 4 };
 
 struct Goomba {
@@ -113,6 +128,21 @@ struct Mushroom {
     bool alive = true;
     float spawnTimer = 0.0f;  // brief rise-out animation before physics kicks in
     Vec2 spawnAt;             // bottom-left of the block it came from
+};
+
+// Visual-only: a coin that pops out of a bumped ?-block, rises straight up
+// then falls back. Carries no gameplay -- the coin is "given" the instant the
+// block is bumped.
+struct CoinPop {
+    Vec2 origin;  // block-top centre where the coin starts
+    float t = 0.0f; // 0..kCoinPopLife
+};
+
+// Visual-only: a "+200" style label that floats up and fades.
+struct ScorePop {
+    Vec2 origin;
+    int value = 0;
+    float t = 0.0f; // 0..kScorePopLife
 };
 
 // Player size mode. Affects hitbox (32x32 vs 32x64), sprite source rect, head
@@ -280,6 +310,23 @@ public:
 
         const float dt = Min(dtRaw, 1.0f / 30.0f);
         if (m_invulnTimer > 0.0f) m_invulnTimer -= dt;
+
+        // Coin pops + score popups always animate (they're decorative and
+        // independent of gameplay state).
+        UpdateCoinPops(dt);
+        UpdateScorePops(dt);
+
+        // Transform animation: freeze gameplay, hold velocities at zero.
+        if (m_transformTimer > 0.0f) {
+            m_transformTimer -= dt;
+            if (Body* p = m_world.Get(m_playerId)) p->velocity = {0.0f, 0.0f};
+            for (Goomba& g : m_goombas) {
+                if (Body* gb = m_world.Get(g.bodyId)) gb->velocity = {0.0f, 0.0f};
+            }
+            m_particles.Update(dt);
+            return;
+        }
+
         ControlPlayer(dt);
         ControlGoombas(dt);
         ControlMushrooms(dt);
@@ -336,23 +383,68 @@ public:
         }
 
         if (const Body* p = m_world.Get(m_playerId)) {
-            // Suppress the player every other ~0.1s while invulnerable -- the
-            // classic flash that signals "you got hit, brief mercy now".
             const bool flicker = (m_invulnTimer > 0.0f) &&
                                  (static_cast<int>(m_invulnTimer * 10.0f) % 2 == 0);
             if (!flicker) {
-                const bool airborne = !p->onGround;
+                // While transform anim runs, alternate between the OLD and
+                // NEW forms every ~0.1s -- SMB-style grow flash. After it
+                // ends, render the new form normally.
+                MarioForm renderForm = m_form;
+                if (m_transformTimer > 0.0f &&
+                    static_cast<int>(m_transformTimer * 10.0f) % 2 == 0) {
+                    renderForm = m_transformFrom;
+                }
+                const bool airborne = !p->onGround && m_transformTimer <= 0.0f;
                 const bool moving   = std::fabs(p->velocity.x) > 5.0f && m_walkFrame;
                 const char* name;
-                if (m_form == MarioForm::Super)
+                if (renderForm == MarioForm::Super)
                     name = airborne ? "superJump" : (moving ? "superWalk" : "superStand");
                 else
                     name = airborne ? "jump" : (moving ? "walk" : "stand");
-                r.DrawQuad(p->position, p->size, m_ctx->chars->Get(name), Color::White(),
-                           m_facing < 0.0f);
+                // When we're flashing the old (smaller) Small form during a
+                // grow animation, drop the quad size so the Small sprite
+                // doesn't stretch to fill the Super hitbox; keep the feet
+                // pinned to the body bottom either way.
+                Vec2 spriteSize = p->size;
+                Vec2 spritePos  = p->position;
+                if (renderForm == MarioForm::Small && m_form == MarioForm::Super) {
+                    spriteSize = {kPlayerSmallW, kPlayerSmallH};
+                    spritePos.y = p->position.y + (p->size.y - kPlayerSmallH);
+                } else if (renderForm == MarioForm::Super && m_form == MarioForm::Small) {
+                    spriteSize = {kPlayerSuperW, kPlayerSuperH};
+                    spritePos.y = p->position.y + (p->size.y - kPlayerSuperH);
+                }
+                r.DrawQuad(spritePos, spriteSize, m_ctx->chars->Get(name),
+                           Color::White(), m_facing < 0.0f);
             }
         }
+
+        // Coin pops: a coin sprite that rises out of a bumped block then
+        // drops back. Uses the tilemap's coin tile so the look matches the
+        // floating coins exactly. Drawn after the player so they pop in
+        // front when Mario is touching the block.
+        for (const CoinPop& cp : m_coinPops) {
+            const float u = cp.t / kCoinPopLife;     // 0..1
+            const float arc = 1.0f - (2.0f * u - 1.0f) * (2.0f * u - 1.0f); // 0..1..0
+            const Vec2 pos{cp.origin.x - kT * 0.5f, cp.origin.y - kCoinPopRise * arc - kT};
+            r.DrawQuad(pos, {kT, kT}, m_ctx->tileset.At(COIN));
+        }
         m_particles.Draw(r);
+
+        // Floating score labels rise + fade. Drawn last so they sit on top
+        // of everything in the world.
+        for (const ScorePop& sp : m_scorePops) {
+            const float u = sp.t / kScorePopLife;
+            const float alpha = 1.0f - u;
+            const Vec2 pos{sp.origin.x, sp.origin.y - kScorePopRise * u};
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "+%d", sp.value);
+            // 14 px text size fits the world's 32 px tile grid (zoom 2x).
+            const Vec2 sz = m_ctx->font->Measure(buf, 14.0f);
+            r.DrawText(*m_ctx->font, buf, {pos.x - sz.x * 0.5f, pos.y},
+                       Color(1.0f, 1.0f, 1.0f, alpha), 14.0f);
+        }
+
         r.End();
 
         r.Begin(Renderer2D::ScreenCamera(m_ctx->screenW, m_ctx->screenH));
@@ -536,6 +628,8 @@ private:
             m_world.RemoveBody(mu.bodyId);
             m_ctx->score += 1000;
             m_ctx->Sfx(m_ctx->sfxCoin);
+            SpawnScorePop({mb->position.x + kMushroomW * 0.5f,
+                           mb->position.y - 4.0f}, 1000);
             GrowToSuper();
         }
     }
@@ -558,10 +652,9 @@ private:
         m_mushrooms.push_back(mu);
     }
 
-    // Resize the player's AABB to Super dimensions. The body's bottom stays
-    // put, so the top (and thus the rendered sprite) extends upward by an
-    // extra tile -- matching the visual "growth" pose without an animation
-    // for now.
+    // Resize the player's AABB to Super dimensions. Body bottom stays put so
+    // the top (and rendered sprite) extends upward by an extra tile. The
+    // transform timer kicks off the SMB-style flash + freeze.
     void GrowToSuper() {
         if (m_form == MarioForm::Super) return;
         Body* p = m_world.Get(m_playerId);
@@ -569,7 +662,9 @@ private:
         const float feetY = p->position.y + p->size.y;
         p->size = {kPlayerSuperW, kPlayerSuperH};
         p->position.y = feetY - kPlayerSuperH;
+        m_transformFrom = MarioForm::Small;
         m_form = MarioForm::Super;
+        m_transformTimer = kTransformSeconds;
     }
 
     void ShrinkToSmall() {
@@ -579,8 +674,41 @@ private:
         const float feetY = p->position.y + p->size.y;
         p->size = {kPlayerSmallW, kPlayerSmallH};
         p->position.y = feetY - kPlayerSmallH;
+        m_transformFrom = MarioForm::Super;
         m_form = MarioForm::Small;
+        m_transformTimer = kTransformSeconds;
         m_invulnTimer = kInvulnSeconds;
+    }
+
+    // --- Polish: coin pops + score popups ---------------------------------
+
+    void SpawnCoinPop(int tx, int ty) {
+        CoinPop cp;
+        cp.origin = {tx * kT + kT * 0.5f, ty * kT};
+        m_coinPops.push_back(cp);
+    }
+
+    void UpdateCoinPops(float dt) {
+        for (CoinPop& cp : m_coinPops) cp.t += dt;
+        m_coinPops.erase(
+            std::remove_if(m_coinPops.begin(), m_coinPops.end(),
+                           [](const CoinPop& cp) { return cp.t >= kCoinPopLife; }),
+            m_coinPops.end());
+    }
+
+    void SpawnScorePop(Vec2 worldPos, int value) {
+        ScorePop sp;
+        sp.origin = worldPos;
+        sp.value = value;
+        m_scorePops.push_back(sp);
+    }
+
+    void UpdateScorePops(float dt) {
+        for (ScorePop& sp : m_scorePops) sp.t += dt;
+        m_scorePops.erase(
+            std::remove_if(m_scorePops.begin(), m_scorePops.end(),
+                           [](const ScorePop& sp) { return sp.t >= kScorePopLife; }),
+            m_scorePops.end());
     }
 
     // A goomba that hit a wall (horizontal contact normal) reverses direction.
@@ -632,6 +760,8 @@ private:
                 p->velocity.y = -kStompBounce;
                 m_ctx->score += 200;
                 m_ctx->Sfx(m_ctx->sfxStomp);
+                SpawnScorePop({gb->position.x + kGoombaW * 0.5f,
+                               gb->position.y - 4.0f}, 200);
                 ParticleBurst burst;
                 burst.position = {gb->position.x + kGoombaW * 0.5f, gb->position.y + kGoombaH};
                 burst.count = 14;
@@ -686,22 +816,8 @@ private:
                 ++m_ctx->coins;
                 m_ctx->score += 200;
                 m_ctx->Sfx(m_ctx->sfxCoin);
-
-                // A coin sprays up out of the block.
-                ParticleBurst burst;
-                burst.position = {tx * kT + kT * 0.5f, row * kT + 4.0f};
-                burst.count = 16;
-                burst.minSpeed = 140.0f;
-                burst.maxSpeed = 300.0f;
-                burst.minLife = 0.3f;
-                burst.maxLife = 0.6f;
-                burst.startSize = 6.0f;
-                burst.startColor = Color(1.0f, 0.85f, 0.25f);
-                burst.endColor = Color(1.0f, 0.85f, 0.25f, 0.0f);
-                burst.gravity = {0.0f, 900.0f};
-                burst.dirAngle = -1.5708f; // straight up (+Y is down)
-                burst.spread = 1.2f;
-                m_particles.Emit(burst);
+                SpawnCoinPop(tx, row);
+                SpawnScorePop({tx * kT + kT * 0.5f, row * kT - 6.0f}, 200);
             }
             break; // one block per bump
         }
@@ -722,6 +838,7 @@ private:
                     ++m_ctx->coins;
                     m_ctx->score += 100;
                     m_ctx->Sfx(m_ctx->sfxCoin);
+                    SpawnScorePop({tx * kT + kT * 0.5f, ty * kT + kT * 0.5f}, 100);
                     ParticleBurst burst;
                     burst.position = {tx * kT + kT * 0.5f, ty * kT + kT * 0.5f};
                     burst.count = 12;
@@ -775,9 +892,13 @@ private:
     int m_playerId = -1;
     std::vector<Goomba> m_goombas;
     std::vector<Mushroom> m_mushrooms;
+    std::vector<CoinPop> m_coinPops;
+    std::vector<ScorePop> m_scorePops;
     std::set<std::pair<int,int>> m_mushroomBlocks;
     MarioForm m_form = MarioForm::Small;
     float m_invulnTimer = 0.0f;
+    float m_transformTimer = 0.0f;    // > 0 while grow/shrink animation runs
+    MarioForm m_transformFrom = MarioForm::Small; // form we're animating away from
     float m_facing = 1.0f;
     float m_walkTimer = 0.0f;
     int m_walkFrame = 0;
