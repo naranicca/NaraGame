@@ -52,10 +52,11 @@ constexpr float kScreenH = 576.0f;
 constexpr int kTile = 32;
 constexpr float kT = static_cast<float>(kTile);
 constexpr int kMaxLevel = 2;
-// Camera zoom: the window shows 32 tiles wide at 1:1, which renders everything
-// at half the classic-Mario scale. 2x gives the iconic 16-tile view and makes
-// the characters/tiles read at a proper size.
-constexpr float kZoom = 2.0f;
+// Camera zoom. At 1:1 the 1024x576 window shows 32x18 tiles -- way wider than
+// SMB1's iconic ~16x13 playfield. 1.4x shows ~23 wide and ~13 tall: vertical
+// matches SMB so platforms sit at proper apparent height; the extra width is
+// the 16:9 aspect ratio dividend (SMB ran 4:3) and gives a bit of look-ahead.
+constexpr float kZoom = 1.4f;
 
 enum Tile { EMPTY = -1, GROUND = 0, DIRT = 1, BRICK = 2, QUESTION = 3,
             PIPE_TL = 4, PIPE_TR = 5, PIPE_BL = 6, PIPE_BR = 7, HARD = 8, COIN = 9,
