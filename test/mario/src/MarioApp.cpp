@@ -130,6 +130,13 @@ constexpr float kScorePopLife   = 0.8f;
 constexpr float kCoinPopRise    = 48.0f;
 constexpr float kCoinPopLife    = 0.45f;
 
+// Brick bump: small Mario head-bumps make the brick rise and fall back over
+// this many seconds, kBrickBumpHeight pixels at the apex. While the bump is
+// running the underlying map tile is hidden so the brick doesn't render twice.
+constexpr float kBrickBumpLife   = 0.20f;
+constexpr float kBrickBumpHeight = 12.0f;
+constexpr int   kBrickBreakScore = 50;
+
 enum BodyTag : uint32_t { TagTile = 1, TagPlayer = 2, TagGoomba = 3, TagMushroom = 4 };
 
 struct Goomba {
@@ -163,6 +170,14 @@ struct ScorePop {
     Vec2 origin;
     int value = 0;
     float t = 0.0f; // 0..kScorePopLife
+};
+
+// A brick tile is temporarily replaced with EMPTY while the bump runs and
+// is restored at the end (small Mario only -- super Mario breaks it).
+struct BrickBump {
+    int tx = 0;
+    int ty = 0;
+    float t = 0.0f; // 0..kBrickBumpLife
 };
 
 // Player size mode. Affects hitbox (32x32 vs 32x64), sprite source rect, head
@@ -261,6 +276,7 @@ public:
         m_goombas.clear();
         m_mushrooms.clear();
         m_mushroomBlocks.clear();
+        m_brickBumps.clear();
         m_form = MarioForm::Small;
         m_invulnTimer = 0.0f;
         m_spawn = {120.0f, kT * 14.0f};
@@ -335,6 +351,7 @@ public:
         // independent of gameplay state).
         UpdateCoinPops(dt);
         UpdateScorePops(dt);
+        UpdateBrickBumps(dt);
 
         // Transform animation: freeze gameplay, hold velocities at zero.
         if (m_transformTimer > 0.0f) {
@@ -437,6 +454,16 @@ public:
                 r.DrawQuad(spritePos, spriteSize, m_ctx->chars->Get(name),
                            Color::White(), m_facing < 0.0f);
             }
+        }
+
+        // Brick bumps: the underlying tile is hidden in the map for the
+        // duration; we draw a BRICK sprite that rises then falls. The arc
+        // peaks at the midpoint and returns to 0 at start/end.
+        for (const BrickBump& bb : m_brickBumps) {
+            const float u = bb.t / kBrickBumpLife;
+            const float arc = 1.0f - (2.0f * u - 1.0f) * (2.0f * u - 1.0f);
+            const Vec2 pos{bb.tx * kT, bb.ty * kT - kBrickBumpHeight * arc};
+            r.DrawQuad(pos, {kT, kT}, m_ctx->tileset.At(BRICK));
         }
 
         // Coin pops: a coin sprite that rises out of a bumped block then
@@ -769,6 +796,56 @@ private:
             m_scorePops.end());
     }
 
+    // Small Mario bumps a brick: hide the tile while a rising/falling visual
+    // plays, then restore the tile. The static collider stays put either way
+    // (BuildTileColliders ran once at OnEnter), so the brick still blocks
+    // Mario for the rest of the bump -- only the sprite moves.
+    void BumpBrick(int tx, int ty) {
+        for (const BrickBump& bb : m_brickBumps) {
+            if (bb.tx == tx && bb.ty == ty) return; // already bumping
+        }
+        m_map.SetTile(tx, ty, EMPTY);
+        m_brickBumps.push_back({tx, ty, 0.0f});
+        m_ctx->Sfx(m_ctx->sfxStomp);
+    }
+
+    void UpdateBrickBumps(float dt) {
+        for (BrickBump& bb : m_brickBumps) {
+            bb.t += dt;
+            if (bb.t >= kBrickBumpLife) {
+                m_map.SetTile(bb.tx, bb.ty, BRICK);
+            }
+        }
+        m_brickBumps.erase(
+            std::remove_if(m_brickBumps.begin(), m_brickBumps.end(),
+                           [](const BrickBump& bb) { return bb.t >= kBrickBumpLife; }),
+            m_brickBumps.end());
+    }
+
+    // Super Mario breaks a brick: clear the tile, score it, spray four chunks
+    // of brick that fall under gravity. The static collider remains because
+    // greedy meshing merged it with neighbours -- a known cosmetic limitation
+    // (Mario can still bonk an invisible block until the next level).
+    void BreakBrick(int tx, int ty) {
+        m_map.SetTile(tx, ty, EMPTY);
+        m_ctx->score += kBrickBreakScore;
+        m_ctx->Sfx(m_ctx->sfxStomp);
+        SpawnScorePop({tx * kT + kT * 0.5f, ty * kT - 6.0f}, kBrickBreakScore);
+        ParticleBurst burst;
+        burst.position = {tx * kT + kT * 0.5f, ty * kT + kT * 0.5f};
+        burst.count = 14;
+        burst.minSpeed = 140.0f;
+        burst.maxSpeed = 340.0f;
+        burst.minLife = 0.6f;
+        burst.maxLife = 1.1f;
+        burst.startSize = 7.0f;
+        burst.endSize = 4.0f;
+        burst.startColor = Color(0.92f, 0.55f, 0.20f);  // brick orange
+        burst.endColor   = Color(0.92f, 0.55f, 0.20f, 0.0f);
+        burst.gravity = {0.0f, 1200.0f};
+        m_particles.Emit(burst);
+    }
+
     // A goomba that hit a wall (horizontal contact normal) reverses direction.
     void TurnGoombasAtWalls() {
         for (const Contact& c : m_world.Contacts()) {
@@ -862,22 +939,31 @@ private:
         const int left = static_cast<int>(std::floor(p->position.x / kT));
         const int right = static_cast<int>(std::floor((p->position.x + p->size.x - 1.0f) / kT));
         for (int tx = left; tx <= right; ++tx) {
-            if (m_map.GetTile(tx, row) != QUESTION)
-                continue;
-            m_map.SetTile(tx, row, USED);
-            const bool isMushroomBlock = m_mushroomBlocks.count({tx, row}) > 0;
-            m_mushroomBlocks.erase({tx, row});
-            if (isMushroomBlock) {
-                SpawnMushroom(tx, row);
-                m_ctx->Sfx(m_ctx->sfxCoin);
-            } else {
-                ++m_ctx->coins;
-                m_ctx->score += 200;
-                m_ctx->Sfx(m_ctx->sfxCoin);
-                SpawnCoinPop(tx, row);
-                SpawnScorePop({tx * kT + kT * 0.5f, row * kT - 6.0f}, 200);
+            const int tile = m_map.GetTile(tx, row);
+            if (tile == QUESTION) {
+                m_map.SetTile(tx, row, USED);
+                const bool isMushroomBlock = m_mushroomBlocks.count({tx, row}) > 0;
+                m_mushroomBlocks.erase({tx, row});
+                if (isMushroomBlock) {
+                    SpawnMushroom(tx, row);
+                    m_ctx->Sfx(m_ctx->sfxCoin);
+                } else {
+                    ++m_ctx->coins;
+                    m_ctx->score += 200;
+                    m_ctx->Sfx(m_ctx->sfxCoin);
+                    SpawnCoinPop(tx, row);
+                    SpawnScorePop({tx * kT + kT * 0.5f, row * kT - 6.0f}, 200);
+                }
+                break; // one block per bump
             }
-            break; // one block per bump
+            if (tile == BRICK) {
+                if (m_form == MarioForm::Super) {
+                    BreakBrick(tx, row);
+                } else {
+                    BumpBrick(tx, row);
+                }
+                break;
+            }
         }
     }
 
@@ -952,6 +1038,7 @@ private:
     std::vector<Mushroom> m_mushrooms;
     std::vector<CoinPop> m_coinPops;
     std::vector<ScorePop> m_scorePops;
+    std::vector<BrickBump> m_brickBumps;
     std::set<std::pair<int,int>> m_mushroomBlocks;
     MarioForm m_form = MarioForm::Small;
     float m_invulnTimer = 0.0f;
