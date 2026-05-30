@@ -71,7 +71,8 @@ constexpr float kFastFall = 2.1f;
 constexpr float kMaxFall = 950.0f;
 constexpr float kWalkSpeed = 180.0f;
 constexpr float kRunSpeed  = 320.0f;
-constexpr float kJumpSpeed = 720.0f;
+constexpr float kJumpSpeed    = 780.0f;   // standing jump: ~4 tiles (lands on lone SMB1-1 ? block)
+constexpr float kRunJumpBonus = 90.0f;    // at full run, impulse is 870 -> ~5.1 tiles
 constexpr float kStompBounce = 380.0f;
 constexpr float kPlayerW = kT;
 constexpr float kPlayerH = kT;
@@ -365,7 +366,13 @@ private:
         const bool jumpHeld = Input::IsKeyDown(Key::Space) || Input::IsKeyDown(Key::Up) ||
                               Input::IsKeyDown(Key::W);
         if (jumpPressed && p->onGround) {
-            p->velocity.y = -kJumpSpeed;
+            // SMB-style speed-bonus: the faster you're moving horizontally,
+            // the higher the jump. At a full sprint (|vx| == kRunSpeed) the
+            // bonus is kRunJumpBonus on top of the base impulse, taking the
+            // apex from ~3.5 tiles up to ~5 tiles so 4-tile platforms come
+            // into reach. Walking gets a proportional smaller boost.
+            const float speedFrac = Min(std::fabs(p->velocity.x) / kRunSpeed, 1.0f);
+            p->velocity.y = -(kJumpSpeed + kRunJumpBonus * speedFrac);
             m_ctx->Sfx(m_ctx->sfxJump);
         }
 
