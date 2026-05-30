@@ -74,6 +74,12 @@ void PhysicsWorld::RemoveBody(int id) {
         m_bodies[static_cast<size_t>(id)].active = false;
 }
 
+void PhysicsWorld::RemoveBodiesByTag(uint32_t tag) {
+    for (Body& b : m_bodies) {
+        if (b.tag == tag) b.active = false;
+    }
+}
+
 Body* PhysicsWorld::Get(int id) {
     if (id >= 0 && id < static_cast<int>(m_bodies.size()))
         return &m_bodies[static_cast<size_t>(id)];

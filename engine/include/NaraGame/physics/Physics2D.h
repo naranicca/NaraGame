@@ -43,6 +43,10 @@ public:
 
     int AddBody(const Body& body); // returns a stable id (index)
     void RemoveBody(int id);
+    // Deactivate every body whose `tag` matches. Used when the game wants to
+    // wipe a whole category at once (e.g. all tile colliders after a brick
+    // break) instead of tracking individual ids.
+    void RemoveBodiesByTag(uint32_t tag);
     Body* Get(int id);
     void Clear();
 

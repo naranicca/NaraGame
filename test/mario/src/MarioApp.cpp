@@ -822,12 +822,15 @@ private:
             m_brickBumps.end());
     }
 
-    // Super Mario breaks a brick: clear the tile, score it, spray four chunks
-    // of brick that fall under gravity. The static collider remains because
-    // greedy meshing merged it with neighbours -- a known cosmetic limitation
-    // (Mario can still bonk an invisible block until the next level).
+    // Super Mario breaks a brick: clear the tile, drop the static collider
+    // for the whole greedy-meshed group it belonged to, then rebuild colliders
+    // for the surviving solid tiles. The rebuild is O(map area) which is fine
+    // for our level sizes and keeps the bookkeeping trivial (no need to
+    // remember which tiles each merged body covered).
     void BreakBrick(int tx, int ty) {
         m_map.SetTile(tx, ty, EMPTY);
+        m_world.RemoveBodiesByTag(TagTile);
+        BuildTileColliders();
         m_ctx->score += kBrickBreakScore;
         m_ctx->Sfx(m_ctx->sfxStomp);
         SpawnScorePop({tx * kT + kT * 0.5f, ty * kT - 6.0f}, kBrickBreakScore);
