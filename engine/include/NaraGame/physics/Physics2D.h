@@ -48,6 +48,10 @@ public:
     // break) instead of tracking individual ids.
     void RemoveBodiesByTag(uint32_t tag);
     Body* Get(int id);
+    // Read-only access to the full body pool. Debug tools and gameplay code
+    // that needs to scan everything use this; gameplay should generally find
+    // bodies by id or via the contacts list instead.
+    const std::vector<Body>& AllBodies() const { return m_bodies; }
     void Clear();
 
     void Step(float dt);

@@ -13,6 +13,7 @@
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
 #include <NaraGame/core/Log.h>
+#include <NaraGame/debug/DebugDraw.h>
 #include <NaraGame/input/Input.h>
 #include <NaraGame/math/Math.h>
 #include <NaraGame/physics/Physics2D.h>
@@ -382,6 +383,7 @@ public:
             Manager().Push(std::make_unique<PauseScene>(m_ctx));
             return;
         }
+        if (Input::IsKeyPressed(Key::F1)) m_debugCollisions = !m_debugCollisions;
 
         const float dt = Min(dtRaw, 1.0f / 30.0f);
         if (m_invulnTimer > 0.0f) m_invulnTimer -= dt;
@@ -534,6 +536,13 @@ public:
             r.DrawQuad(pos, {kT, kT}, m_ctx->tileset.At(COIN));
         }
         m_particles.Draw(r);
+
+        // Debug overlay (F1): semi-transparent physics body AABBs over the
+        // current world view. Drawn after gameplay but before HUD so the
+        // sprite art is still readable underneath.
+        if (m_debugCollisions) {
+            DebugDraw::PhysicsBodies(r, m_world);
+        }
 
         // Floating score labels rise + fade. Drawn last so they sit on top
         // of everything in the world.
@@ -1312,6 +1321,7 @@ private:
     std::vector<BrickBump> m_brickBumps;
     std::set<std::pair<int,int>> m_mushroomBlocks;
     std::set<std::pair<int,int>> m_fireFlowerBlocks;
+    bool m_debugCollisions = false;
     MarioForm m_form = MarioForm::Small;
     float m_invulnTimer = 0.0f;
     float m_transformTimer = 0.0f;    // > 0 while grow/shrink animation runs

@@ -14,6 +14,7 @@ set(NARAGAME_SOURCES
     src/audio/AudioDevice.cpp
     src/core/Application.cpp
     src/core/Log.cpp
+    src/debug/DebugDraw.cpp
     src/input/Input.cpp
     src/io/ConfigFile.cpp
     src/physics/PhysicsWorld.cpp
