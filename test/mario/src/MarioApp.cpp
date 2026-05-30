@@ -77,6 +77,25 @@ constexpr float kWalkSpeed = 180.0f;
 constexpr float kRunSpeed  = 320.0f;
 constexpr float kJumpSpeed    = 780.0f;   // standing jump: ~4 tiles (lands on lone SMB1-1 ? block)
 constexpr float kRunJumpBonus = 90.0f;    // at full run, impulse is 870 -> ~5.1 tiles
+
+// SMB-feel locomotion: gradual accel + friction rather than instant velocity.
+// Ground accel is brisk so Mario still feels responsive; skid (decel when
+// pressing the opposite direction at speed) is fastest so a 180-degree turn
+// at full sprint reads as a snappy pivot. Air values are softer so airborne
+// horizontal influence is a fine adjustment, not a steering rod.
+constexpr float kGroundAccel = 900.0f;
+constexpr float kGroundDecel = 700.0f;
+constexpr float kSkidDecel   = 1600.0f;
+constexpr float kAirAccel    = 650.0f;
+constexpr float kAirDecel    = 200.0f;
+
+// Coyote time: even after walking off a ledge, jump still works for this
+// many seconds. Jump buffer: press jump up to this far before landing and
+// the impulse fires on touchdown. Both pulled straight from modern
+// platformer practice -- SMB1 didn't have them but their absence reads as
+// "stiff" by modern standards.
+constexpr float kCoyoteSeconds     = 0.10f;
+constexpr float kJumpBufferSeconds = 0.08f;
 constexpr float kStompBounce = 380.0f;
 constexpr float kPlayerSmallW = kT;
 constexpr float kPlayerSmallH = kT;
@@ -502,8 +521,10 @@ private:
         }
     }
 
-    // Set the player body's intended velocity from input (the world integrates
-    // gravity and resolves tile collisions during Step).
+    // Drive the player from input. Velocity changes are gradual (accel +
+    // friction + skid) so Mario carries momentum the way SMB1 does, instead
+    // of snapping to a target speed every frame. Coyote time + jump buffer
+    // make ledge-jumps and land-jumps forgiving.
     void ControlPlayer(float dt) {
         Body* p = m_world.Get(m_playerId);
         if (p == nullptr)
@@ -516,23 +537,59 @@ private:
             dir += 1.0f;
         // Shift = run, like the B button in SMB.
         const bool running = Input::IsKeyDown(Key::LeftShift);
-        p->velocity.x = dir * (running ? kRunSpeed : kWalkSpeed);
-        if (dir != 0.0f)
-            m_facing = dir;
+        const bool airborne = !p->onGround;
+        const float maxSpeed = running ? kRunSpeed : kWalkSpeed;
 
+        const float vx = p->velocity.x;
+        float newVx = vx;
+        const float accel = airborne ? kAirAccel : kGroundAccel;
+        const float decel = airborne ? kAirDecel : kGroundDecel;
+        if (dir != 0.0f) {
+            const float wantSign = dir;
+            const float curSign  = (vx > 0.0f) ? 1.0f : (vx < 0.0f ? -1.0f : 0.0f);
+            const bool reversing = curSign != 0.0f && curSign != wantSign;
+            // Skid: while still moving in the wrong direction, decel hard --
+            // this is the "feet sliding" pivot at the start of every direction
+            // change. Once vx crosses zero, normal accel takes over.
+            const float a = reversing ? kSkidDecel : accel;
+            newVx = vx + dir * a * dt;
+            // Clamp at max speed in the input direction.
+            if (dir > 0.0f && newVx > maxSpeed) newVx = maxSpeed;
+            if (dir < 0.0f && newVx < -maxSpeed) newVx = -maxSpeed;
+        } else if (vx > 0.0f) {
+            newVx = Max(0.0f, vx - decel * dt);
+        } else if (vx < 0.0f) {
+            newVx = Min(0.0f, vx + decel * dt);
+        }
+        // Walking demotes a sprint-state velocity gradually -- you don't
+        // instantly cap when releasing Shift, you coast down through accel.
+        if (dir != 0.0f && !running) {
+            if (newVx >  kWalkSpeed) newVx = Max( kWalkSpeed, newVx - decel * dt);
+            if (newVx < -kWalkSpeed) newVx = Min(-kWalkSpeed, newVx + decel * dt);
+        }
+        p->velocity.x = newVx;
+
+        if (dir != 0.0f) m_facing = dir;
+
+        // Coyote time: refill while grounded, drain in the air.
+        if (p->onGround) m_coyoteTimer = kCoyoteSeconds;
+        else m_coyoteTimer = Max(0.0f, m_coyoteTimer - dt);
+
+        // Jump buffer: any fresh press refills the buffer; it drains in time
+        // so an over-eager press still fires if Mario lands within the window.
         const bool jumpPressed = Input::IsKeyPressed(Key::Space) ||
                                  Input::IsKeyPressed(Key::Up) || Input::IsKeyPressed(Key::W);
         const bool jumpHeld = Input::IsKeyDown(Key::Space) || Input::IsKeyDown(Key::Up) ||
                               Input::IsKeyDown(Key::W);
-        if (jumpPressed && p->onGround) {
-            // SMB-style speed-bonus: the faster you're moving horizontally,
-            // the higher the jump. At a full sprint (|vx| == kRunSpeed) the
-            // bonus is kRunJumpBonus on top of the base impulse, taking the
-            // apex from ~3.5 tiles up to ~5 tiles so 4-tile platforms come
-            // into reach. Walking gets a proportional smaller boost.
+        if (jumpPressed) m_jumpBuffer = kJumpBufferSeconds;
+        else m_jumpBuffer = Max(0.0f, m_jumpBuffer - dt);
+
+        if (m_jumpBuffer > 0.0f && m_coyoteTimer > 0.0f) {
             const float speedFrac = Min(std::fabs(p->velocity.x) / kRunSpeed, 1.0f);
             p->velocity.y = -(kJumpSpeed + kRunJumpBonus * speedFrac);
             m_ctx->Sfx(m_ctx->sfxJump);
+            m_jumpBuffer = 0.0f;
+            m_coyoteTimer = 0.0f;
         }
 
         // Variable-height jump: heavier gravity while rising without holding jump.
@@ -899,6 +956,9 @@ private:
     float m_invulnTimer = 0.0f;
     float m_transformTimer = 0.0f;    // > 0 while grow/shrink animation runs
     MarioForm m_transformFrom = MarioForm::Small; // form we're animating away from
+    float m_coyoteTimer = 0.0f;       // jump-from-ledge grace window
+    float m_jumpBuffer = 0.0f;        // pre-landing jump press buffer
+    bool m_wasRunning = false;        // was Shift held last frame (for run-jump impulse)
     float m_facing = 1.0f;
     float m_walkTimer = 0.0f;
     int m_walkFrame = 0;
