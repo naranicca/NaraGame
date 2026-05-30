@@ -32,8 +32,10 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #ifndef NARAGAME_ASSETS_DIR
@@ -74,13 +76,26 @@ constexpr float kRunSpeed  = 320.0f;
 constexpr float kJumpSpeed    = 780.0f;   // standing jump: ~4 tiles (lands on lone SMB1-1 ? block)
 constexpr float kRunJumpBonus = 90.0f;    // at full run, impulse is 870 -> ~5.1 tiles
 constexpr float kStompBounce = 380.0f;
-constexpr float kPlayerW = kT;
-constexpr float kPlayerH = kT;
+constexpr float kPlayerSmallW = kT;
+constexpr float kPlayerSmallH = kT;
+constexpr float kPlayerSuperW = kT;
+constexpr float kPlayerSuperH = kT * 2.0f;
 constexpr float kGoombaW = kT;
 constexpr float kGoombaH = kT;
 constexpr float kGoombaSpeed = 60.0f;
 
-enum BodyTag : uint32_t { TagTile = 1, TagPlayer = 2, TagGoomba = 3 };
+// Mushroom -- the iconic Super Mushroom power-up. Smaller hitbox than its
+// sprite so the pickup feels generous; walks right, falls with gravity,
+// reverses on wall hits like a goomba.
+constexpr float kMushroomW = kT * 0.85f;
+constexpr float kMushroomH = kT * 0.85f;
+constexpr float kMushroomSpeed = 90.0f;
+
+// Brief mercy invulnerability after Super Mario takes a hit and shrinks back
+// to Small. The HUD flashes for this long so the player has time to retreat.
+constexpr float kInvulnSeconds = 1.5f;
+
+enum BodyTag : uint32_t { TagTile = 1, TagPlayer = 2, TagGoomba = 3, TagMushroom = 4 };
 
 struct Goomba {
     int bodyId = -1;
@@ -91,6 +106,18 @@ struct Goomba {
     float animTimer = 0.0f;
     int frame = 0;
 };
+
+struct Mushroom {
+    int bodyId = -1;
+    float dir = 1.0f;      // starts walking right out of the block it sprang from
+    bool alive = true;
+    float spawnTimer = 0.0f;  // brief rise-out animation before physics kicks in
+    Vec2 spawnAt;             // bottom-left of the block it came from
+};
+
+// Player size mode. Affects hitbox (32x32 vs 32x64), sprite source rect, head
+// height (for bumping blocks), and damage handling.
+enum class MarioForm { Small, Super };
 
 // Shared resources + scene factories, owned by the Application.
 struct GameContext {
@@ -181,6 +208,24 @@ public:
         m_camera.SetZoom(kZoom); // before SetBounds: clamping uses the zoomed view size
         m_camera.SetBounds({0.0f, 0.0f}, m_worldSize);
 
+        m_goombas.clear();
+        m_mushrooms.clear();
+        m_mushroomBlocks.clear();
+        m_form = MarioForm::Small;
+        m_invulnTimer = 0.0f;
+        m_spawn = {120.0f, kT * 14.0f};
+
+        // First pass: any '!' marker is a mushroom block. Promote it to a
+        // QUESTION tile NOW so the next step's BuildTileColliders sees it as
+        // solid; remember the position so the bump handler knows to spawn a
+        // mushroom there instead of a coin.
+        for (const LevelObject& obj : level.objects) {
+            if (obj.symbol == '!') {
+                m_map.SetTile(obj.tileX, obj.tileY, QUESTION);
+                m_mushroomBlocks.insert({obj.tileX, obj.tileY});
+            }
+        }
+
         // Physics world: solid tiles become static bodies (dynamic bodies for
         // actors). Adjacent solids are merged into larger rectangles (greedy
         // meshing) so the player slides along smooth surfaces instead of catching
@@ -189,12 +234,11 @@ public:
         m_world.SetGravity({0.0f, kGravity});
         BuildTileColliders();
 
-        m_goombas.clear();
-        m_spawn = {120.0f, kT * 14.0f};
+        // Second pass: spawn points and dynamic actors.
         for (const LevelObject& obj : level.objects) {
             const float px = obj.tileX * kT;
             if (obj.symbol == 'M') {
-                m_spawn = {px, (obj.tileY + 1) * kT - kPlayerH};
+                m_spawn = {px, (obj.tileY + 1) * kT - kPlayerSmallH};
             } else if (obj.symbol == 'g') {
                 Body gb;
                 gb.type = BodyType::Dynamic;
@@ -212,7 +256,7 @@ public:
         Body player;
         player.type = BodyType::Dynamic;
         player.tag = TagPlayer;
-        player.size = {kPlayerW, kPlayerH};
+        player.size = {kPlayerSmallW, kPlayerSmallH};
         player.position = m_spawn;
         m_playerId = m_world.AddBody(player);
         m_facing = 1.0f;
@@ -235,14 +279,18 @@ public:
         }
 
         const float dt = Min(dtRaw, 1.0f / 30.0f);
+        if (m_invulnTimer > 0.0f) m_invulnTimer -= dt;
         ControlPlayer(dt);
         ControlGoombas(dt);
+        ControlMushrooms(dt);
 
         m_world.Step(dt); // integrates gravity + resolves tile collisions
 
         TurnGoombasAtWalls();
+        TurnMushroomsAtWalls();
         BumpBlocks();
         CollectCoins();
+        CollectMushrooms();
         ResolveGoombaHits();
         m_particles.Update(dt);
 
@@ -253,11 +301,11 @@ public:
             Die();
             return;
         }
-        if (p->position.x + kPlayerW >= m_worldSize.x - 2.0f) {
+        if (p->position.x + p->size.x >= m_worldSize.x - 2.0f) {
             NextLevel();
             return;
         }
-        m_camera.CenterOn({p->position.x + kPlayerW * 0.5f, p->position.y + kPlayerH * 0.5f});
+        m_camera.CenterOn({p->position.x + p->size.x * 0.5f, p->position.y + p->size.y * 0.5f});
     }
 
     void OnRender() override {
@@ -277,13 +325,32 @@ public:
                            m_ctx->chars->Get(g.frame ? "goomba1" : "goomba0"));
             }
         }
+        // Mushrooms (drawn under the player so a mushroom emerging from a
+        // block reads as "behind" the action briefly).
+        for (const Mushroom& mu : m_mushrooms) {
+            if (!mu.alive) continue;
+            if (const Body* mb = m_world.Get(mu.bodyId)) {
+                r.DrawQuad(mb->position, {kMushroomW, kMushroomH},
+                           m_ctx->chars->Get("mushroom"));
+            }
+        }
+
         if (const Body* p = m_world.Get(m_playerId)) {
-            const char* name = !p->onGround
-                                   ? "jump"
-                                   : (std::fabs(p->velocity.x) > 5.0f && m_walkFrame ? "walk"
-                                                                                     : "stand");
-            r.DrawQuad(p->position, {kPlayerW, kPlayerH}, m_ctx->chars->Get(name), Color::White(),
-                       m_facing < 0.0f);
+            // Suppress the player every other ~0.1s while invulnerable -- the
+            // classic flash that signals "you got hit, brief mercy now".
+            const bool flicker = (m_invulnTimer > 0.0f) &&
+                                 (static_cast<int>(m_invulnTimer * 10.0f) % 2 == 0);
+            if (!flicker) {
+                const bool airborne = !p->onGround;
+                const bool moving   = std::fabs(p->velocity.x) > 5.0f && m_walkFrame;
+                const char* name;
+                if (m_form == MarioForm::Super)
+                    name = airborne ? "superJump" : (moving ? "superWalk" : "superStand");
+                else
+                    name = airborne ? "jump" : (moving ? "walk" : "stand");
+                r.DrawQuad(p->position, p->size, m_ctx->chars->Get(name), Color::White(),
+                           m_facing < 0.0f);
+            }
         }
         m_particles.Draw(r);
         r.End();
@@ -411,6 +478,111 @@ private:
         }
     }
 
+    void ControlMushrooms(float dt) {
+        for (Mushroom& mu : m_mushrooms) {
+            if (!mu.alive) continue;
+            Body* mb = m_world.Get(mu.bodyId);
+            if (mb == nullptr) continue;
+            if (mu.spawnTimer > 0.0f) {
+                // Rise up out of the block: float upward briefly with no
+                // horizontal motion, ignoring gravity, then start rolling.
+                mu.spawnTimer -= dt;
+                mb->gravityScale = 0.0f;
+                mb->velocity = {0.0f, -45.0f};
+                if (mu.spawnTimer <= 0.0f) {
+                    mb->gravityScale = 1.0f;
+                    mb->velocity.y = 0.0f;
+                }
+                continue;
+            }
+            mb->velocity.x = mu.dir * kMushroomSpeed;
+            if (mb->velocity.y > kMaxFall) mb->velocity.y = kMaxFall;
+        }
+    }
+
+    void TurnMushroomsAtWalls() {
+        for (const Contact& c : m_world.Contacts()) {
+            if (std::fabs(c.normal.x) < 0.5f) continue;
+            for (Mushroom& mu : m_mushrooms) {
+                if (mu.alive && mu.bodyId == c.a) {
+                    mu.dir = (c.normal.x > 0.0f) ? 1.0f : -1.0f;
+                    break;
+                }
+            }
+        }
+        for (Mushroom& mu : m_mushrooms) {
+            if (!mu.alive) continue;
+            Body* mb = m_world.Get(mu.bodyId);
+            if (mb != nullptr && mb->position.y > m_worldSize.y + 80.0f) {
+                mu.alive = false;
+                m_world.RemoveBody(mu.bodyId);
+            }
+        }
+    }
+
+    void CollectMushrooms() {
+        Body* p = m_world.Get(m_playerId);
+        if (p == nullptr) return;
+        for (Mushroom& mu : m_mushrooms) {
+            if (!mu.alive) continue;
+            Body* mb = m_world.Get(mu.bodyId);
+            if (mb == nullptr) continue;
+            const bool overlap = p->position.x < mb->position.x + kMushroomW &&
+                                 p->position.x + p->size.x > mb->position.x &&
+                                 p->position.y < mb->position.y + kMushroomH &&
+                                 p->position.y + p->size.y > mb->position.y;
+            if (!overlap) continue;
+            mu.alive = false;
+            m_world.RemoveBody(mu.bodyId);
+            m_ctx->score += 1000;
+            m_ctx->Sfx(m_ctx->sfxCoin);
+            GrowToSuper();
+        }
+    }
+
+    void SpawnMushroom(int tx, int ty) {
+        // Comes out of the top of the bumped block. The mushroom briefly
+        // floats up before physics takes over, like the SMB1 reveal.
+        Body mb;
+        mb.type = BodyType::Dynamic;
+        mb.tag = TagMushroom;
+        mb.size = {kMushroomW, kMushroomH};
+        mb.position = {tx * kT + (kT - kMushroomW) * 0.5f,
+                       ty * kT - kMushroomH};
+        mb.gravityScale = 0.0f; // suspended until spawn animation ends
+        Mushroom mu;
+        mu.bodyId = m_world.AddBody(mb);
+        mu.dir = 1.0f;
+        mu.spawnTimer = 0.45f;
+        mu.spawnAt = mb.position;
+        m_mushrooms.push_back(mu);
+    }
+
+    // Resize the player's AABB to Super dimensions. The body's bottom stays
+    // put, so the top (and thus the rendered sprite) extends upward by an
+    // extra tile -- matching the visual "growth" pose without an animation
+    // for now.
+    void GrowToSuper() {
+        if (m_form == MarioForm::Super) return;
+        Body* p = m_world.Get(m_playerId);
+        if (p == nullptr) return;
+        const float feetY = p->position.y + p->size.y;
+        p->size = {kPlayerSuperW, kPlayerSuperH};
+        p->position.y = feetY - kPlayerSuperH;
+        m_form = MarioForm::Super;
+    }
+
+    void ShrinkToSmall() {
+        if (m_form == MarioForm::Small) return;
+        Body* p = m_world.Get(m_playerId);
+        if (p == nullptr) return;
+        const float feetY = p->position.y + p->size.y;
+        p->size = {kPlayerSmallW, kPlayerSmallH};
+        p->position.y = feetY - kPlayerSmallH;
+        m_form = MarioForm::Small;
+        m_invulnTimer = kInvulnSeconds;
+    }
+
     // A goomba that hit a wall (horizontal contact normal) reverses direction.
     void TurnGoombasAtWalls() {
         for (const Contact& c : m_world.Contacts()) {
@@ -446,13 +618,13 @@ private:
             if (gb == nullptr || !gb->active)
                 continue;
             const bool overlap = p->position.x < gb->position.x + kGoombaW &&
-                                 p->position.x + kPlayerW > gb->position.x &&
+                                 p->position.x + p->size.x > gb->position.x &&
                                  p->position.y < gb->position.y + kGoombaH &&
-                                 p->position.y + kPlayerH > gb->position.y;
+                                 p->position.y + p->size.y > gb->position.y;
             if (!overlap)
                 continue;
             const bool stomp = p->velocity.y > 0.0f &&
-                               (p->position.y + kPlayerH) < gb->position.y + kGoombaH * 0.6f;
+                               (p->position.y + p->size.y) < gb->position.y + kGoombaH * 0.6f;
             if (stomp) {
                 g.lastPos = gb->position;
                 g.squashTimer = 0.35f;
@@ -470,6 +642,12 @@ private:
                 burst.endColor = Color(0.6f, 0.4f, 0.2f, 0.0f);
                 burst.gravity = {0.0f, 600.0f};
                 m_particles.Emit(burst);
+            } else if (m_invulnTimer > 0.0f) {
+                continue; // mercy frames after a recent hit
+            } else if (m_form == MarioForm::Super) {
+                ShrinkToSmall();
+                m_ctx->Sfx(m_ctx->sfxStomp);
+                return;
             } else {
                 Die();
                 return;
@@ -494,30 +672,37 @@ private:
 
         const int row = static_cast<int>(std::floor((p->position.y - 2.0f) / kT));
         const int left = static_cast<int>(std::floor(p->position.x / kT));
-        const int right = static_cast<int>(std::floor((p->position.x + kPlayerW - 1.0f) / kT));
+        const int right = static_cast<int>(std::floor((p->position.x + p->size.x - 1.0f) / kT));
         for (int tx = left; tx <= right; ++tx) {
             if (m_map.GetTile(tx, row) != QUESTION)
                 continue;
             m_map.SetTile(tx, row, USED);
-            ++m_ctx->coins;
-            m_ctx->score += 200;
-            m_ctx->Sfx(m_ctx->sfxCoin);
+            const bool isMushroomBlock = m_mushroomBlocks.count({tx, row}) > 0;
+            m_mushroomBlocks.erase({tx, row});
+            if (isMushroomBlock) {
+                SpawnMushroom(tx, row);
+                m_ctx->Sfx(m_ctx->sfxCoin);
+            } else {
+                ++m_ctx->coins;
+                m_ctx->score += 200;
+                m_ctx->Sfx(m_ctx->sfxCoin);
 
-            // A coin sprays up out of the block.
-            ParticleBurst burst;
-            burst.position = {tx * kT + kT * 0.5f, row * kT + 4.0f};
-            burst.count = 16;
-            burst.minSpeed = 140.0f;
-            burst.maxSpeed = 300.0f;
-            burst.minLife = 0.3f;
-            burst.maxLife = 0.6f;
-            burst.startSize = 6.0f;
-            burst.startColor = Color(1.0f, 0.85f, 0.25f);
-            burst.endColor = Color(1.0f, 0.85f, 0.25f, 0.0f);
-            burst.gravity = {0.0f, 900.0f};
-            burst.dirAngle = -1.5708f; // straight up (+Y is down)
-            burst.spread = 1.2f;
-            m_particles.Emit(burst);
+                // A coin sprays up out of the block.
+                ParticleBurst burst;
+                burst.position = {tx * kT + kT * 0.5f, row * kT + 4.0f};
+                burst.count = 16;
+                burst.minSpeed = 140.0f;
+                burst.maxSpeed = 300.0f;
+                burst.minLife = 0.3f;
+                burst.maxLife = 0.6f;
+                burst.startSize = 6.0f;
+                burst.startColor = Color(1.0f, 0.85f, 0.25f);
+                burst.endColor = Color(1.0f, 0.85f, 0.25f, 0.0f);
+                burst.gravity = {0.0f, 900.0f};
+                burst.dirAngle = -1.5708f; // straight up (+Y is down)
+                burst.spread = 1.2f;
+                m_particles.Emit(burst);
+            }
             break; // one block per bump
         }
     }
@@ -527,9 +712,9 @@ private:
         if (p == nullptr)
             return;
         const int left = static_cast<int>(std::floor(p->position.x / kT));
-        const int right = static_cast<int>(std::floor((p->position.x + kPlayerW - 1.0f) / kT));
+        const int right = static_cast<int>(std::floor((p->position.x + p->size.x - 1.0f) / kT));
         const int top = static_cast<int>(std::floor(p->position.y / kT));
-        const int bottom = static_cast<int>(std::floor((p->position.y + kPlayerH - 1.0f) / kT));
+        const int bottom = static_cast<int>(std::floor((p->position.y + p->size.y - 1.0f) / kT));
         for (int ty = top; ty <= bottom; ++ty)
             for (int tx = left; tx <= right; ++tx)
                 if (m_map.GetTile(tx, ty) == COIN) {
@@ -554,9 +739,12 @@ private:
     void RespawnPlayer() {
         if (Body* p = m_world.Get(m_playerId)) {
             p->position = m_spawn;
+            p->size = {kPlayerSmallW, kPlayerSmallH};
             p->velocity = {0.0f, 0.0f};
             p->onGround = false;
         }
+        m_form = MarioForm::Small;
+        m_invulnTimer = kInvulnSeconds; // brief grace after respawn too
         m_facing = 1.0f;
         m_camera.CenterOn(m_spawn);
     }
@@ -586,6 +774,10 @@ private:
     ParticleSystem m_particles;
     int m_playerId = -1;
     std::vector<Goomba> m_goombas;
+    std::vector<Mushroom> m_mushrooms;
+    std::set<std::pair<int,int>> m_mushroomBlocks;
+    MarioForm m_form = MarioForm::Small;
+    float m_invulnTimer = 0.0f;
     float m_facing = 1.0f;
     float m_walkTimer = 0.0f;
     int m_walkFrame = 0;
@@ -664,13 +856,21 @@ protected:
 
         // New atlas layout: 3x32 mario frames on row 0, 3x32 goomba frames
         // on row 1. Each cell is one tile (kT x kT).
+        // Atlas layout (128 x 128):
+        //   row 0 (y 0..31):  small stand/walk/jump (3 cells of 32x32), then mushroom
+        //   row 1 (y 32..63): goomba0/goomba1/squashed (3 cells of 32x32)
+        //   rows 2-3 (y 64..127, each cell 32x64): super stand/walk/jump
         m_chars = TextureAtlas(m_charTexture.get());
         m_chars.Add("stand",          0.0f,  0.0f, kT, kT);
         m_chars.Add("walk",           kT,    0.0f, kT, kT);
         m_chars.Add("jump",           kT*2,  0.0f, kT, kT);
+        m_chars.Add("mushroom",       kT*3,  0.0f, kT, kT);
         m_chars.Add("goomba0",        0.0f,  kT,   kT, kT);
         m_chars.Add("goomba1",        kT,    kT,   kT, kT);
         m_chars.Add("goombaSquashed", kT*2,  kT,   kT, kT);
+        m_chars.Add("superStand",     0.0f,  kT*2, kT, kT*2);
+        m_chars.Add("superWalk",      kT,    kT*2, kT, kT*2);
+        m_chars.Add("superJump",      kT*2,  kT*2, kT, kT*2);
 
         m_ctx.renderer = &m_renderer;
         m_ctx.font = &m_font;
