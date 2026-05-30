@@ -86,6 +86,11 @@ public:
 
     RHITexture* WhiteTexture() const { return m_whiteTexture.get(); }
 
+    // Number of Flush() calls (= GPU draw calls) issued between the last
+    // Begin and End. Resets on Begin so the count reflects the current
+    // batch session. Used by debug overlays.
+    uint32_t DrawCallCount() const { return m_drawCalls; }
+
     // Orthographic camera with (0,0) at the top-left and +Y downward.
     static Mat4 ScreenCamera(float width, float height);
 
@@ -118,6 +123,7 @@ private:
 
     std::vector<Vertex> m_vertices;
     uint32_t m_quadCount = 0;
+    uint32_t m_drawCalls = 0;
     RHITexture* m_currentTexture = nullptr;
     PipelineMode m_currentMode = PipelineMode::Sprite;
     bool m_inScene = false;

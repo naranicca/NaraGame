@@ -35,6 +35,11 @@ public:
     AudioDevice& GetAudio() { return *m_audio; }
     const AppConfig& Config() const { return m_config; }
 
+    // Per-frame timing diagnostics for debug overlays. FPS is a rolling
+    // average over the last ~0.5s so the displayed number stays readable.
+    float FramesPerSecond() const { return m_fps; }
+    float DeltaTime() const { return m_lastDt; }
+
     static Application& Get();
 
 protected:
@@ -51,6 +56,11 @@ private:
     bool m_running = true;
     uint32_t m_lastWidth = 0;
     uint32_t m_lastHeight = 0;
+
+    float m_lastDt = 0.0f;
+    float m_fps = 0.0f;
+    float m_fpsAccum = 0.0f;
+    int   m_fpsFrames = 0;
 
     static Application* s_instance;
 };

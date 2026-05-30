@@ -59,6 +59,14 @@ void Application::Run() {
     Clock clock;
     while (m_running && !m_window->ShouldClose()) {
         const float dt = clock.Tick();
+        m_lastDt = dt;
+        m_fpsAccum += dt;
+        m_fpsFrames += 1;
+        if (m_fpsAccum >= 0.5f) {
+            m_fps = static_cast<float>(m_fpsFrames) / m_fpsAccum;
+            m_fpsAccum = 0.0f;
+            m_fpsFrames = 0;
+        }
 
         Input::NewFrame();
         m_window->PollEvents();

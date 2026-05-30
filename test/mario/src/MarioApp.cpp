@@ -384,6 +384,7 @@ public:
             return;
         }
         if (Input::IsKeyPressed(Key::F1)) m_debugCollisions = !m_debugCollisions;
+        if (Input::IsKeyPressed(Key::F2)) m_debugStats = !m_debugStats;
 
         const float dt = Min(dtRaw, 1.0f / 30.0f);
         if (m_invulnTimer > 0.0f) m_invulnTimer -= dt;
@@ -569,6 +570,16 @@ public:
                    Color(0.8f, 0.9f, 1.0f), 22.0f);
         r.DrawText(*m_ctx->font, "LIVES " + std::to_string(m_ctx->lives),
                    {m_ctx->screenW - 130.0f, 14.0f}, Color(0.8f, 1.0f, 0.8f), 22.0f);
+
+        // F2 overlay -- FPS / dt / draw calls. Read draw count BEFORE r.End()
+        // so the still-open batch's calls are counted, then render the stats
+        // panel which itself contributes a few more draw calls we don't see.
+        if (m_debugStats) {
+            DebugDraw::FrameStats(r, *m_ctx->font,
+                                  Application::Get().FramesPerSecond(),
+                                  Application::Get().DeltaTime(),
+                                  r.DrawCallCount());
+        }
         r.End();
     }
 
@@ -1322,6 +1333,7 @@ private:
     std::set<std::pair<int,int>> m_mushroomBlocks;
     std::set<std::pair<int,int>> m_fireFlowerBlocks;
     bool m_debugCollisions = false;
+    bool m_debugStats = false;
     MarioForm m_form = MarioForm::Small;
     float m_invulnTimer = 0.0f;
     float m_transformTimer = 0.0f;    // > 0 while grow/shrink animation runs

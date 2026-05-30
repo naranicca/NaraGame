@@ -1,7 +1,10 @@
 #include "NaraGame/debug/DebugDraw.h"
 
 #include "NaraGame/physics/Physics2D.h"
+#include "NaraGame/renderer/MSDFFont.h"
 #include "NaraGame/renderer/Renderer2D.h"
+
+#include <cstdio>
 
 namespace NaraGame {
 namespace DebugDraw {
@@ -13,6 +16,28 @@ void Outline(Renderer2D& r, const Vec2& p, const Vec2& s,
     r.DrawQuad({p.x, p.y + s.y - t},     {s.x, t},       color);   // bottom
     r.DrawQuad({p.x, p.y},               {t,   s.y},     color);   // left
     r.DrawQuad({p.x + s.x - t, p.y},     {t,   s.y},     color);   // right
+}
+
+void FrameStats(Renderer2D& r, const MSDFFont& font,
+                float fps, float dt, uint32_t drawCalls) {
+    // Black backing panel for readability against any scene.
+    constexpr float kPad = 6.0f;
+    constexpr float kTextPx = 14.0f;
+    constexpr float kLineH = 18.0f;
+    constexpr float kPanelW = 168.0f;
+    constexpr float kPanelH = 70.0f;
+    r.DrawQuad({4.0f, 4.0f}, {kPanelW, kPanelH}, Color(0.0f, 0.0f, 0.0f, 0.55f));
+
+    char line[64];
+    const Color text(1.0f, 1.0f, 1.0f, 1.0f);
+    const float x0 = 4.0f + kPad;
+    float y = 4.0f + kPad;
+    std::snprintf(line, sizeof(line), "FPS  %.1f", fps);
+    r.DrawText(font, line, {x0, y}, text, kTextPx); y += kLineH;
+    std::snprintf(line, sizeof(line), "dt   %.2f ms", dt * 1000.0f);
+    r.DrawText(font, line, {x0, y}, text, kTextPx); y += kLineH;
+    std::snprintf(line, sizeof(line), "draws %u", drawCalls);
+    r.DrawText(font, line, {x0, y}, text, kTextPx);
 }
 
 void PhysicsBodies(Renderer2D& r, const PhysicsWorld& world) {

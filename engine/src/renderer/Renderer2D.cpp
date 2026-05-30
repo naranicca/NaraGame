@@ -221,6 +221,7 @@ void Renderer2D::Begin(const Mat4& viewProjection) {
         m_cameraBuffer->Update(viewProjection.data, sizeof(Mat4));
     m_inScene = true;
     m_currentMode = PipelineMode::Sprite;
+    m_drawCalls = 0;
     StartBatch();
 }
 
@@ -471,6 +472,7 @@ void Renderer2D::Flush() {
     m_device->BindIndexBuffer(m_indexBuffer.get(), IndexFormat::Uint32);
     m_device->BindTexture(0, m_currentTexture);
     m_device->DrawIndexed(m_quadCount * 6);
+    ++m_drawCalls;
 }
 
 } // namespace NaraGame
