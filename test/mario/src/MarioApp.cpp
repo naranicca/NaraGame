@@ -98,9 +98,15 @@ constexpr float kAirDecel    = 200.0f;
 constexpr float kCoyoteSeconds     = 0.10f;
 constexpr float kJumpBufferSeconds = 0.08f;
 constexpr float kStompBounce = 380.0f;
-constexpr float kPlayerSmallW = kT;
+// Mario's collision hitbox is intentionally narrower than the visible sprite
+// so a 1-tile-wide pit between platforms reads as a gap he falls through
+// instead of one that's exactly his width (where alignment alone determines
+// whether he passes over or falls in). The sprite is still drawn at full
+// tile width; the difference rides as a small overhang on each side.
+constexpr float kPlayerSpriteW = kT;
+constexpr float kPlayerSmallW = kT * 0.75f;
 constexpr float kPlayerSmallH = kT;
-constexpr float kPlayerSuperW = kT;
+constexpr float kPlayerSuperW = kT * 0.75f;
 constexpr float kPlayerSuperH = kT * 2.0f;
 constexpr float kGoombaW = kT;
 constexpr float kGoombaH = kT;
@@ -492,17 +498,16 @@ public:
                     name = airborne ? "superJump" : (moving ? "superWalk" : "superStand");
                 else
                     name = airborne ? "jump" : (moving ? "walk" : "stand");
-                // When flashing a Small form during a Super/Fire grow, render
-                // at Small dimensions; otherwise use the current AABB size.
-                Vec2 spriteSize = p->size;
-                Vec2 spritePos  = p->position;
-                if (renderForm == MarioForm::Small && m_form != MarioForm::Small) {
-                    spriteSize = {kPlayerSmallW, kPlayerSmallH};
-                    spritePos.y = p->position.y + (p->size.y - kPlayerSmallH);
-                } else if (renderForm != MarioForm::Small && m_form == MarioForm::Small) {
-                    spriteSize = {kPlayerSuperW, kPlayerSuperH};
-                    spritePos.y = p->position.y + (p->size.y - kPlayerSuperH);
-                }
+                // Sprite is full-tile-wide regardless of the narrower hitbox.
+                // Centre horizontally over the hitbox and pin feet to its
+                // bottom so the form swap during the flash stays consistent.
+                const float spriteH = (renderForm == MarioForm::Small)
+                                          ? kPlayerSmallH : kPlayerSuperH;
+                const Vec2 spriteSize{kPlayerSpriteW, spriteH};
+                const Vec2 spritePos{
+                    p->position.x + (p->size.x - spriteSize.x) * 0.5f,
+                    p->position.y + (p->size.y - spriteSize.y)
+                };
                 r.DrawQuad(spritePos, spriteSize, m_ctx->chars->Get(name),
                            Color::White(), m_facing < 0.0f);
             }
