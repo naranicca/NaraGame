@@ -129,6 +129,9 @@ struct DungeonGenResult {
     Grid grid;
     Vec2 playerSpawn{};   // tile-space center
     Vec2 stairsTile{};
+    // Candidate monster spawn tiles -- floor cells inside non-first rooms.
+    // The dungeon scene picks N of these at random and places monsters.
+    std::vector<Vec2> monsterSpawns;
 };
 
 DungeonGenResult GenerateDungeon(uint32_t seed, int gw = 40, int gh = 40) {
@@ -221,6 +224,19 @@ DungeonGenResult GenerateDungeon(uint32_t seed, int gw = 40, int gh = 40) {
     r.playerSpawn = { first.x + first.w * 0.5f, first.y + first.h * 0.5f };
     r.stairsTile  = { (float)(last.x + last.w / 2), (float)(last.y + last.h / 2) };
     r.grid.Set((int)r.stairsTile.x, (int)r.stairsTile.y, Tile::Stairs);
+
+    // Monster spawns: every floor tile inside a non-first room, except the
+    // stairs cell. Caller picks how many to place. We skip the first room so
+    // the player gets one "safe" room to find their bearings on entry.
+    for (size_t i = 1; i < rooms.size(); ++i) {
+        const Room& rm = rooms[i];
+        for (int y = rm.y; y < rm.y + rm.h; ++y) {
+            for (int x = rm.x; x < rm.x + rm.w; ++x) {
+                if (r.grid.At(x, y) != Tile::Floor) continue;
+                r.monsterSpawns.push_back({(float)x, (float)y});
+            }
+        }
+    }
     return r;
 }
 
@@ -266,6 +282,39 @@ TownResult BuildTown() {
 }
 
 // ---------------------------------------------------------------------------
+// Monster.
+//   Kind drives the sprite + the base stats; everything else is per-instance.
+//   Stored as a flat vector on DungeonScene -- combat code iterates the list
+//   each frame doing distance checks, which is fine for the ~15 monsters a
+//   dungeon holds.
+// ---------------------------------------------------------------------------
+struct Monster {
+    enum class Kind { Skeleton, Zombie };
+    Kind kind = Kind::Skeleton;
+    Vec2 pos{};
+    float hp = 1.0f;
+    float maxHp = 1.0f;
+    float damage = 1.0f;
+    float speed = 1.0f;            // tiles per second
+    float attackCooldown = 0.0f;   // ticks down each frame, attack at 0
+    float hurtFlashTimer = 0.0f;   // sprite tints white while > 0
+    bool alive = true;
+
+    static Monster Make(Kind k, Vec2 p) {
+        Monster m;
+        m.kind = k;
+        m.pos = p;
+        if (k == Kind::Skeleton) {
+            m.maxHp = 12.0f; m.damage = 4.0f; m.speed = 1.8f;
+        } else {
+            m.maxHp = 20.0f; m.damage = 6.0f; m.speed = 1.3f;
+        }
+        m.hp = m.maxHp;
+        return m;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Shared context: scene factories + cross-scene state (sprite atlas, seed,
 // dungeon visit count for the title HUD, etc).
 // ---------------------------------------------------------------------------
@@ -278,6 +327,15 @@ struct GameContext {
 
     uint32_t rngSeed     = 1;     // bumps on every dungeon entry
     int      dungeonVisits = 0;
+
+    // Player stats persist across town <-> dungeon swaps but reset to full on
+    // death (the town acts as a respawn / safe area).
+    float playerHp        = 50.0f;
+    float playerMaxHp     = 50.0f;
+    float playerDamage    = 8.0f;
+    float playerAtkRange  = 1.4f;   // tiles -- generous so iso-overshoot doesn't whiff
+    float playerAtkSpeed  = 0.45f;  // seconds per swing
+    int   monstersKilled  = 0;
 
     std::function<std::unique_ptr<Scene>()> makeTitle;
     std::function<std::unique_ptr<Scene>()> makeTown;
@@ -292,7 +350,20 @@ struct GameContext {
 
 // ---------------------------------------------------------------------------
 // World renderer + player logic shared by Town and Dungeon scenes.
+//
+// One painter-sorted draw list per frame. Subclasses inject extra actors via
+// AppendActors() and HUD overlays via DrawHudExtra(); per-frame logic that
+// isn't shared (combat, AI) goes in OnUpdateExtra().
 // ---------------------------------------------------------------------------
+struct RenderItem {
+    float sortKey;
+    enum class Kind { Tile, Player, Monster };
+    Kind kind;
+    int tx = 0, ty = 0;
+    Tile tile = Tile::Empty;
+    const Monster* monster = nullptr;
+};
+
 class WorldScene : public Scene {
 public:
     WorldScene(GameContext* ctx) : m_ctx(ctx) {}
@@ -307,6 +378,12 @@ protected:
     // Each subclass picks its world and what 'E' does at the special tile.
     virtual void EnterWorld() = 0;
     virtual void OnInteract() = 0;
+
+    // Per-scene hooks. Defaults are no-ops so TownScene gets a free pass.
+    virtual void OnUpdateExtra(float /*dt*/) {}
+    virtual void AppendActors(std::vector<RenderItem>& /*items*/) {}
+    virtual void DrawWorldOverlay() {}   // drawn after actors, under HUD (e.g. attack VFX)
+    virtual void DrawHudExtra() {}
 
     void OnEnter() override { EnterWorld(); }
 
@@ -364,6 +441,8 @@ protected:
             const Tile t = m_grid.At(tx, ty);
             if (t == Tile::Portal || t == Tile::Stairs) OnInteract();
         }
+
+        OnUpdateExtra(dt);
     }
 
     void OnRender() override {
@@ -383,34 +462,46 @@ protected:
         r.DrawQuad({0.0f, 0.0f}, {m_ctx->screenW, m_ctx->screenH},
                    Color(0.06f, 0.05f, 0.08f, 1.0f));
 
-        // Draw tiles in painter order (back-to-front = ascending (tx + ty)).
-        // The player slots in by its own (tx+ty) so walls in front occlude it.
-        struct Item {
-            float sortKey;
-            int kind;   // 0 tile, 1 player
-            int tx, ty;
-            Tile tile;
-        };
-        std::vector<Item> items;
-        items.reserve(m_grid.w * m_grid.h + 1);
+        // Draw tiles + actors in painter order (back-to-front = ascending
+        // (tx + ty)). Floor tiles bias their sortKey down a hair so the
+        // player and wall sprites at the same logical (x+y) draw on top of
+        // the floor underneath them.
+        std::vector<RenderItem> items;
+        items.reserve(m_grid.w * m_grid.h + 4);
         for (int y = 0; y < m_grid.h; ++y) {
             for (int x = 0; x < m_grid.w; ++x) {
                 const Tile t = m_grid.At(x, y);
                 if (t == Tile::Empty) continue;
-                items.push_back({(float)(x + y) - 0.001f, 0, x, y, t});
+                RenderItem it;
+                it.sortKey = (float)(x + y) - (TileIsTall(t) ? 0.0f : 0.001f);
+                it.kind = RenderItem::Kind::Tile;
+                it.tx = x; it.ty = y; it.tile = t;
+                items.push_back(it);
             }
         }
-        items.push_back({m_player.x + m_player.y, 1, 0, 0, Tile::Empty});
-        std::sort(items.begin(), items.end(),
-                  [](const Item& a, const Item& b) { return a.sortKey < b.sortKey; });
-
-        for (const Item& it : items) {
-            if (it.kind == 0) DrawTile(it.tx, it.ty, it.tile);
-            else              DrawPlayer();
+        {
+            RenderItem it;
+            it.sortKey = m_player.x + m_player.y;
+            it.kind = RenderItem::Kind::Player;
+            items.push_back(it);
         }
+        AppendActors(items);
+        std::sort(items.begin(), items.end(),
+                  [](const RenderItem& a, const RenderItem& b) { return a.sortKey < b.sortKey; });
+
+        for (const RenderItem& it : items) {
+            switch (it.kind) {
+                case RenderItem::Kind::Tile:    DrawTile(it.tx, it.ty, it.tile); break;
+                case RenderItem::Kind::Player:  DrawPlayer();                    break;
+                case RenderItem::Kind::Monster: DrawMonster(*it.monster);        break;
+            }
+        }
+
+        DrawWorldOverlay();
 
         // HUD.
         r.DrawText(*m_ctx->font, HudLine(), {16.0f, 12.0f}, Color::White(), 20.0f);
+        DrawHudExtra();
 
         r.End();
     }
@@ -458,8 +549,39 @@ protected:
         // sprite doesn't visually sink into the diamond).
         const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
                        center.y - kPlayerSpriteH + 4.0f};
-        r.DrawQuad(pos, {kPlayerSpriteW, kPlayerSpriteH}, reg);
+        const Color tint = (m_ctx->playerHp < m_ctx->playerMaxHp && m_playerHurtFlash > 0.0f)
+            ? Color(1.0f, 0.4f, 0.4f, 1.0f)
+            : Color::White();
+        r.DrawQuad(pos, {kPlayerSpriteW, kPlayerSpriteH}, reg, tint);
     }
+
+    void DrawMonster(const Monster& m) {
+        if (!m.alive) return;
+        Renderer2D& r = *m_ctx->renderer;
+        const Vec2 center = TileToScreen(m.pos.x, m.pos.y, m_camera);
+        const char* name = (m.kind == Monster::Kind::Skeleton) ? "skeleton" : "zombie";
+        const TextureRegion& reg = m_ctx->sprites->Get(name);
+        const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
+                       center.y - kPlayerSpriteH + 4.0f};
+        const Color tint = (m.hurtFlashTimer > 0.0f)
+            ? Color(1.6f, 1.6f, 1.6f, 1.0f)   // overbrighten -> looks like a hit flash
+            : Color::White();
+        r.DrawQuad(pos, {kPlayerSpriteW, kPlayerSpriteH}, reg, tint);
+
+        // HP bar appears only on damaged monsters so a full-strength room
+        // doesn't look like a UI dump.
+        if (m.hp < m.maxHp) {
+            const float barW = 26.0f;
+            const float barH = 4.0f;
+            const Vec2 barPos{center.x - barW * 0.5f, center.y - kPlayerSpriteH - 6.0f};
+            r.DrawQuad(barPos, {barW, barH}, Color(0.15f, 0.05f, 0.05f, 0.85f));
+            r.DrawQuad({barPos.x + 1.0f, barPos.y + 1.0f},
+                       {(barW - 2.0f) * std::max(0.0f, m.hp / m.maxHp), barH - 2.0f},
+                       Color(0.85f, 0.20f, 0.20f, 1.0f));
+        }
+    }
+
+    float m_playerHurtFlash = 0.0f;   // ticked down by combat code; gated on player tint
 
     virtual std::string HudLine() const = 0;
 };
@@ -477,6 +599,10 @@ protected:
         m_grid = std::move(t.grid);
         m_player = t.playerSpawn;
         m_facing = 1;  // facing north toward the portal
+        // Town heals you to full -- Diablo-style safe haven. Without this a
+        // crawl that ends at 5/50 HP gives you no real reason to ever come
+        // back; full heal is the standard contract.
+        m_ctx->playerHp = m_ctx->playerMaxHp;
     }
     void OnInteract() override {
         ++m_ctx->dungeonVisits;
@@ -494,17 +620,176 @@ public:
     DungeonScene(GameContext* ctx) : WorldScene(ctx) {}
 
 protected:
+    static constexpr float kMonsterAggroRange = 6.5f;
+    static constexpr float kMonsterMeleeRange = 0.85f;
+    static constexpr float kMonsterAtkSpeed   = 1.2f;
+    static constexpr float kSlashDuration     = 0.16f;
+    static constexpr float kHurtFlashDuration = 0.2f;
+
     void EnterWorld() override {
         DungeonGenResult g = GenerateDungeon(m_ctx->rngSeed);
         m_grid   = std::move(g.grid);
         m_player = g.playerSpawn;
         m_facing = 0;
+        m_attackCd = 0.0f;
+        m_slashTimer = 0.0f;
+
+        // Spawn monsters: pick floor cells from g.monsterSpawns at random,
+        // alternating skeleton / zombie. Density scales with how many
+        // candidate cells there are -- big rooms get more monsters.
+        std::mt19937 rng(m_ctx->rngSeed ^ 0xA1B2C3D4u);
+        std::shuffle(g.monsterSpawns.begin(), g.monsterSpawns.end(), rng);
+        const int count = std::min<int>(
+            static_cast<int>(g.monsterSpawns.size()),
+            8 + static_cast<int>(g.monsterSpawns.size() / 20));
+        m_monsters.clear();
+        m_monsters.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            const Monster::Kind kind = (i % 2 == 0)
+                ? Monster::Kind::Skeleton : Monster::Kind::Zombie;
+            m_monsters.push_back(Monster::Make(kind, g.monsterSpawns[i]));
+        }
     }
+
     void OnInteract() override { Manager().Change(m_ctx->makeTown()); }
-    std::string HudLine() const override {
-        return "DUNGEON  -  WASD move, E stairs back to town, Esc title  -  seed " +
-               std::to_string(m_ctx->rngSeed);
+
+    void OnUpdateExtra(float dt) override {
+        // Timers first so a 0-duration cooldown this frame still gates
+        // a fresh attack.
+        m_attackCd        = std::max(0.0f, m_attackCd - dt);
+        m_slashTimer      = std::max(0.0f, m_slashTimer - dt);
+        m_playerHurtFlash = std::max(0.0f, m_playerHurtFlash - dt);
+        for (Monster& m : m_monsters) {
+            if (!m.alive) continue;
+            m.attackCooldown = std::max(0.0f, m.attackCooldown - dt);
+            m.hurtFlashTimer = std::max(0.0f, m.hurtFlashTimer - dt);
+        }
+
+        // Player attack -- Space. Hit center is one facing-step in front of
+        // the player; any live monster inside playerAtkRange takes damage.
+        if ((Input::IsKeyPressed(Key::Space) ||
+             Input::IsKeyPressed(Key::J)) && m_attackCd <= 0.0f) {
+            m_attackCd   = m_ctx->playerAtkSpeed;
+            m_slashTimer = kSlashDuration;
+            const Vec2 fd = FacingDir(m_facing);
+            const Vec2 hit = { m_player.x + fd.x, m_player.y + fd.y };
+            for (Monster& m : m_monsters) {
+                if (!m.alive) continue;
+                const float dx = m.pos.x - hit.x;
+                const float dy = m.pos.y - hit.y;
+                if (dx * dx + dy * dy <= m_ctx->playerAtkRange * m_ctx->playerAtkRange) {
+                    m.hp -= m_ctx->playerDamage;
+                    m.hurtFlashTimer = kHurtFlashDuration;
+                    if (m.hp <= 0.0f) {
+                        m.alive = false;
+                        ++m_ctx->monstersKilled;
+                    }
+                }
+            }
+        }
+
+        // Monster AI -- chase if within aggro, melee on cooldown.
+        for (Monster& m : m_monsters) {
+            if (!m.alive) continue;
+            float dx = m_player.x - m.pos.x;
+            float dy = m_player.y - m.pos.y;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist > kMonsterAggroRange) continue;
+
+            if (dist > kMonsterMeleeRange && dist > 0.0001f) {
+                const float ux = dx / dist;
+                const float uy = dy / dist;
+                const float stepX = ux * m.speed * dt;
+                const float stepY = uy * m.speed * dt;
+                if (!TileBlocksMovement(m_grid.At(
+                        (int)std::floor(m.pos.x + stepX), (int)std::floor(m.pos.y))))
+                    m.pos.x += stepX;
+                if (!TileBlocksMovement(m_grid.At(
+                        (int)std::floor(m.pos.x), (int)std::floor(m.pos.y + stepY))))
+                    m.pos.y += stepY;
+            } else if (m.attackCooldown <= 0.0f) {
+                m.attackCooldown = kMonsterAtkSpeed;
+                m_ctx->playerHp -= m.damage;
+                m_playerHurtFlash = kHurtFlashDuration;
+            }
+        }
+
+        // Death: snap back to town with full HP. Lose nothing concrete yet
+        // since there's no XP / level / items -- that's v3's job.
+        if (m_ctx->playerHp <= 0.0f) {
+            m_ctx->playerHp = m_ctx->playerMaxHp;
+            Manager().Change(m_ctx->makeTown());
+        }
     }
+
+    void AppendActors(std::vector<RenderItem>& items) override {
+        for (const Monster& m : m_monsters) {
+            if (!m.alive) continue;
+            RenderItem it;
+            it.sortKey = m.pos.x + m.pos.y + 0.0005f;  // tie-break above tile, below player
+            it.kind = RenderItem::Kind::Monster;
+            it.monster = &m;
+            items.push_back(it);
+        }
+    }
+
+    void DrawWorldOverlay() override {
+        if (m_slashTimer <= 0.0f) return;
+        // Slash: a soft translucent quad one tile in front of the player,
+        // fades out as the timer ticks down. World-space, not HUD-space, so
+        // it scrolls with the camera.
+        Renderer2D& r = *m_ctx->renderer;
+        const Vec2 fd = FacingDir(m_facing);
+        const Vec2 worldHit = { m_player.x + fd.x, m_player.y + fd.y };
+        const Vec2 screen = TileToScreen(worldHit.x, worldHit.y, m_camera);
+        const float alpha = m_slashTimer / kSlashDuration;
+        const float w = 44.0f, h = 24.0f;
+        r.DrawQuad({screen.x - w * 0.5f, screen.y - h * 0.5f}, {w, h},
+                   Color(1.0f, 0.95f, 0.7f, 0.55f * alpha));
+    }
+
+    void DrawHudExtra() override {
+        Renderer2D& r = *m_ctx->renderer;
+        // Player HP bar bottom-left: dark backing + red foreground.
+        const float barX = 16.0f;
+        const float barY = m_ctx->screenH - 40.0f;
+        const float barW = 240.0f;
+        const float barH = 18.0f;
+        r.DrawQuad({barX, barY}, {barW, barH}, Color(0.12f, 0.08f, 0.08f, 0.85f));
+        const float fillW = (barW - 4.0f) * std::max(0.0f, m_ctx->playerHp / m_ctx->playerMaxHp);
+        r.DrawQuad({barX + 2.0f, barY + 2.0f}, {fillW, barH - 4.0f},
+                   Color(0.80f, 0.18f, 0.18f, 1.0f));
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "HP  %d / %d",
+                      (int)std::ceil(m_ctx->playerHp), (int)m_ctx->playerMaxHp);
+        r.DrawText(*m_ctx->font, buf, {barX + 8.0f, barY - 22.0f},
+                   Color(0.95f, 0.90f, 0.85f, 1.0f), 18.0f);
+    }
+
+    std::string HudLine() const override {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      "DUNGEON  -  WASD move, Space attack, E stairs, Esc title  -  kills %d",
+                      m_ctx->monstersKilled);
+        return buf;
+    }
+
+private:
+    // Iso-cardinal facing vector in tile-space, length ~1. Diagonals on
+    // screen, axis-aligned in world.
+    static Vec2 FacingDir(int facing) {
+        switch (facing) {
+            case 0: return { 0.707f,  0.707f}; // S
+            case 1: return {-0.707f, -0.707f}; // N
+            case 2: return { 0.707f, -0.707f}; // E
+            case 3: return {-0.707f,  0.707f}; // W
+        }
+        return {0.0f, 1.0f};
+    }
+
+    std::vector<Monster> m_monsters;
+    float m_attackCd   = 0.0f;
+    float m_slashTimer = 0.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -569,6 +854,9 @@ protected:
         m_sprites.Add("playerN",    32,  128, 32, 48);
         m_sprites.Add("playerE",    64,  128, 32, 48);
         m_sprites.Add("playerW",    96,  128, 32, 48);
+        // Row 3 (y=176..223): monsters, 32x48 each
+        m_sprites.Add("skeleton",   0,   176, 32, 48);
+        m_sprites.Add("zombie",     32,  176, 32, 48);
 
         m_ctx.renderer = &m_renderer;
         m_ctx.font     = &m_font;
