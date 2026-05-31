@@ -546,6 +546,11 @@ protected:
     virtual void DrawWorldOverlay() {}   // drawn after actors, under HUD (e.g. attack VFX)
     virtual void DrawHudExtra() {}
 
+    // Whether the fog of war applies in THIS scene. Tracks the global
+    // ctx->fogOfWar toggle by default; subclasses can override if a
+    // scene wants to always-on or always-off the fog.
+    virtual bool SceneFogOfWar() const { return m_ctx->fogOfWar; }
+
     void OnEnter() override {
         EnterWorld();
         // SceneManager runs OnUpdate then OnRender; on the FIRST frame after
@@ -659,7 +664,7 @@ protected:
     void RecomputeVisibility() {
         const int gw = m_grid.w, gh = m_grid.h;
         m_lightLevel.assign(static_cast<size_t>(gw) * gh, 0.0f);
-        if (!m_ctx->fogOfWar) {
+        if (!SceneFogOfWar()) {
             std::fill(m_lightLevel.begin(), m_lightLevel.end(), 1.0f);
             return;
         }
@@ -685,6 +690,43 @@ protected:
                     light = (kOuterR - d) / (kOuterR - kInnerR);
                 m_lightLevel[static_cast<size_t>(y) * gw + x] = light;
             }
+        }
+
+        // Wall extension: a wall adjacent to ANY visible cell becomes
+        // visible too. The chain has to iterate -- a perimeter corner like
+        // town's NW tile (0, 0) has no floor neighbour at all (both
+        // cardinal sides are wall, the rest is off-map), so it can only
+        // light up after the wall NEXT to it has been lit by the same
+        // pass. Without this loop, LOS stops at the first wall and the
+        // rest of the connected perimeter stays dark. We iterate over the
+        // FULL grid (not just the fog box) because chain targets like
+        // (0, 0) sit outside the box, and cap iterations at 32 as a
+        // safety stop for runaway loops.
+        for (int iter = 0; iter < 32; ++iter) {
+            bool anyChanged = false;
+            const std::vector<float> snapshot = m_lightLevel;
+            for (int y = 0; y < gh; ++y) {
+                for (int x = 0; x < gw; ++x) {
+                    if (snapshot[static_cast<size_t>(y) * gw + x] > 0.0f) continue;
+                    if (m_grid.At(x, y) != Tile::Wall) continue;
+                    float best = 0.0f;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            if (dx == 0 && dy == 0) continue;
+                            const int nx = x + dx, ny = y + dy;
+                            if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+                            if (m_grid.At(nx, ny) == Tile::Empty) continue;
+                            best = std::max(best,
+                                snapshot[static_cast<size_t>(ny) * gw + nx]);
+                        }
+                    }
+                    if (best > 0.0f) {
+                        m_lightLevel[static_cast<size_t>(y) * gw + x] = best;
+                        anyChanged = true;
+                    }
+                }
+            }
+            if (!anyChanged) break;
         }
     }
 
@@ -719,7 +761,7 @@ protected:
             for (int x = 0; x < m_grid.w; ++x) {
                 const Tile t = m_grid.At(x, y);
                 if (t == Tile::Empty || TileIsTall(t)) continue;
-                if (m_ctx->fogOfWar && TileLight(x, y) <= 0.0f) continue;
+                if (SceneFogOfWar() && TileLight(x, y) <= 0.0f) continue;
                 DrawTile(x, y, t);
             }
         }
@@ -773,8 +815,8 @@ protected:
     void DrawTile(int tx, int ty, Tile t) {
         Renderer2D& r = *m_ctx->renderer;
         const Vec2 center = TileToScreen((float)tx, (float)ty, m_camera);
-        const float L     = m_ctx->fogOfWar ? TileLight(tx, ty) : 1.0f;
-        const float WallL = m_ctx->fogOfWar ? WallLight(tx, ty) : 1.0f;
+        const float L     = SceneFogOfWar() ? TileLight(tx, ty) : 1.0f;
+        const float WallL = SceneFogOfWar() ? WallLight(tx, ty) : 1.0f;
         const Color floorTint(L, L, L, 1.0f);
 
         // Floor sprites are 64x32, anchored so the diamond centers on `center`.
@@ -916,7 +958,7 @@ protected:
         const TextureRegion& reg = m_ctx->sprites->Get(name);
         const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
                        center.y - kPlayerSpriteH + 4.0f};
-        const float L = m_ctx->fogOfWar
+        const float L = SceneFogOfWar()
             ? TileLight(static_cast<int>(std::lround(m.pos.x)),
                         static_cast<int>(std::lround(m.pos.y)))
             : 1.0f;
@@ -943,7 +985,7 @@ protected:
         Renderer2D& r = *m_ctx->renderer;
         const Vec2 center = TileToScreen(gi.pos.x, gi.pos.y, m_camera);
         const float bob = std::sin(gi.bobPhase) * 2.0f;
-        const float L = m_ctx->fogOfWar
+        const float L = SceneFogOfWar()
             ? TileLight(static_cast<int>(std::lround(gi.pos.x)),
                         static_cast<int>(std::lround(gi.pos.y)))
             : 1.0f;
@@ -1233,7 +1275,7 @@ protected:
     }
 
     bool IsRenderItemVisible(const RenderItem& it) const {
-        if (!m_ctx->fogOfWar) return true;
+        if (!SceneFogOfWar()) return true;
         if (it.kind == RenderItem::Kind::Player) return true;
         int tx = 0, ty = 0;
         switch (it.kind) {
