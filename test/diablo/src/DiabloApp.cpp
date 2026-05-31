@@ -771,9 +771,18 @@ protected:
         for (int y = 0; y < m_grid.h; ++y) {
             for (int x = 0; x < m_grid.w; ++x) {
                 const Tile t = m_grid.At(x, y);
-                if (t == Tile::Empty || TileIsTall(t)) continue;
+                if (t == Tile::Empty) continue;
                 if (SceneFogOfWar() && TileLight(x, y) <= 0.0f) continue;
-                DrawTile(x, y, t);
+                if (!TileIsTall(t)) {
+                    DrawTile(x, y, t);
+                } else if (t == Tile::Wall) {
+                    // Wall underlay: paint the scene's floor under every
+                    // wall tile here in the floor pass so adjacent walls
+                    // don't drop their neighbour's body when a later
+                    // wall's underlay would otherwise overdraw it
+                    // mid-sort.
+                    DrawWallUnderlay(x, y);
+                }
             }
         }
 
@@ -863,13 +872,10 @@ protected:
             case Tile::Dirt:   drawFloor(m_ctx->sprites->Get("floorDirt"));  break;
             case Tile::Stairs: drawFloor(m_ctx->sprites->Get("stairs"));     break;
             case Tile::Wall: {
-                // Walls are solid one-tile blocks. Draw the scene's floor
-                // underneath first so the wall sprite's transparent
-                // corners (above the cap, below the face hypotenuses)
-                // show the surrounding floor instead of the void.
-                const char* underlay = (SceneFloorKind() == Tile::Grass)
-                    ? "floorGrass" : "floorStone";
-                drawFloor(m_ctx->sprites->Get(underlay));
+                // The floor underlay for walls is painted in the floor
+                // pass (see DrawWallUnderlay) so later walls' underlays
+                // don't overwrite earlier walls' bodies. Here we only
+                // draw the wall sprite itself.
                 const Color tint = WallOcclusionTint(tx, ty);
                 const Color lit{tint.r * WallL, tint.g * WallL,
                                 tint.b * WallL, tint.a};
@@ -888,6 +894,18 @@ protected:
 
     // Pick the floor sprite that should appear UNDER the wall so the room's
     // ground plane reads continuously. Sample cardinal floor neighbours; the
+    void DrawWallUnderlay(int tx, int ty) {
+        Renderer2D& r = *m_ctx->renderer;
+        const Vec2 center = TileToScreen((float)tx, (float)ty, m_camera);
+        const float L = SceneFogOfWar() ? TileLight(tx, ty) : 1.0f;
+        const char* name = (SceneFloorKind() == Tile::Grass)
+            ? "floorGrass" : "floorStone";
+        r.DrawQuad({center.x - kHalfTileW, center.y},
+                   {kTileW, kFloorTileH},
+                   m_ctx->sprites->Get(name),
+                   Color(L, L, L, 1.0f));
+    }
+
     // dominant tile type wins.
     // Walls that visually sit between the camera and the player turn semi-
     // transparent so the figure stays readable -- the standard Diablo trick.
