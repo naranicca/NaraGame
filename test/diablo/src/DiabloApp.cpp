@@ -825,18 +825,24 @@ protected:
                                m_ctx->sprites->Get(name), lit);
                 };
 
+                // Two passes: UPPER arms first, LOWER arms last. Upper =
+                // wallH_W / wallV_N (cap at LOW sprite-y, HIGH on screen).
+                // Lower = wallH_E / wallV_S (cap at HIGH sprite-y, LOW on
+                // screen). At a corner where both share the same xOff, the
+                // LOWER arm's body would cover the UPPER arm's cap if drawn
+                // first; drawing LOWER last keeps both lit edges visible.
+                // Full slabs (both ends present on an axis) go in pass 1.
                 if (wE && wW)      drawSeg("wallH",   0.0f,         kTileW);
-                else if (wE)       drawSeg("wallH_E", kHalfTileW,   kHalfTileW);
                 else if (wW)       drawSeg("wallH_W", 0.0f,         kHalfTileW);
-
                 if (wN && wS)      drawSeg("wallV",   0.0f,         kTileW);
                 else if (wN)       drawSeg("wallV_N", kHalfTileW,   kHalfTileW);
-                else if (wS)       drawSeg("wallV_S", 0.0f,         kHalfTileW);
+
+                if (wE && !wW)     drawSeg("wallH_E", kHalfTileW,   kHalfTileW);
+                if (wS && !wN)     drawSeg("wallV_S", 0.0f,         kHalfTileW);
 
                 if (!wE && !wW && !wN && !wS) {
-                    // Isolated pillar: nothing else got drawn above, so put
-                    // both full slabs down as a + so the tile reads as a
-                    // post in the middle of the room.
+                    // Isolated pillar: nothing drew above; put both full
+                    // slabs down so the tile reads as a + post.
                     drawSeg("wallH", 0.0f, kTileW);
                     drawSeg("wallV", 0.0f, kTileW);
                 }
