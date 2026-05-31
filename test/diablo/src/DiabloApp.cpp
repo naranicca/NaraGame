@@ -89,24 +89,21 @@ enum class Tile : uint8_t {
     Floor    = 1,  // dungeon stone
     Grass    = 2,  // town
     Dirt     = 3,  // town path
-    Wall     = 4,  // thick perimeter wall, blocks movement, tall sprite
+    Wall     = 4,  // short half-height wall. Blocks movement + sight.
     Portal   = 5,  // interact -> enter dungeon
     Stairs   = 6,  // interact -> return to town
-    ThinWall = 7,  // slim interior wall / partition. Same gameplay rules
-                   // as Wall (blocks, hides), but a thinner pillar sprite
-                   // so dungeon rooms don't feel like solid mazes.
 };
 
 bool TileBlocksMovement(Tile t) {
-    return t == Tile::Wall || t == Tile::ThinWall || t == Tile::Empty;
+    return t == Tile::Wall || t == Tile::Empty;
 }
 
 bool TileIsTall(Tile t) {
-    return t == Tile::Wall || t == Tile::ThinWall || t == Tile::Portal;
+    return t == Tile::Wall || t == Tile::Portal;
 }
 
 bool TileBlocksSight(Tile t) {
-    return t == Tile::Wall || t == Tile::ThinWall;
+    return t == Tile::Wall;
 }
 
 struct Grid {
@@ -226,10 +223,9 @@ DungeonGenResult GenerateDungeon(uint32_t seed, int gw = 40, int gh = 40) {
     r.grid = std::move(walls);
 
     // Drop a few interior pillars inside the larger rooms (skip the spawn
-    // room so the player isn't penned in immediately). These count as Floor
-    // before the inner-vs-outer wall reclassification below picks them up
-    // and slims them down to ThinWall.
-    std::uniform_int_distribution<int> ix01(0, 1);
+    // room so the player isn't penned in immediately). All walls in the
+    // dungeon use the same short-wall sprite, so the pillars and the
+    // perimeter both render with the same look.
     for (size_t i = 1; i < rooms.size(); ++i) {
         const Room& rm = rooms[i];
         const int area = rm.w * rm.h;
@@ -241,25 +237,6 @@ DungeonGenResult GenerateDungeon(uint32_t seed, int gw = 40, int gh = 40) {
             const int x = rx(rng), y = ry(rng);
             if (r.grid.At(x, y) == Tile::Floor)
                 r.grid.Set(x, y, Tile::Wall);
-        }
-    }
-
-    // Reclassify walls: those fully enclosed by floors / other walls (no
-    // Empty neighbour anywhere in the 8-cell box) are INTERIOR -- redrawn
-    // as the slim ThinWall pillar. Walls touching the outside void stay
-    // thick. Town walls (drawn in BuildTown) all border Empty so they keep
-    // their original look.
-    for (int y = 0; y < gh; ++y) {
-        for (int x = 0; x < gw; ++x) {
-            if (r.grid.At(x, y) != Tile::Wall) continue;
-            bool hasEmpty = false;
-            for (int dy = -1; dy <= 1 && !hasEmpty; ++dy) {
-                for (int dx = -1; dx <= 1 && !hasEmpty; ++dx) {
-                    if (dx == 0 && dy == 0) continue;
-                    if (r.grid.At(x + dx, y + dy) == Tile::Empty) hasEmpty = true;
-                }
-            }
-            if (!hasEmpty) r.grid.Set(x, y, Tile::ThinWall);
         }
     }
 
@@ -826,13 +803,12 @@ protected:
             case Tile::Dirt:   drawFloor(m_ctx->sprites->Get("floorDirt"));  break;
             case Tile::Stairs: drawFloor(m_ctx->sprites->Get("stairs"));     break;
             case Tile::Wall:
-                drawTall(m_ctx->sprites->Get("wall"), WallOcclusionTint(tx, ty));
-                break;
-            case Tile::ThinWall:
-                // Thin walls sit on a floor tile (the room around them keeps
-                // showing through the gap), then the slim pillar on top.
+                // Short walls sit on a floor tile -- the room's ground plane
+                // continues right up to the wall, then the wall stands on
+                // top. Without the underlay, interior pillars would show a
+                // black gap directly under them.
                 drawFloor(m_ctx->sprites->Get("floorStone"));
-                drawTall (m_ctx->sprites->Get("thinWall"), WallOcclusionTint(tx, ty));
+                drawTall (m_ctx->sprites->Get("wall"), WallOcclusionTint(tx, ty));
                 break;
             case Tile::Portal:
                 // Portal floats above a floor tile -- draw stone first, then the
@@ -1112,7 +1088,6 @@ protected:
                     case Tile::Grass:  c = Color(0.28f, 0.50f, 0.24f, 1.0f); break;
                     case Tile::Dirt:   c = Color(0.55f, 0.42f, 0.28f, 1.0f); break;
                     case Tile::Wall:     c = Color(0.70f, 0.68f, 0.64f, 1.0f); break;
-                    case Tile::ThinWall: c = Color(0.55f, 0.52f, 0.48f, 1.0f); break;
                     case Tile::Portal:   c = Color(0.30f, 0.65f, 1.00f, 1.0f); break;
                     case Tile::Stairs: c = Color(1.00f, 0.85f, 0.30f, 1.0f); break;
                     default: continue;
@@ -1551,7 +1526,6 @@ protected:
         // Row 1 (y=32..127): tall things, 64x96 each
         m_sprites.Add("wall",       0,   32, 64, 96);
         m_sprites.Add("portal",     64,  32, 64, 96);
-        m_sprites.Add("thinWall",   128, 32, 64, 96);
         // Row 2 (y=128..175): player, 32x48 each
         m_sprites.Add("playerS",    0,   128, 32, 48);
         m_sprites.Add("playerN",    32,  128, 32, 48);
