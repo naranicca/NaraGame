@@ -602,20 +602,20 @@ protected:
             else
                 m_facing = (dy > 0.0f) ? 0 : 1;   // S / N
         }
-        const float stepX = dx * kPlayerSpeed * dt;
-        const float stepY = dy * kPlayerSpeed * dt;
+        // Clamp dt to guard against pause/hitch spikes teleporting the
+        // player across tiles.
+        const float dtClamped = std::min(dt, 1.0f / 30.0f);
+        const float stepX = dx * kPlayerSpeed * dtClamped;
+        const float stepY = dy * kPlayerSpeed * dtClamped;
 
-        // Axis-separated collision: try X then Y so sliding along a wall works.
-        auto blocked = [&](float ftx, float fty) {
-            const int tx = (int)std::floor(ftx);
-            const int ty = (int)std::floor(fty);
-            return TileBlocksMovement(m_grid.At(tx, ty));
-        };
-        const float kPad = 0.25f;
+        // Axis-separated tile-blocked collision. kPad keeps the player
+        // half-radius from the tile boundary so they don't visibly clip
+        // into the wall sprite's iso footprint.
+        const float kPad = 0.20f;
         const float testX = m_player.x + stepX + (stepX > 0 ? kPad : -kPad);
-        if (!blocked(testX, m_player.y)) m_player.x += stepX;
+        if (!IsBlockedAt(testX, m_player.y)) m_player.x += stepX;
         const float testY = m_player.y + stepY + (stepY > 0 ? kPad : -kPad);
-        if (!blocked(m_player.x, testY)) m_player.y += stepY;
+        if (!IsBlockedAt(m_player.x, testY)) m_player.y += stepY;
 
         // Auto-interact: walking onto the portal (in town) or the stairs
         // (in dungeon) triggers OnInteract() automatically -- no key press.
@@ -636,6 +636,14 @@ protected:
         OnUpdateExtra(dt);
 
         RecomputeVisibility();
+    }
+
+    // Tile-based collision. Walls fill the whole tile, so a test point
+    // inside a wall tile is blocked outright.
+    bool IsBlockedAt(float ftx, float fty) const {
+        const int tx = static_cast<int>(std::floor(ftx));
+        const int ty = static_cast<int>(std::floor(fty));
+        return TileBlocksMovement(m_grid.At(tx, ty));
     }
 
     // Bresenham-style LOS: walk a straight line from the player's tile to the
@@ -845,49 +853,15 @@ protected:
             case Tile::Dirt:   drawFloor(m_ctx->sprites->Get("floorDirt"));  break;
             case Tile::Stairs: drawFloor(m_ctx->sprites->Get("stairs"));     break;
             case Tile::Wall: {
-                // Walls are thin iso slabs. Per tile we draw only the ARMS
-                // that connect to a wall neighbour -- a corner gets the L,
-                // a T-junction gets the T, a + gets the +, a dead-end
-                // straight wall gets the full slab, and an isolated pillar
-                // gets a full + cross. No painted arms ever stick out into
-                // void where there's nothing to plug into.
-                drawFloor(m_ctx->sprites->Get(WallFloorUnderlay(tx, ty)));
+                // Walls are solid one-tile blocks. The sprite fills the
+                // tile diamond and extends upward by the wall height.
                 const Color tint = WallOcclusionTint(tx, ty);
-                const bool wE = m_grid.At(tx + 1, ty) == Tile::Wall;
-                const bool wW = m_grid.At(tx - 1, ty) == Tile::Wall;
-                const bool wN = m_grid.At(tx, ty - 1) == Tile::Wall;
-                const bool wS = m_grid.At(tx, ty + 1) == Tile::Wall;
-
-                auto drawSeg = [&](const char* name, float xOff, float w) {
-                    const Vec2 pos{center.x - kHalfTileW + xOff,
-                                   center.y + kHalfTileH - kWallSpriteH};
-                    const Color lit{tint.r * WallL, tint.g * WallL,
-                                    tint.b * WallL, tint.a};
-                    r.DrawQuad(pos, {w, kWallSpriteH},
-                               m_ctx->sprites->Get(name), lit);
-                };
-
-                // Two passes: UPPER arms first, LOWER arms last. Upper =
-                // wallH_W / wallV_N (cap at LOW sprite-y, HIGH on screen).
-                // Lower = wallH_E / wallV_S (cap at HIGH sprite-y, LOW on
-                // screen). At a corner where both share the same xOff, the
-                // LOWER arm's body would cover the UPPER arm's cap if drawn
-                // first; drawing LOWER last keeps both lit edges visible.
-                // Full slabs (both ends present on an axis) go in pass 1.
-                if (wE && wW)      drawSeg("wallH",   0.0f,         kTileW);
-                else if (wW)       drawSeg("wallH_W", 0.0f,         kHalfTileW);
-                if (wN && wS)      drawSeg("wallV",   0.0f,         kTileW);
-                else if (wN)       drawSeg("wallV_N", kHalfTileW,   kHalfTileW);
-
-                if (wE && !wW)     drawSeg("wallH_E", kHalfTileW,   kHalfTileW);
-                if (wS && !wN)     drawSeg("wallV_S", 0.0f,         kHalfTileW);
-
-                if (!wE && !wW && !wN && !wS) {
-                    // Isolated pillar: nothing drew above; put both full
-                    // slabs down so the tile reads as a + post.
-                    drawSeg("wallH", 0.0f, kTileW);
-                    drawSeg("wallV", 0.0f, kTileW);
-                }
+                const Color lit{tint.r * WallL, tint.g * WallL,
+                                tint.b * WallL, tint.a};
+                r.DrawQuad({center.x - kHalfTileW,
+                            center.y + kHalfTileH - kWallSpriteH},
+                           {kTileW, kWallSpriteH},
+                           m_ctx->sprites->Get("wall"), lit);
                 break;
             }
             case Tile::Portal:
@@ -903,33 +877,20 @@ protected:
     // Pick the floor sprite that should appear UNDER the wall so the room's
     // ground plane reads continuously. Sample cardinal floor neighbours; the
     // dominant tile type wins.
-    const char* WallFloorUnderlay(int tx, int ty) const {
-        int grass = 0, dirt = 0, stone = 0;
-        constexpr int dx[4] = {0, 0, 1, -1};
-        constexpr int dy[4] = {1, -1, 0, 0};
-        for (int d = 0; d < 4; ++d) {
-            const Tile t = m_grid.At(tx + dx[d], ty + dy[d]);
-            if (t == Tile::Grass) ++grass;
-            else if (t == Tile::Dirt) ++dirt;
-            else if (t == Tile::Floor) ++stone;
-        }
-        // Strict >: a 0-grass wall surrounded by 0 floors falls through
-        // to floorStone instead of incorrectly defaulting to grass.
-        if (grass > stone && grass > dirt) return "floorGrass";
-        if (dirt  > stone && dirt  > grass) return "floorDirt";
-        return "floorStone";
-    }
-
     // Walls that visually sit between the camera and the player turn semi-
     // transparent so the figure stays readable -- the standard Diablo trick.
     // The occlusion zone is a diamond 0..3 iso tiles "forward" of the player
     // (sum > player sum) and within roughly one tile of the player's iso
     // column. Inside that zone we return a 40% alpha tint; otherwise white.
     Color WallOcclusionTint(int tx, int ty) const {
+        // Fade when the wall draws AFTER the player and would obscure
+        // them on screen. fwd > 0 iff wall_sort > player_sort (compared
+        // as tile coords -- not slab centres, which over-trigger for
+        // walls that already draw BEHIND the player).
         const float dx = static_cast<float>(tx) - m_player.x;
         const float dy = static_cast<float>(ty) - m_player.y;
-        const float fwd  = dx + dy;    // > 0 means wall is in front of player
-        const float side = dx - dy;    // 0 means same iso-column as the player
+        const float fwd  = dx + dy;
+        const float side = dx - dy;
         if (fwd > 0.0f && fwd < 3.5f && std::fabs(side) < 1.6f)
             return Color(1.0f, 1.0f, 1.0f, 0.40f);
         return Color::White();
@@ -1423,11 +1384,9 @@ protected:
                 const float uy = dy / dist;
                 const float stepX = ux * m.speed * dt;
                 const float stepY = uy * m.speed * dt;
-                if (!TileBlocksMovement(m_grid.At(
-                        (int)std::floor(m.pos.x + stepX), (int)std::floor(m.pos.y))))
+                if (!IsBlockedAt(m.pos.x + stepX, m.pos.y))
                     m.pos.x += stepX;
-                if (!TileBlocksMovement(m_grid.At(
-                        (int)std::floor(m.pos.x), (int)std::floor(m.pos.y + stepY))))
+                if (!IsBlockedAt(m.pos.x, m.pos.y + stepY))
                     m.pos.y += stepY;
             } else if (m.attackCooldown <= 0.0f) {
                 m.attackCooldown = kMonsterAtkSpeed;
@@ -1623,17 +1582,12 @@ protected:
         m_sprites.Add("floorGrass", 64,  0, 64, 32);
         m_sprites.Add("floorDirt",  128, 0, 64, 32);
         m_sprites.Add("stairs",     192, 0, 64, 32);
-        // Row 1 (y=32..127): tall things, 64x96 each
-        m_sprites.Add("wallH",      0,   32, 64, 96);  // E-W slab (full)
+        // Row 1 (y=32..127): tall things, 64x96 each. One opaque wall
+        // sprite per tile -- no orientation variants, no half-arm
+        // overlays. Walls are solid tiles in tile-space too, so the
+        // sprite just has to fill the diamond and the lit cap on top.
+        m_sprites.Add("wall",       0,   32, 64, 96);
         m_sprites.Add("portal",     64,  32, 64, 96);
-        m_sprites.Add("wallV",      128, 32, 64, 96);  // N-S slab (full)
-        // Half-slab regions overlap the full slabs' pixels but pick out
-        // just the east/west or north/south halves of the parallelogram so
-        // corner / T-junction tiles can draw ARMS instead of full crosses.
-        m_sprites.Add("wallH_W",    0,   32, 32, 96);  // west half of E-W slab
-        m_sprites.Add("wallH_E",    32,  32, 32, 96);  // east half
-        m_sprites.Add("wallV_S",    128, 32, 32, 96);  // south half of N-S slab
-        m_sprites.Add("wallV_N",    160, 32, 32, 96);  // north half
         // Row 2 (y=128..175): player, 32x48 each
         m_sprites.Add("playerS",    0,   128, 32, 48);
         m_sprites.Add("playerN",    32,  128, 32, 48);
