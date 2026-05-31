@@ -813,8 +813,17 @@ protected:
                 // ground so the wall reads as standing on the room's
                 // floor, not on a stone patch surrounded by grass.
                 drawFloor(m_ctx->sprites->Get(WallFloorUnderlay(tx, ty)));
-                const char* sprite = WallIsHorizontal(tx, ty) ? "wallH" : "wallV";
-                drawTall(m_ctx->sprites->Get(sprite), WallOcclusionTint(tx, ty));
+                const Color tint = WallOcclusionTint(tx, ty);
+                if (WallNeedsBothSlabs(tx, ty)) {
+                    // Corners / pillars: stack the two slab sprites so the L
+                    // (or "+") at the junction is complete from both sides.
+                    drawTall(m_ctx->sprites->Get("wallH"), tint);
+                    drawTall(m_ctx->sprites->Get("wallV"), tint);
+                } else {
+                    drawTall(m_ctx->sprites->Get(
+                                 WallIsHorizontal(tx, ty) ? "wallH" : "wallV"),
+                             tint);
+                }
                 break;
             }
             case Tile::Portal:
@@ -825,6 +834,28 @@ protected:
                 break;
             case Tile::Empty: break;
         }
+    }
+
+    // A wall needs BOTH slab sprites when it sits at the join of an E-W and
+    // an N-S wall run -- a room corner (floor on a diagonal but not the two
+    // cardinal sides reaching it), or an interior pillar surrounded by
+    // floor. Drawing only one slab there leaves a visible notch where the
+    // perpendicular wall would have plugged in.
+    bool WallNeedsBothSlabs(int tx, int ty) const {
+        auto isFloor = [&](int x, int y) {
+            const Tile t = m_grid.At(x, y);
+            return t == Tile::Floor || t == Tile::Grass || t == Tile::Dirt;
+        };
+        const bool hasYFloor = isFloor(tx, ty - 1) || isFloor(tx, ty + 1);
+        const bool hasXFloor = isFloor(tx + 1, ty) || isFloor(tx - 1, ty);
+        if (hasYFloor && hasXFloor) return true;            // pillar / T-junction
+        if (!hasYFloor && !hasXFloor) {
+            // Outside-corner wall: no cardinal floor, but a diagonal cell
+            // sits in a room (which means perpendicular walls meet here).
+            return isFloor(tx - 1, ty - 1) || isFloor(tx + 1, ty - 1)
+                || isFloor(tx - 1, ty + 1) || isFloor(tx + 1, ty + 1);
+        }
+        return false;
     }
 
     // Decide which way a wall tile "runs". A wall with a Floor cell directly
