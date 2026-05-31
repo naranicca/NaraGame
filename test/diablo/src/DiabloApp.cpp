@@ -447,6 +447,7 @@ struct GameContext {
     float playerAtkSpeed     = 0.45f;  // seconds per swing
     int   monstersKilled     = 0;
     int   itemsPickedUp      = 0;
+    bool  fogOfWar           = true;   // toggled with V; persists across scenes
 
     // Inventory + equipment.
     //   `equippedWeapon` / `equippedArmor` hold the active gear; `inventory`
@@ -523,12 +524,22 @@ protected:
     virtual void DrawWorldOverlay() {}   // drawn after actors, under HUD (e.g. attack VFX)
     virtual void DrawHudExtra() {}
 
-    void OnEnter() override { EnterWorld(); }
+    void OnEnter() override {
+        EnterWorld();
+        // SceneManager runs OnUpdate then OnRender; on the FIRST frame after
+        // a Change() the manager has already applied the pending push, so
+        // OnEnter happens but OnUpdate for the new scene is skipped this
+        // tick. That leaves m_visible empty and IsRenderItemVisible blows
+        // up on the very first draw. Prime it here.
+        RecomputeVisibility();
+    }
 
     void OnUpdate(float dtRaw) override {
         const float dt = Min(dtRaw, 1.0f / 30.0f);
         if (Input::IsKeyPressed(Key::I) || Input::IsKeyPressed(Key::Tab))
             m_inventoryOpen = !m_inventoryOpen;
+        if (Input::IsKeyPressed(Key::V))
+            m_ctx->fogOfWar = !m_ctx->fogOfWar;
         if (Input::IsKeyPressed(Key::Escape)) {
             if (m_inventoryOpen) { m_inventoryOpen = false; return; }
             Manager().Change(m_ctx->makeTitle());
@@ -591,6 +602,54 @@ protected:
         }
 
         OnUpdateExtra(dt);
+
+        RecomputeVisibility();
+    }
+
+    // Bresenham-style LOS: walk a straight line from the player's tile to the
+    // target. If any cell along the way (not counting the endpoints) is a
+    // Wall, the target is hidden. Used by the fog overlay to decide which
+    // tiles get blacked out.
+    bool HasLineOfSight(int x0, int y0, int x1, int y1) const {
+        int dx = std::abs(x1 - x0);
+        int dy = -std::abs(y1 - y0);
+        int sx = x0 < x1 ? 1 : -1;
+        int sy = y0 < y1 ? 1 : -1;
+        int err = dx + dy;
+        while (true) {
+            int e2 = 2 * err;
+            if (e2 >= dy) { err += dy; x0 += sx; }
+            if (e2 <= dx) { err += dx; y0 += sy; }
+            if (x0 == x1 && y0 == y1) return true;
+            if (m_grid.At(x0, y0) == Tile::Wall) return false;
+        }
+    }
+
+    // Recompute the visibility grid each frame. Tiles inside a fixed radius
+    // and with an unblocked line of sight from the player are visible; the
+    // rest stay false and get painted over with black in DrawFog().
+    void RecomputeVisibility() {
+        const int gw = m_grid.w, gh = m_grid.h;
+        m_visible.assign(static_cast<size_t>(gw) * gh, false);
+        if (!m_ctx->fogOfWar) {
+            std::fill(m_visible.begin(), m_visible.end(), true);
+            return;
+        }
+        constexpr int kRadius = 9;
+        const int px = (int)std::lround(m_player.x);
+        const int py = (int)std::lround(m_player.y);
+        const int x0 = std::max(0, px - kRadius);
+        const int x1 = std::min(gw - 1, px + kRadius);
+        const int y0 = std::max(0, py - kRadius);
+        const int y1 = std::min(gh - 1, py + kRadius);
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+                const int ddx = x - px, ddy = y - py;
+                if (ddx * ddx + ddy * ddy > kRadius * kRadius) continue;
+                if ((x == px && y == py) || HasLineOfSight(px, py, x, y))
+                    m_visible[static_cast<size_t>(y) * gw + x] = true;
+            }
+        }
     }
 
     void OnRender() override {
@@ -606,9 +665,12 @@ protected:
         // Engine doesn't clear the backbuffer in BeginFrame, so paint a full
         // background here. Without this, leftover pixels from the prior scene
         // (most visibly the title text) bleed through wherever the iso grid
-        // doesn't cover the screen.
+        // doesn't cover the screen. With fog enabled the background also
+        // serves as the "out of sight" colour -- hidden tiles aren't drawn
+        // and just show through to whatever's behind, so we want that to
+        // be pure void rather than a coloured tint.
         r.DrawQuad({0.0f, 0.0f}, {m_ctx->screenW, m_ctx->screenH},
-                   Color(0.06f, 0.05f, 0.08f, 1.0f));
+                   Color(0.0f, 0.0f, 0.0f, 1.0f));
 
         // Draw tiles + actors in painter order (back-to-front = ascending
         // (tx + ty)). Floor tiles bias their sortKey down a hair so the
@@ -638,6 +700,7 @@ protected:
                   [](const RenderItem& a, const RenderItem& b) { return a.sortKey < b.sortKey; });
 
         for (const RenderItem& it : items) {
+            if (!IsRenderItemVisible(it)) continue;
             switch (it.kind) {
                 case RenderItem::Kind::Tile:       DrawTile(it.tx, it.ty, it.tile); break;
                 case RenderItem::Kind::Player:     DrawPlayer();                    break;
@@ -1013,6 +1076,28 @@ protected:
                    Color(0.55f, 0.5f, 0.45f, 1.0f), 12.0f);
     }
 
+    bool IsRenderItemVisible(const RenderItem& it) const {
+        if (!m_ctx->fogOfWar) return true;
+        if (it.kind == RenderItem::Kind::Player) return true;
+        int tx = 0, ty = 0;
+        switch (it.kind) {
+            case RenderItem::Kind::Tile:
+                tx = it.tx; ty = it.ty; break;
+            case RenderItem::Kind::Monster:
+                tx = static_cast<int>(std::lround(it.monster->pos.x));
+                ty = static_cast<int>(std::lround(it.monster->pos.y));
+                break;
+            case RenderItem::Kind::GroundItem:
+                tx = static_cast<int>(std::lround(it.groundItem->pos.x));
+                ty = static_cast<int>(std::lround(it.groundItem->pos.y));
+                break;
+            case RenderItem::Kind::Player: return true;
+        }
+        if (tx < 0 || ty < 0 || tx >= m_grid.w || ty >= m_grid.h) return false;
+        return m_visible[static_cast<size_t>(ty) * m_grid.w + tx];
+    }
+
+    std::vector<bool> m_visible;          // recomputed every frame in OnUpdate
     bool  m_inventoryOpen   = false;
     float m_playerHurtFlash = 0.0f;   // ticked down by combat code; gated on player tint
 
@@ -1043,9 +1128,10 @@ protected:
         Manager().Change(m_ctx->makeDungeon());
     }
     std::string HudLine() const override {
-        char buf[200];
+        char buf[240];
         std::snprintf(buf, sizeof(buf),
-                      "TOWN  -  WASD  -  E portal  -  I inventory  -  visits %d  bag %d",
+                      "TOWN  -  WASD  -  E portal  -  I inventory  -  V fog %s  -  visits %d  bag %d",
+                      m_ctx->fogOfWar ? "on" : "off",
                       m_ctx->dungeonVisits, (int)m_ctx->inventory.size());
         return buf;
     }
@@ -1256,9 +1342,10 @@ protected:
     }
 
     std::string HudLine() const override {
-        char buf[200];
+        char buf[240];
         std::snprintf(buf, sizeof(buf),
-                      "DUNGEON  -  WASD/Space  -  E stairs  -  I inventory  -  kills %d  items %d",
+                      "DUNGEON  -  WASD/Space  -  E stairs  -  I inventory  -  V fog %s  -  kills %d  items %d",
+                      m_ctx->fogOfWar ? "on" : "off",
                       m_ctx->monstersKilled, m_ctx->itemsPickedUp);
         return buf;
     }
