@@ -827,18 +827,25 @@ protected:
         const float WallL = SceneFogOfWar() ? WallLight(tx, ty) : 1.0f;
         const Color floorTint(L, L, L, 1.0f);
 
-        // Floor sprites are 64x32, anchored so the diamond centers on `center`.
+        // TileToScreen(tx, ty) returns the NORTH corner of the tile diamond
+        // on screen (since world point (tx, ty) is the tile's NW vertex).
+        // The diamond's centre is one halfH south of that, and its south
+        // corner is one full tile height south of N.
+        //
+        // Floor sprites are 64x32 with the diamond centred at the sprite's
+        // own centre, so the sprite's top-left lands at (center.x - halfW,
+        // center.y) for the diamond to align with the tile.
         auto drawFloor = [&](const TextureRegion& region) {
-            const Vec2 pos{center.x - kHalfTileW, center.y - kHalfTileH};
+            const Vec2 pos{center.x - kHalfTileW, center.y};
             r.DrawQuad(pos, {kTileW, kFloorTileH}, region, floorTint);
         };
         auto drawTall = [&](const TextureRegion& region,
                             const Color& tint = Color::White()) {
-            // Tall sprites (64x96) anchor with the BOTTOM of the diamond at
-            // (center.x, center.y + halfH). The top of the sprite then sits
-            // at y = center.y + halfH - 96.
+            // Tall sprites (64x96) anchor their bottom at the floor's SOUTH
+            // corner -- screen y = center.y + tile height. Sprite top-left
+            // is then at y = center.y + tile height - sprite height.
             const Vec2 pos{center.x - kHalfTileW,
-                           center.y + kHalfTileH - kWallSpriteH};
+                           center.y + kTileH - kWallSpriteH};
             // Light multiplies into RGB; the existing alpha (e.g. the wall
             // occlusion fade) is preserved. Walls use the blended WallL so
             // they fade alongside the floors they border instead of
@@ -883,16 +890,17 @@ protected:
     // (sum > player sum) and within roughly one tile of the player's iso
     // column. Inside that zone we return a 40% alpha tint; otherwise white.
     Color WallOcclusionTint(int tx, int ty) const {
-        // Fade when the wall draws AFTER the player and would obscure
-        // them on screen. fwd > 0 iff wall_sort > player_sort (compared
-        // as tile coords -- not slab centres, which over-trigger for
-        // walls that already draw BEHIND the player).
+        // Fade walls at or in front of the player's iso column so a wall
+        // standing in the player's render layer doesn't bury the figure.
+        // fwd >= 0 catches the sort-key ties at corners too (wall (1, 19)
+        // and player at (1.5, 18.5) both sum to 20.0 -- the wall would
+        // otherwise paint over the player half the time).
         const float dx = static_cast<float>(tx) - m_player.x;
         const float dy = static_cast<float>(ty) - m_player.y;
         const float fwd  = dx + dy;
         const float side = dx - dy;
-        if (fwd > 0.0f && fwd < 3.5f && std::fabs(side) < 1.6f)
-            return Color(1.0f, 1.0f, 1.0f, 0.40f);
+        if (fwd >= 0.0f && fwd < 3.5f && std::fabs(side) < 1.6f)
+            return Color(1.0f, 1.0f, 1.0f, 0.50f);
         return Color::White();
     }
 
@@ -901,10 +909,10 @@ protected:
         const Vec2 center = TileToScreen(m_player.x, m_player.y, m_camera);
         const char* names[4] = {"playerS", "playerN", "playerE", "playerW"};
         const TextureRegion& reg = m_ctx->sprites->Get(names[m_facing]);
-        // Anchor the player's feet at the tile center (slightly raised so the
-        // sprite doesn't visually sink into the diamond).
+        // Anchor the sprite's bottom at the tile's floor centre, i.e. the
+        // exact screen point TileToScreen(player.x, player.y) returns.
         const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
-                       center.y - kPlayerSpriteH + 4.0f};
+                       center.y - kPlayerSpriteH};
         const Color tint = (m_ctx->playerHp < m_ctx->EffectiveMaxHp() && m_playerHurtFlash > 0.0f)
             ? Color(1.0f, 0.4f, 0.4f, 1.0f)
             : Color::White();
@@ -918,7 +926,7 @@ protected:
         const char* name = (m.kind == Monster::Kind::Skeleton) ? "skeleton" : "zombie";
         const TextureRegion& reg = m_ctx->sprites->Get(name);
         const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
-                       center.y - kPlayerSpriteH + 4.0f};
+                       center.y - kPlayerSpriteH};
         const float L = SceneFogOfWar()
             ? TileLight(static_cast<int>(std::lround(m.pos.x)),
                         static_cast<int>(std::lround(m.pos.y)))
@@ -1288,9 +1296,10 @@ protected:
     std::string HudLine() const override {
         char buf[240];
         std::snprintf(buf, sizeof(buf),
-                      "TOWN  -  WASD walk onto portal  -  I inventory  -  V fog %s  -  visits %d  bag %d",
+                      "TOWN  -  WASD walk  -  V fog %s  -  visits %d  bag %d  -  xy %.2f,%.2f",
                       m_ctx->fogOfWar ? "on" : "off",
-                      m_ctx->dungeonVisits, (int)m_ctx->inventory.size());
+                      m_ctx->dungeonVisits, (int)m_ctx->inventory.size(),
+                      m_player.x, m_player.y);
         return buf;
     }
 };
