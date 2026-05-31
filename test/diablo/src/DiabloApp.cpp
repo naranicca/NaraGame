@@ -630,29 +630,38 @@ protected:
         }
     }
 
-    // Recompute the visibility grid each frame. Tiles inside a fixed radius
-    // and with an unblocked line of sight from the player are visible; the
-    // rest stay false and get painted over with black in DrawFog().
+    // Per-tile light level in [0, 1]. 1 = fully lit, 0 = pitch black; the
+    // band in between gets a soft fog where sprites tint darker the further
+    // they are from the player but are still readable. Tiles with no line
+    // of sight stay at 0. Toggle off -> everything = 1.
     void RecomputeVisibility() {
         const int gw = m_grid.w, gh = m_grid.h;
-        m_visible.assign(static_cast<size_t>(gw) * gh, false);
+        m_lightLevel.assign(static_cast<size_t>(gw) * gh, 0.0f);
         if (!m_ctx->fogOfWar) {
-            std::fill(m_visible.begin(), m_visible.end(), true);
+            std::fill(m_lightLevel.begin(), m_lightLevel.end(), 1.0f);
             return;
         }
-        constexpr int kRadius = 9;
+        constexpr float kInnerR = 6.0f;  // < this distance = full bright
+        constexpr float kOuterR = 9.0f;  // > this distance = fully dark
         const int px = (int)std::lround(m_player.x);
         const int py = (int)std::lround(m_player.y);
-        const int x0 = std::max(0, px - kRadius);
-        const int x1 = std::min(gw - 1, px + kRadius);
-        const int y0 = std::max(0, py - kRadius);
-        const int y1 = std::min(gh - 1, py + kRadius);
+        const int rInt = static_cast<int>(kOuterR);
+        const int x0 = std::max(0, px - rInt);
+        const int x1 = std::min(gw - 1, px + rInt);
+        const int y0 = std::max(0, py - rInt);
+        const int y1 = std::min(gh - 1, py + rInt);
         for (int y = y0; y <= y1; ++y) {
             for (int x = x0; x <= x1; ++x) {
-                const int ddx = x - px, ddy = y - py;
-                if (ddx * ddx + ddy * ddy > kRadius * kRadius) continue;
-                if ((x == px && y == py) || HasLineOfSight(px, py, x, y))
-                    m_visible[static_cast<size_t>(y) * gw + x] = true;
+                const float ddx = static_cast<float>(x - px);
+                const float ddy = static_cast<float>(y - py);
+                const float d = std::sqrt(ddx * ddx + ddy * ddy);
+                if (d > kOuterR) continue;
+                if ((x != px || y != py) && !HasLineOfSight(px, py, x, y))
+                    continue;
+                float light = 1.0f;
+                if (d > kInnerR)
+                    light = (kOuterR - d) / (kOuterR - kInnerR);
+                m_lightLevel[static_cast<size_t>(y) * gw + x] = light;
             }
         }
     }
@@ -677,18 +686,30 @@ protected:
         r.DrawQuad({0.0f, 0.0f}, {m_ctx->screenW, m_ctx->screenH},
                    Color(0.0f, 0.0f, 0.0f, 1.0f));
 
-        // Draw tiles + actors in painter order (back-to-front = ascending
-        // (tx + ty)). Floor tiles bias their sortKey down a hair so the
-        // player and wall sprites at the same logical (x+y) draw on top of
-        // the floor underneath them.
+        // Two-pass painter: floors first (the ground plane lies under
+        // everything), then everything else (walls, actors, loot, portal
+        // glow) sorted by iso depth. A single mixed pass biased floors
+        // down by a small epsilon, but the player's float (px + py) could
+        // still land BELOW the integer (a + b) of a nearby floor tile in
+        // front of them -- that floor would then draw on top of the
+        // figure and clip the character's feet.
+        for (int y = 0; y < m_grid.h; ++y) {
+            for (int x = 0; x < m_grid.w; ++x) {
+                const Tile t = m_grid.At(x, y);
+                if (t == Tile::Empty || TileIsTall(t)) continue;
+                if (m_ctx->fogOfWar && TileLight(x, y) <= 0.0f) continue;
+                DrawTile(x, y, t);
+            }
+        }
+
         std::vector<RenderItem> items;
         items.reserve(m_grid.w * m_grid.h + 4);
         for (int y = 0; y < m_grid.h; ++y) {
             for (int x = 0; x < m_grid.w; ++x) {
                 const Tile t = m_grid.At(x, y);
-                if (t == Tile::Empty) continue;
+                if (t == Tile::Empty || !TileIsTall(t)) continue;
                 RenderItem it;
-                it.sortKey = (float)(x + y) - (TileIsTall(t) ? 0.0f : 0.001f);
+                it.sortKey = static_cast<float>(x + y);
                 it.kind = RenderItem::Kind::Tile;
                 it.tx = x; it.ty = y; it.tile = t;
                 items.push_back(it);
@@ -730,11 +751,14 @@ protected:
     void DrawTile(int tx, int ty, Tile t) {
         Renderer2D& r = *m_ctx->renderer;
         const Vec2 center = TileToScreen((float)tx, (float)ty, m_camera);
+        const float L     = m_ctx->fogOfWar ? TileLight(tx, ty) : 1.0f;
+        const float WallL = m_ctx->fogOfWar ? WallLight(tx, ty) : 1.0f;
+        const Color floorTint(L, L, L, 1.0f);
 
         // Floor sprites are 64x32, anchored so the diamond centers on `center`.
         auto drawFloor = [&](const TextureRegion& region) {
             const Vec2 pos{center.x - kHalfTileW, center.y - kHalfTileH};
-            r.DrawQuad(pos, {kTileW, kFloorTileH}, region);
+            r.DrawQuad(pos, {kTileW, kFloorTileH}, region, floorTint);
         };
         auto drawTall = [&](const TextureRegion& region,
                             const Color& tint = Color::White()) {
@@ -743,7 +767,12 @@ protected:
             // at y = center.y + halfH - 96.
             const Vec2 pos{center.x - kHalfTileW,
                            center.y + kHalfTileH - kWallSpriteH};
-            r.DrawQuad(pos, {kTileW, kWallSpriteH}, region, tint);
+            // Light multiplies into RGB; the existing alpha (e.g. the wall
+            // occlusion fade) is preserved. Walls use the blended WallL so
+            // they fade alongside the floors they border instead of
+            // standing out at full brightness against a dim corridor.
+            const Color lit{tint.r * WallL, tint.g * WallL, tint.b * WallL, tint.a};
+            r.DrawQuad(pos, {kTileW, kWallSpriteH}, region, lit);
         };
 
         switch (t) {
@@ -802,9 +831,14 @@ protected:
         const TextureRegion& reg = m_ctx->sprites->Get(name);
         const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
                        center.y - kPlayerSpriteH + 4.0f};
-        const Color tint = (m.hurtFlashTimer > 0.0f)
+        const float L = m_ctx->fogOfWar
+            ? TileLight(static_cast<int>(std::lround(m.pos.x)),
+                        static_cast<int>(std::lround(m.pos.y)))
+            : 1.0f;
+        const Color baseTint = (m.hurtFlashTimer > 0.0f)
             ? Color(1.6f, 1.6f, 1.6f, 1.0f)   // overbrighten -> looks like a hit flash
             : Color::White();
+        const Color tint{baseTint.r * L, baseTint.g * L, baseTint.b * L, baseTint.a};
         r.DrawQuad(pos, {kPlayerSpriteW, kPlayerSpriteH}, reg, tint);
 
         // HP bar appears only on damaged monsters so a full-strength room
@@ -824,7 +858,14 @@ protected:
         Renderer2D& r = *m_ctx->renderer;
         const Vec2 center = TileToScreen(gi.pos.x, gi.pos.y, m_camera);
         const float bob = std::sin(gi.bobPhase) * 2.0f;
-        const Color core = RarityColor(gi.item.rarity);
+        const float L = m_ctx->fogOfWar
+            ? TileLight(static_cast<int>(std::lround(gi.pos.x)),
+                        static_cast<int>(std::lround(gi.pos.y)))
+            : 1.0f;
+        const Color core(
+            RarityColor(gi.item.rarity).r * L,
+            RarityColor(gi.item.rarity).g * L,
+            RarityColor(gi.item.rarity).b * L, 1.0f);
         // Outer halo first (larger, transparent), inner gem on top -- reads
         // as a glowing pickup against the floor without needing a sprite.
         r.DrawQuad({center.x - 14.0f, center.y - 12.0f + bob}, {28.0f, 18.0f},
@@ -1081,6 +1122,31 @@ protected:
                    Color(0.55f, 0.5f, 0.45f, 1.0f), 12.0f);
     }
 
+    float TileLight(int tx, int ty) const {
+        if (tx < 0 || ty < 0 || tx >= m_grid.w || ty >= m_grid.h) return 0.0f;
+        return m_lightLevel[static_cast<size_t>(ty) * m_grid.w + tx];
+    }
+
+    // Walls live one tile inside the floor they bound, so a wall at L=1.0
+    // next to a floor at L=0.5 reads as "bright wall in fading area" which
+    // breaks the fog illusion. Average the wall's tile light with its
+    // 8-neighbour lit tiles so the wall slides between its surrounding
+    // floors instead of standing out.
+    float WallLight(int tx, int ty) const {
+        const float own = TileLight(tx, ty);
+        if (own <= 0.0f) return 0.0f;
+        float total = own;
+        int count = 1;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                const float l = TileLight(tx + dx, ty + dy);
+                if (l > 0.0f) { total += l; ++count; }
+            }
+        }
+        return total / static_cast<float>(count);
+    }
+
     bool IsRenderItemVisible(const RenderItem& it) const {
         if (!m_ctx->fogOfWar) return true;
         if (it.kind == RenderItem::Kind::Player) return true;
@@ -1098,11 +1164,10 @@ protected:
                 break;
             case RenderItem::Kind::Player: return true;
         }
-        if (tx < 0 || ty < 0 || tx >= m_grid.w || ty >= m_grid.h) return false;
-        return m_visible[static_cast<size_t>(ty) * m_grid.w + tx];
+        return TileLight(tx, ty) > 0.0f;
     }
 
-    std::vector<bool> m_visible;          // recomputed every frame in OnUpdate
+    std::vector<float> m_lightLevel;      // recomputed every frame in OnUpdate
     bool  m_inventoryOpen   = false;
     float m_playerHurtFlash = 0.0f;   // ticked down by combat code; gated on player tint
 
