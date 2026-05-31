@@ -550,6 +550,9 @@ protected:
     // ctx->fogOfWar toggle by default; subclasses can override if a
     // scene wants to always-on or always-off the fog.
     virtual bool SceneFogOfWar() const { return m_ctx->fogOfWar; }
+    // What the surrounding floor looks like -- used as an underlay so
+    // wall sprites don't show void through their transparent corners.
+    virtual Tile  SceneFloorKind() const { return Tile::Grass; }
 
     void OnEnter() override {
         EnterWorld();
@@ -860,15 +863,17 @@ protected:
             case Tile::Dirt:   drawFloor(m_ctx->sprites->Get("floorDirt"));  break;
             case Tile::Stairs: drawFloor(m_ctx->sprites->Get("stairs"));     break;
             case Tile::Wall: {
-                // Walls are solid one-tile blocks. The sprite fills the
-                // tile diamond and extends upward by the wall height.
+                // Walls are solid one-tile blocks. Draw the scene's floor
+                // underneath first so the wall sprite's transparent
+                // corners (above the cap, below the face hypotenuses)
+                // show the surrounding floor instead of the void.
+                const char* underlay = (SceneFloorKind() == Tile::Grass)
+                    ? "floorGrass" : "floorStone";
+                drawFloor(m_ctx->sprites->Get(underlay));
                 const Color tint = WallOcclusionTint(tx, ty);
                 const Color lit{tint.r * WallL, tint.g * WallL,
                                 tint.b * WallL, tint.a};
-                r.DrawQuad({center.x - kHalfTileW,
-                            center.y + kHalfTileH - kWallSpriteH},
-                           {kTileW, kWallSpriteH},
-                           m_ctx->sprites->Get("wall"), lit);
+                drawTall(m_ctx->sprites->Get("wall"), lit);
                 break;
             }
             case Tile::Portal:
@@ -1307,6 +1312,8 @@ protected:
 class DungeonScene : public WorldScene {
 public:
     DungeonScene(GameContext* ctx) : WorldScene(ctx) {}
+
+    Tile SceneFloorKind() const override { return Tile::Floor; }
 
 protected:
     static constexpr float kMonsterAggroRange = 6.5f;
