@@ -282,6 +282,114 @@ TownResult BuildTown() {
 }
 
 // ---------------------------------------------------------------------------
+// Items.
+//   Three base kinds: Sword (boosts player damage), Armor (boosts max HP),
+//   Potion (one-shot heal). Sword/Armor roll a rarity (Common/Magic/Rare)
+//   with progressively bigger stats and a prefix word picked from a rarity-
+//   keyed table -- the Diablo affix convention shrunk to one slot. Potions
+//   are always Common and always heal a fixed amount.
+//
+//   Items live in two places:
+//     * GroundItem -- on the dungeon floor, anchored at tile coords,
+//       picked up by walking near.
+//     * GameContext::inventory -- in the player's bag, accessed via the
+//       inventory panel (press I).
+//   Equipped pieces sit in their own GameContext slots; the inventory list
+//   only holds NON-equipped items, so a swap is push-old / pop-new and
+//   never shuffles a grid.
+// ---------------------------------------------------------------------------
+enum class ItemKind  : uint8_t { Sword, Armor, Potion };
+enum class Rarity    : uint8_t { Common, Magic, Rare };
+
+struct Item {
+    ItemKind kind = ItemKind::Sword;
+    Rarity rarity = Rarity::Common;
+    std::string name;
+    int damage     = 0;   // sword bonus
+    int maxHpBonus = 0;   // armor bonus
+    int healAmount = 0;   // potion only
+};
+
+inline Color RarityColor(Rarity r) {
+    switch (r) {
+        case Rarity::Common: return Color(0.85f, 0.85f, 0.85f, 1.0f);
+        case Rarity::Magic:  return Color(0.40f, 0.65f, 1.00f, 1.0f);
+        case Rarity::Rare:   return Color(1.00f, 0.85f, 0.20f, 1.0f);
+    }
+    return Color::White();
+}
+
+inline const char* RarityName(Rarity r) {
+    switch (r) {
+        case Rarity::Common: return "Common";
+        case Rarity::Magic:  return "Magic";
+        case Rarity::Rare:   return "Rare";
+    }
+    return "?";
+}
+
+// Item generator: 60% Common, 30% Magic, 10% Rare for gear. Potions are a
+// separate roll handled by the caller (drops weight them differently).
+Item GenerateGearItem(std::mt19937& rng) {
+    static const char* kCommonPrefixes[2] = {"Sharp", "Sturdy"};
+    static const char* kMagicPrefixes[3]  = {"Keen",  "Bronze", "Iron"};
+    static const char* kRarePrefixes[3]   = {"Mighty","Heroic", "Champion"};
+
+    std::uniform_int_distribution<int> kindRoll(0, 1);
+    std::uniform_int_distribution<int> rarityRoll(0, 99);
+    const int rr = rarityRoll(rng);
+    const Rarity rarity = (rr < 60) ? Rarity::Common
+                       : (rr < 90) ? Rarity::Magic
+                                   : Rarity::Rare;
+
+    Item it;
+    it.kind = (kindRoll(rng) == 0) ? ItemKind::Sword : ItemKind::Armor;
+    it.rarity = rarity;
+
+    const char* prefix = nullptr;
+    int baseLo = 0, baseHi = 0;
+    if (rarity == Rarity::Common) {
+        prefix = kCommonPrefixes[std::uniform_int_distribution<int>(0, 1)(rng)];
+        baseLo = 1; baseHi = 2;
+    } else if (rarity == Rarity::Magic) {
+        prefix = kMagicPrefixes[std::uniform_int_distribution<int>(0, 2)(rng)];
+        baseLo = 3; baseHi = 5;
+    } else {
+        prefix = kRarePrefixes[std::uniform_int_distribution<int>(0, 2)(rng)];
+        baseLo = 6; baseHi = 10;
+    }
+
+    std::uniform_int_distribution<int> rollStat(baseLo, baseHi);
+    const int stat = rollStat(rng);
+    if (it.kind == ItemKind::Sword) {
+        it.damage = stat;
+        it.name = std::string(prefix) + " Sword";
+    } else {
+        // Armor scales HP bigger than sword scales dmg -- a +1 sword is a
+        // ~12% damage uplift, +1 HP would be invisible; multiply by 5 to
+        // keep the two slots roughly equivalent.
+        it.maxHpBonus = stat * 5;
+        it.name = std::string(prefix) + " Armor";
+    }
+    return it;
+}
+
+Item MakePotion() {
+    Item it;
+    it.kind = ItemKind::Potion;
+    it.rarity = Rarity::Common;
+    it.name = "Health Potion";
+    it.healAmount = 25;
+    return it;
+}
+
+struct GroundItem {
+    Item item;
+    Vec2 pos{};   // tile-space
+    float bobPhase = 0.0f;  // simple float animation -- decorative only
+};
+
+// ---------------------------------------------------------------------------
 // Monster.
 //   Kind drives the sprite + the base stats; everything else is per-instance.
 //   Stored as a flat vector on DungeonScene -- combat code iterates the list
@@ -329,13 +437,33 @@ struct GameContext {
     int      dungeonVisits = 0;
 
     // Player stats persist across town <-> dungeon swaps but reset to full on
-    // death (the town acts as a respawn / safe area).
-    float playerHp        = 50.0f;
-    float playerMaxHp     = 50.0f;
-    float playerDamage    = 8.0f;
-    float playerAtkRange  = 1.4f;   // tiles -- generous so iso-overshoot doesn't whiff
-    float playerAtkSpeed  = 0.45f;  // seconds per swing
-    int   monstersKilled  = 0;
+    // death (the town acts as a respawn / safe area). Effective damage/HP
+    // include equipped gear bonuses; the base values are the unequipped
+    // baseline that everything else stacks onto.
+    float playerHp           = 50.0f;
+    int   playerBaseDamage   = 8;
+    int   playerBaseMaxHp    = 50;
+    float playerAtkRange     = 1.4f;   // tiles -- generous so iso-overshoot doesn't whiff
+    float playerAtkSpeed     = 0.45f;  // seconds per swing
+    int   monstersKilled     = 0;
+    int   itemsPickedUp      = 0;
+
+    // Inventory + equipment.
+    //   `equippedWeapon` / `equippedArmor` hold the active gear; `inventory`
+    //   is the bag of everything else. has* flags stand in for std::optional
+    //   to keep the struct trivially copyable for log dumps later.
+    std::vector<Item> inventory;
+    Item equippedWeapon{};
+    Item equippedArmor{};
+    bool hasWeapon = false;
+    bool hasArmor  = false;
+
+    int   EffectiveMaxHp() const {
+        return playerBaseMaxHp + (hasArmor ? equippedArmor.maxHpBonus : 0);
+    }
+    int   EffectiveDamage() const {
+        return playerBaseDamage + (hasWeapon ? equippedWeapon.damage : 0);
+    }
 
     std::function<std::unique_ptr<Scene>()> makeTitle;
     std::function<std::unique_ptr<Scene>()> makeTown;
@@ -357,11 +485,12 @@ struct GameContext {
 // ---------------------------------------------------------------------------
 struct RenderItem {
     float sortKey;
-    enum class Kind { Tile, Player, Monster };
+    enum class Kind { Tile, Player, Monster, GroundItem };
     Kind kind;
     int tx = 0, ty = 0;
     Tile tile = Tile::Empty;
     const Monster* monster = nullptr;
+    const GroundItem* groundItem = nullptr;
 };
 
 class WorldScene : public Scene {
@@ -389,8 +518,18 @@ protected:
 
     void OnUpdate(float dtRaw) override {
         const float dt = Min(dtRaw, 1.0f / 30.0f);
+        if (Input::IsKeyPressed(Key::I) || Input::IsKeyPressed(Key::Tab))
+            m_inventoryOpen = !m_inventoryOpen;
         if (Input::IsKeyPressed(Key::Escape)) {
+            if (m_inventoryOpen) { m_inventoryOpen = false; return; }
             Manager().Change(m_ctx->makeTitle());
+            return;
+        }
+        if (m_inventoryOpen) {
+            // While the panel is up, freeze world updates so combat / movement
+            // can't run "underneath" the UI. Mouse clicks on item slots still
+            // need handling, so route those through the overlay first.
+            HandleInventoryClicks();
             return;
         }
 
@@ -491,9 +630,10 @@ protected:
 
         for (const RenderItem& it : items) {
             switch (it.kind) {
-                case RenderItem::Kind::Tile:    DrawTile(it.tx, it.ty, it.tile); break;
-                case RenderItem::Kind::Player:  DrawPlayer();                    break;
-                case RenderItem::Kind::Monster: DrawMonster(*it.monster);        break;
+                case RenderItem::Kind::Tile:       DrawTile(it.tx, it.ty, it.tile); break;
+                case RenderItem::Kind::Player:     DrawPlayer();                    break;
+                case RenderItem::Kind::Monster:    DrawMonster(*it.monster);        break;
+                case RenderItem::Kind::GroundItem: DrawGroundItem(*it.groundItem);  break;
             }
         }
 
@@ -502,6 +642,9 @@ protected:
         // HUD.
         r.DrawText(*m_ctx->font, HudLine(), {16.0f, 12.0f}, Color::White(), 20.0f);
         DrawHudExtra();
+
+        // Inventory panel overlay last so it sits above all gameplay UI.
+        DrawInventoryOverlay();
 
         r.End();
     }
@@ -549,7 +692,7 @@ protected:
         // sprite doesn't visually sink into the diamond).
         const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
                        center.y - kPlayerSpriteH + 4.0f};
-        const Color tint = (m_ctx->playerHp < m_ctx->playerMaxHp && m_playerHurtFlash > 0.0f)
+        const Color tint = (m_ctx->playerHp < m_ctx->EffectiveMaxHp() && m_playerHurtFlash > 0.0f)
             ? Color(1.0f, 0.4f, 0.4f, 1.0f)
             : Color::White();
         r.DrawQuad(pos, {kPlayerSpriteW, kPlayerSpriteH}, reg, tint);
@@ -581,6 +724,192 @@ protected:
         }
     }
 
+    void DrawGroundItem(const GroundItem& gi) {
+        Renderer2D& r = *m_ctx->renderer;
+        const Vec2 center = TileToScreen(gi.pos.x, gi.pos.y, m_camera);
+        const float bob = std::sin(gi.bobPhase) * 2.0f;
+        const Color core = RarityColor(gi.item.rarity);
+        // Outer halo first (larger, transparent), inner gem on top -- reads
+        // as a glowing pickup against the floor without needing a sprite.
+        r.DrawQuad({center.x - 14.0f, center.y - 12.0f + bob}, {28.0f, 18.0f},
+                   Color(core.r, core.g, core.b, 0.35f));
+        r.DrawQuad({center.x - 8.0f,  center.y - 8.0f  + bob}, {16.0f, 10.0f},
+                   core);
+        // Tiny dark outline cap on top so the gem reads with depth even
+        // against a bright floor.
+        r.DrawQuad({center.x - 8.0f, center.y - 8.0f + bob}, {16.0f, 2.0f},
+                   Color(core.r * 0.3f, core.g * 0.3f, core.b * 0.3f, 0.85f));
+    }
+
+    // ----- Inventory panel ---------------------------------------------------
+    static constexpr int kInventoryCap = 12;
+    static constexpr float kPanelW    = 480.0f;
+    static constexpr float kPanelH    = 520.0f;
+    static constexpr float kEqSlotW   = 220.0f;
+    static constexpr float kEqSlotH   = 60.0f;
+    static constexpr float kBagSlotW  = 220.0f;
+    static constexpr float kBagSlotH  = 50.0f;
+    static constexpr float kBagGapX   = 10.0f;
+    static constexpr float kBagGapY   = 6.0f;
+
+    Vec2 PanelOrigin() const {
+        return { (m_ctx->screenW - kPanelW) * 0.5f,
+                 (m_ctx->screenH - kPanelH) * 0.5f };
+    }
+    Vec2 WeaponSlotOrigin() const {
+        const Vec2 p = PanelOrigin();
+        return { p.x + 16.0f, p.y + 80.0f };
+    }
+    Vec2 ArmorSlotOrigin() const {
+        const Vec2 p = PanelOrigin();
+        return { p.x + 16.0f + kEqSlotW + 10.0f, p.y + 80.0f };
+    }
+    Vec2 BagSlotOrigin(int idx) const {
+        const Vec2 p = PanelOrigin();
+        const int col = idx % 2;
+        const int row = idx / 2;
+        return { p.x + 16.0f + col * (kBagSlotW + kBagGapX),
+                 p.y + 240.0f + row * (kBagSlotH + kBagGapY) };
+    }
+    static bool HitRect(Vec2 p, Vec2 origin, float w, float h) {
+        return p.x >= origin.x && p.x < origin.x + w
+            && p.y >= origin.y && p.y < origin.y + h;
+    }
+
+    void HandleInventoryClicks() {
+        if (!Input::IsMousePressed(MouseButton::Left)) return;
+        const Vec2 mp = Input::MousePosition();
+        if (HitRect(mp, WeaponSlotOrigin(), kEqSlotW, kEqSlotH)) {
+            if (m_ctx->hasWeapon &&
+                (int)m_ctx->inventory.size() < kInventoryCap) {
+                m_ctx->inventory.push_back(m_ctx->equippedWeapon);
+                m_ctx->hasWeapon = false;
+            }
+            return;
+        }
+        if (HitRect(mp, ArmorSlotOrigin(), kEqSlotW, kEqSlotH)) {
+            if (m_ctx->hasArmor &&
+                (int)m_ctx->inventory.size() < kInventoryCap) {
+                m_ctx->inventory.push_back(m_ctx->equippedArmor);
+                m_ctx->hasArmor = false;
+            }
+            return;
+        }
+        for (int i = 0; i < (int)m_ctx->inventory.size() && i < kInventoryCap; ++i) {
+            if (HitRect(mp, BagSlotOrigin(i), kBagSlotW, kBagSlotH)) {
+                UseOrEquipBagItem(i);
+                return;
+            }
+        }
+    }
+
+    void UseOrEquipBagItem(int idx) {
+        if (idx < 0 || idx >= (int)m_ctx->inventory.size()) return;
+        Item it = m_ctx->inventory[idx];
+        m_ctx->inventory.erase(m_ctx->inventory.begin() + idx);
+        switch (it.kind) {
+            case ItemKind::Potion: {
+                const float maxHp = static_cast<float>(m_ctx->EffectiveMaxHp());
+                m_ctx->playerHp = std::min(maxHp, m_ctx->playerHp + it.healAmount);
+                break;
+            }
+            case ItemKind::Sword:
+                if (m_ctx->hasWeapon) m_ctx->inventory.push_back(m_ctx->equippedWeapon);
+                m_ctx->equippedWeapon = it;
+                m_ctx->hasWeapon = true;
+                break;
+            case ItemKind::Armor:
+                if (m_ctx->hasArmor)  m_ctx->inventory.push_back(m_ctx->equippedArmor);
+                m_ctx->equippedArmor = it;
+                m_ctx->hasArmor = true;
+                break;
+        }
+    }
+
+    void DrawEquippedSlot(Vec2 origin, bool has, const Item& item, const char* label) {
+        Renderer2D& r = *m_ctx->renderer;
+        const Color slotBg = has ? RarityColor(item.rarity)
+                                 : Color(0.45f, 0.40f, 0.40f, 1.0f);
+        r.DrawQuad(origin, {kEqSlotW, kEqSlotH},
+                   Color(slotBg.r * 0.30f, slotBg.g * 0.30f, slotBg.b * 0.30f, 0.85f));
+        r.DrawText(*m_ctx->font, label, {origin.x + 8.0f, origin.y + 6.0f},
+                   Color(0.65f, 0.60f, 0.55f, 1.0f), 12.0f);
+        if (has) {
+            r.DrawText(*m_ctx->font, item.name,
+                       {origin.x + 8.0f, origin.y + 22.0f},
+                       RarityColor(item.rarity), 14.0f);
+            char stat[48];
+            if (item.kind == ItemKind::Sword)
+                std::snprintf(stat, sizeof(stat), "+%d damage", item.damage);
+            else
+                std::snprintf(stat, sizeof(stat), "+%d max HP", item.maxHpBonus);
+            r.DrawText(*m_ctx->font, stat,
+                       {origin.x + 8.0f, origin.y + 40.0f},
+                       Color(0.85f, 0.85f, 0.85f, 1.0f), 12.0f);
+        } else {
+            r.DrawText(*m_ctx->font, "(empty -- click bag item to equip)",
+                       {origin.x + 8.0f, origin.y + 30.0f},
+                       Color(0.55f, 0.50f, 0.45f, 1.0f), 12.0f);
+        }
+    }
+
+    void DrawBagSlot(Vec2 origin, const Item& item) {
+        Renderer2D& r = *m_ctx->renderer;
+        const Color bg = RarityColor(item.rarity);
+        r.DrawQuad(origin, {kBagSlotW, kBagSlotH},
+                   Color(bg.r * 0.30f, bg.g * 0.30f, bg.b * 0.30f, 0.85f));
+        r.DrawText(*m_ctx->font, item.name,
+                   {origin.x + 8.0f, origin.y + 5.0f},
+                   RarityColor(item.rarity), 13.0f);
+        char stat[48];
+        if (item.kind == ItemKind::Sword)
+            std::snprintf(stat, sizeof(stat), "+%d damage  (%s sword)",
+                          item.damage, RarityName(item.rarity));
+        else if (item.kind == ItemKind::Armor)
+            std::snprintf(stat, sizeof(stat), "+%d max HP  (%s armor)",
+                          item.maxHpBonus, RarityName(item.rarity));
+        else
+            std::snprintf(stat, sizeof(stat), "heals %d HP  (use)", item.healAmount);
+        r.DrawText(*m_ctx->font, stat,
+                   {origin.x + 8.0f, origin.y + 26.0f},
+                   Color(0.80f, 0.80f, 0.80f, 1.0f), 12.0f);
+    }
+
+    void DrawInventoryOverlay() {
+        if (!m_inventoryOpen) return;
+        Renderer2D& r = *m_ctx->renderer;
+        // Dim the world behind so the focus is unambiguously on the panel.
+        r.DrawQuad({0.0f, 0.0f}, {m_ctx->screenW, m_ctx->screenH},
+                   Color(0.0f, 0.0f, 0.0f, 0.55f));
+        const Vec2 p = PanelOrigin();
+        r.DrawQuad(p, {kPanelW, kPanelH}, Color(0.10f, 0.08f, 0.10f, 0.96f));
+        r.DrawText(*m_ctx->font, "INVENTORY",
+                   {p.x + 20.0f, p.y + 18.0f},
+                   Color(0.95f, 0.85f, 0.75f, 1.0f), 26.0f);
+        r.DrawText(*m_ctx->font, "EQUIPPED",
+                   {p.x + 20.0f, p.y + 60.0f},
+                   Color(0.7f, 0.65f, 0.6f, 1.0f), 14.0f);
+        DrawEquippedSlot(WeaponSlotOrigin(), m_ctx->hasWeapon, m_ctx->equippedWeapon,
+                         "WEAPON");
+        DrawEquippedSlot(ArmorSlotOrigin(),  m_ctx->hasArmor,  m_ctx->equippedArmor,
+                         "ARMOR");
+
+        char hdr[64];
+        std::snprintf(hdr, sizeof(hdr), "BAG  (%d / %d)",
+                      (int)m_ctx->inventory.size(), kInventoryCap);
+        r.DrawText(*m_ctx->font, hdr,
+                   {p.x + 20.0f, p.y + 215.0f},
+                   Color(0.7f, 0.65f, 0.6f, 1.0f), 14.0f);
+        for (int i = 0; i < (int)m_ctx->inventory.size() && i < kInventoryCap; ++i)
+            DrawBagSlot(BagSlotOrigin(i), m_ctx->inventory[i]);
+
+        r.DrawText(*m_ctx->font,
+                   "I or Tab close  -  click bag item to equip/use  -  click equipped to unequip",
+                   {p.x + 16.0f, p.y + kPanelH - 26.0f},
+                   Color(0.55f, 0.5f, 0.45f, 1.0f), 12.0f);
+    }
+
+    bool  m_inventoryOpen   = false;
     float m_playerHurtFlash = 0.0f;   // ticked down by combat code; gated on player tint
 
     virtual std::string HudLine() const = 0;
@@ -602,7 +931,7 @@ protected:
         // Town heals you to full -- Diablo-style safe haven. Without this a
         // crawl that ends at 5/50 HP gives you no real reason to ever come
         // back; full heal is the standard contract.
-        m_ctx->playerHp = m_ctx->playerMaxHp;
+        m_ctx->playerHp = static_cast<float>(m_ctx->EffectiveMaxHp());
     }
     void OnInteract() override {
         ++m_ctx->dungeonVisits;
@@ -610,8 +939,11 @@ protected:
         Manager().Change(m_ctx->makeDungeon());
     }
     std::string HudLine() const override {
-        return "TOWN  -  WASD move, E enter portal, Esc title  -  visits " +
-               std::to_string(m_ctx->dungeonVisits);
+        char buf[200];
+        std::snprintf(buf, sizeof(buf),
+                      "TOWN  -  WASD  -  E portal  -  I inventory  -  visits %d  bag %d",
+                      m_ctx->dungeonVisits, (int)m_ctx->inventory.size());
+        return buf;
     }
 };
 
@@ -633,6 +965,8 @@ protected:
         m_facing = 0;
         m_attackCd = 0.0f;
         m_slashTimer = 0.0f;
+        m_groundItems.clear();
+        m_dropRng.seed(m_ctx->rngSeed ^ 0xC0FFEE05u);
 
         // Spawn monsters: pick floor cells from g.monsterSpawns at random,
         // alternating skeleton / zombie. Density scales with how many
@@ -678,11 +1012,12 @@ protected:
                 const float dx = m.pos.x - hit.x;
                 const float dy = m.pos.y - hit.y;
                 if (dx * dx + dy * dy <= m_ctx->playerAtkRange * m_ctx->playerAtkRange) {
-                    m.hp -= m_ctx->playerDamage;
+                    m.hp -= static_cast<float>(m_ctx->EffectiveDamage());
                     m.hurtFlashTimer = kHurtFlashDuration;
                     if (m.hp <= 0.0f) {
                         m.alive = false;
                         ++m_ctx->monstersKilled;
+                        RollDrop(m.pos);
                     }
                 }
             }
@@ -714,12 +1049,43 @@ protected:
             }
         }
 
-        // Death: snap back to town with full HP. Lose nothing concrete yet
-        // since there's no XP / level / items -- that's v3's job.
+        // Pickups: walk-over auto-pickup. We iterate from the back so
+        // erase() during the scan doesn't shift indices we're about to
+        // visit. Inventory full -> the item just stays on the ground.
+        for (int i = (int)m_groundItems.size() - 1; i >= 0; --i) {
+            GroundItem& gi = m_groundItems[i];
+            gi.bobPhase += dt * 3.0f;
+            const float dx = m_player.x - gi.pos.x;
+            const float dy = m_player.y - gi.pos.y;
+            if (dx * dx + dy * dy < 0.55f * 0.55f &&
+                (int)m_ctx->inventory.size() < kInventoryCap) {
+                m_ctx->inventory.push_back(gi.item);
+                ++m_ctx->itemsPickedUp;
+                m_groundItems.erase(m_groundItems.begin() + i);
+            }
+        }
+
+        // Death: snap back to town with full HP. The drop loot stays on the
+        // dungeon floor of THIS layout; re-entering re-rolls the dungeon so
+        // they're gone anyway. v3 doesn't punish death further.
         if (m_ctx->playerHp <= 0.0f) {
-            m_ctx->playerHp = m_ctx->playerMaxHp;
+            m_ctx->playerHp = static_cast<float>(m_ctx->EffectiveMaxHp());
             Manager().Change(m_ctx->makeTown());
         }
+    }
+
+    // Roll an item on monster death. ~40% nothing, ~12% potion, otherwise
+    // a gear item with rarity weights baked into GenerateGearItem.
+    void RollDrop(Vec2 pos) {
+        std::uniform_int_distribution<int> d(0, 99);
+        const int r = d(m_dropRng);
+        if (r < 40) return;
+        GroundItem gi;
+        gi.pos = pos;
+        gi.bobPhase = static_cast<float>(r) * 0.1f;  // de-sync bob between drops
+        if (r < 52) gi.item = MakePotion();
+        else        gi.item = GenerateGearItem(m_dropRng);
+        m_groundItems.push_back(gi);
     }
 
     void AppendActors(std::vector<RenderItem>& items) override {
@@ -729,6 +1095,15 @@ protected:
             it.sortKey = m.pos.x + m.pos.y + 0.0005f;  // tie-break above tile, below player
             it.kind = RenderItem::Kind::Monster;
             it.monster = &m;
+            items.push_back(it);
+        }
+        for (const GroundItem& gi : m_groundItems) {
+            RenderItem it;
+            // Slight negative bias so ground items render BELOW the floor's
+            // sort-tie but ABOVE the wall behind them. They're flat decals.
+            it.sortKey = gi.pos.x + gi.pos.y + 0.0002f;
+            it.kind = RenderItem::Kind::GroundItem;
+            it.groundItem = &gi;
             items.push_back(it);
         }
     }
@@ -756,21 +1131,22 @@ protected:
         const float barW = 240.0f;
         const float barH = 18.0f;
         r.DrawQuad({barX, barY}, {barW, barH}, Color(0.12f, 0.08f, 0.08f, 0.85f));
-        const float fillW = (barW - 4.0f) * std::max(0.0f, m_ctx->playerHp / m_ctx->playerMaxHp);
+        const float maxHp = static_cast<float>(m_ctx->EffectiveMaxHp());
+        const float fillW = (barW - 4.0f) * std::max(0.0f, m_ctx->playerHp / maxHp);
         r.DrawQuad({barX + 2.0f, barY + 2.0f}, {fillW, barH - 4.0f},
                    Color(0.80f, 0.18f, 0.18f, 1.0f));
         char buf[64];
         std::snprintf(buf, sizeof(buf), "HP  %d / %d",
-                      (int)std::ceil(m_ctx->playerHp), (int)m_ctx->playerMaxHp);
+                      (int)std::ceil(m_ctx->playerHp), m_ctx->EffectiveMaxHp());
         r.DrawText(*m_ctx->font, buf, {barX + 8.0f, barY - 22.0f},
                    Color(0.95f, 0.90f, 0.85f, 1.0f), 18.0f);
     }
 
     std::string HudLine() const override {
-        char buf[160];
+        char buf[200];
         std::snprintf(buf, sizeof(buf),
-                      "DUNGEON  -  WASD move, Space attack, E stairs, Esc title  -  kills %d",
-                      m_ctx->monstersKilled);
+                      "DUNGEON  -  WASD/Space  -  E stairs  -  I inventory  -  kills %d  items %d",
+                      m_ctx->monstersKilled, m_ctx->itemsPickedUp);
         return buf;
     }
 
@@ -787,7 +1163,9 @@ private:
         return {0.0f, 1.0f};
     }
 
-    std::vector<Monster> m_monsters;
+    std::vector<Monster>     m_monsters;
+    std::vector<GroundItem>  m_groundItems;
+    std::mt19937             m_dropRng;
     float m_attackCd   = 0.0f;
     float m_slashTimer = 0.0f;
 };
