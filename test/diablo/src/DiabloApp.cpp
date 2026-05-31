@@ -802,14 +802,21 @@ protected:
             case Tile::Grass:  drawFloor(m_ctx->sprites->Get("floorGrass")); break;
             case Tile::Dirt:   drawFloor(m_ctx->sprites->Get("floorDirt"));  break;
             case Tile::Stairs: drawFloor(m_ctx->sprites->Get("stairs"));     break;
-            case Tile::Wall:
-                // Short walls sit on a floor tile -- the room's ground plane
-                // continues right up to the wall, then the wall stands on
-                // top. Without the underlay, interior pillars would show a
-                // black gap directly under them.
-                drawFloor(m_ctx->sprites->Get("floorStone"));
-                drawTall (m_ctx->sprites->Get("wall"), WallOcclusionTint(tx, ty));
+            case Tile::Wall: {
+                // Walls are thin iso SLABS, not full tiles. Two sprite
+                // variants -- one running along the iso X axis (E-W in
+                // tile space, "\" on screen) and one along the iso Y axis
+                // (N-S in tile space, "/" on screen) -- so a row of
+                // adjacent walls in either direction visually merges into
+                // a continuous wall instead of looking like detached
+                // posts. The floor underlay matches the surrounding
+                // ground so the wall reads as standing on the room's
+                // floor, not on a stone patch surrounded by grass.
+                drawFloor(m_ctx->sprites->Get(WallFloorUnderlay(tx, ty)));
+                const char* sprite = WallIsHorizontal(tx, ty) ? "wallH" : "wallV";
+                drawTall(m_ctx->sprites->Get(sprite), WallOcclusionTint(tx, ty));
                 break;
+            }
             case Tile::Portal:
                 // Portal floats above a floor tile -- draw stone first, then the
                 // glow over it so the portal looks "set into" the ground.
@@ -818,6 +825,50 @@ protected:
                 break;
             case Tile::Empty: break;
         }
+    }
+
+    // Decide which way a wall tile "runs". A wall with a Floor cell directly
+    // north or south is part of an E-W (horizontal) wall row; with floor
+    // east or west, it's part of an N-S (vertical) row. Corners and
+    // isolated walls default to horizontal.
+    bool WallIsHorizontal(int tx, int ty) const {
+        const bool floorN = m_grid.At(tx, ty - 1) == Tile::Floor
+                         || m_grid.At(tx, ty - 1) == Tile::Grass
+                         || m_grid.At(tx, ty - 1) == Tile::Dirt;
+        const bool floorS = m_grid.At(tx, ty + 1) == Tile::Floor
+                         || m_grid.At(tx, ty + 1) == Tile::Grass
+                         || m_grid.At(tx, ty + 1) == Tile::Dirt;
+        const bool floorE = m_grid.At(tx + 1, ty) == Tile::Floor
+                         || m_grid.At(tx + 1, ty) == Tile::Grass
+                         || m_grid.At(tx + 1, ty) == Tile::Dirt;
+        const bool floorW = m_grid.At(tx - 1, ty) == Tile::Floor
+                         || m_grid.At(tx - 1, ty) == Tile::Grass
+                         || m_grid.At(tx - 1, ty) == Tile::Dirt;
+        const bool hasYFloor = floorN || floorS;
+        const bool hasXFloor = floorE || floorW;
+        if (hasYFloor && !hasXFloor) return true;
+        if (hasXFloor && !hasYFloor) return false;
+        return true;
+    }
+
+    // Pick the floor sprite that should appear UNDER the wall so the room's
+    // ground plane reads continuously. Sample cardinal floor neighbours; the
+    // dominant tile type wins.
+    const char* WallFloorUnderlay(int tx, int ty) const {
+        int grass = 0, dirt = 0, stone = 0;
+        constexpr int dx[4] = {0, 0, 1, -1};
+        constexpr int dy[4] = {1, -1, 0, 0};
+        for (int d = 0; d < 4; ++d) {
+            const Tile t = m_grid.At(tx + dx[d], ty + dy[d]);
+            if (t == Tile::Grass) ++grass;
+            else if (t == Tile::Dirt) ++dirt;
+            else if (t == Tile::Floor) ++stone;
+        }
+        // Strict >: a 0-grass wall surrounded by 0 floors falls through
+        // to floorStone instead of incorrectly defaulting to grass.
+        if (grass > stone && grass > dirt) return "floorGrass";
+        if (dirt  > stone && dirt  > grass) return "floorDirt";
+        return "floorStone";
     }
 
     // Walls that visually sit between the camera and the player turn semi-
@@ -1524,8 +1575,9 @@ protected:
         m_sprites.Add("floorDirt",  128, 0, 64, 32);
         m_sprites.Add("stairs",     192, 0, 64, 32);
         // Row 1 (y=32..127): tall things, 64x96 each
-        m_sprites.Add("wall",       0,   32, 64, 96);
+        m_sprites.Add("wallH",      0,   32, 64, 96);  // E-W slab
         m_sprites.Add("portal",     64,  32, 64, 96);
+        m_sprites.Add("wallV",      128, 32, 64, 96);  // N-S slab
         // Row 2 (y=128..175): player, 32x48 each
         m_sprites.Add("playerS",    0,   128, 32, 48);
         m_sprites.Add("playerN",    32,  128, 32, 48);
