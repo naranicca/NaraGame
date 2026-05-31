@@ -668,13 +668,14 @@ protected:
             const Vec2 pos{center.x - kHalfTileW, center.y - kHalfTileH};
             r.DrawQuad(pos, {kTileW, kFloorTileH}, region);
         };
-        auto drawTall = [&](const TextureRegion& region) {
+        auto drawTall = [&](const TextureRegion& region,
+                            const Color& tint = Color::White()) {
             // Tall sprites (64x96) anchor with the BOTTOM of the diamond at
             // (center.x, center.y + halfH). The top of the sprite then sits
             // at y = center.y + halfH - 96.
             const Vec2 pos{center.x - kHalfTileW,
                            center.y + kHalfTileH - kWallSpriteH};
-            r.DrawQuad(pos, {kTileW, kWallSpriteH}, region);
+            r.DrawQuad(pos, {kTileW, kWallSpriteH}, region, tint);
         };
 
         switch (t) {
@@ -682,7 +683,9 @@ protected:
             case Tile::Grass:  drawFloor(m_ctx->sprites->Get("floorGrass")); break;
             case Tile::Dirt:   drawFloor(m_ctx->sprites->Get("floorDirt"));  break;
             case Tile::Stairs: drawFloor(m_ctx->sprites->Get("stairs"));     break;
-            case Tile::Wall:   drawTall (m_ctx->sprites->Get("wall"));       break;
+            case Tile::Wall:
+                drawTall(m_ctx->sprites->Get("wall"), WallOcclusionTint(tx, ty));
+                break;
             case Tile::Portal:
                 // Portal floats above a floor tile -- draw stone first, then the
                 // glow over it so the portal looks "set into" the ground.
@@ -691,6 +694,21 @@ protected:
                 break;
             case Tile::Empty: break;
         }
+    }
+
+    // Walls that visually sit between the camera and the player turn semi-
+    // transparent so the figure stays readable -- the standard Diablo trick.
+    // The occlusion zone is a diamond 0..3 iso tiles "forward" of the player
+    // (sum > player sum) and within roughly one tile of the player's iso
+    // column. Inside that zone we return a 40% alpha tint; otherwise white.
+    Color WallOcclusionTint(int tx, int ty) const {
+        const float dx = static_cast<float>(tx) - m_player.x;
+        const float dy = static_cast<float>(ty) - m_player.y;
+        const float fwd  = dx + dy;    // > 0 means wall is in front of player
+        const float side = dx - dy;    // 0 means same iso-column as the player
+        if (fwd > 0.0f && fwd < 3.5f && std::fabs(side) < 1.6f)
+            return Color(1.0f, 1.0f, 1.0f, 0.40f);
+        return Color::White();
     }
 
     void DrawPlayer() {
