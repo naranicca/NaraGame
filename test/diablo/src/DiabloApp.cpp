@@ -803,26 +803,42 @@ protected:
             case Tile::Dirt:   drawFloor(m_ctx->sprites->Get("floorDirt"));  break;
             case Tile::Stairs: drawFloor(m_ctx->sprites->Get("stairs"));     break;
             case Tile::Wall: {
-                // Walls are thin iso SLABS, not full tiles. Two sprite
-                // variants -- one running along the iso X axis (E-W in
-                // tile space, "\" on screen) and one along the iso Y axis
-                // (N-S in tile space, "/" on screen) -- so a row of
-                // adjacent walls in either direction visually merges into
-                // a continuous wall instead of looking like detached
-                // posts. The floor underlay matches the surrounding
-                // ground so the wall reads as standing on the room's
-                // floor, not on a stone patch surrounded by grass.
+                // Walls are thin iso slabs. Per tile we draw only the ARMS
+                // that connect to a wall neighbour -- a corner gets the L,
+                // a T-junction gets the T, a + gets the +, a dead-end
+                // straight wall gets the full slab, and an isolated pillar
+                // gets a full + cross. No painted arms ever stick out into
+                // void where there's nothing to plug into.
                 drawFloor(m_ctx->sprites->Get(WallFloorUnderlay(tx, ty)));
                 const Color tint = WallOcclusionTint(tx, ty);
-                if (WallNeedsBothSlabs(tx, ty)) {
-                    // Corners / pillars: stack the two slab sprites so the L
-                    // (or "+") at the junction is complete from both sides.
-                    drawTall(m_ctx->sprites->Get("wallH"), tint);
-                    drawTall(m_ctx->sprites->Get("wallV"), tint);
-                } else {
-                    drawTall(m_ctx->sprites->Get(
-                                 WallIsHorizontal(tx, ty) ? "wallH" : "wallV"),
-                             tint);
+                const bool wE = m_grid.At(tx + 1, ty) == Tile::Wall;
+                const bool wW = m_grid.At(tx - 1, ty) == Tile::Wall;
+                const bool wN = m_grid.At(tx, ty - 1) == Tile::Wall;
+                const bool wS = m_grid.At(tx, ty + 1) == Tile::Wall;
+
+                auto drawSeg = [&](const char* name, float xOff, float w) {
+                    const Vec2 pos{center.x - kHalfTileW + xOff,
+                                   center.y + kHalfTileH - kWallSpriteH};
+                    const Color lit{tint.r * WallL, tint.g * WallL,
+                                    tint.b * WallL, tint.a};
+                    r.DrawQuad(pos, {w, kWallSpriteH},
+                               m_ctx->sprites->Get(name), lit);
+                };
+
+                if (wE && wW)      drawSeg("wallH",   0.0f,         kTileW);
+                else if (wE)       drawSeg("wallH_E", kHalfTileW,   kHalfTileW);
+                else if (wW)       drawSeg("wallH_W", 0.0f,         kHalfTileW);
+
+                if (wN && wS)      drawSeg("wallV",   0.0f,         kTileW);
+                else if (wN)       drawSeg("wallV_N", kHalfTileW,   kHalfTileW);
+                else if (wS)       drawSeg("wallV_S", 0.0f,         kHalfTileW);
+
+                if (!wE && !wW && !wN && !wS) {
+                    // Isolated pillar: nothing else got drawn above, so put
+                    // both full slabs down as a + so the tile reads as a
+                    // post in the middle of the room.
+                    drawSeg("wallH", 0.0f, kTileW);
+                    drawSeg("wallV", 0.0f, kTileW);
                 }
                 break;
             }
@@ -834,52 +850,6 @@ protected:
                 break;
             case Tile::Empty: break;
         }
-    }
-
-    // A wall needs BOTH slab sprites when it sits at the join of an E-W and
-    // an N-S wall run -- a room corner (floor on a diagonal but not the two
-    // cardinal sides reaching it), or an interior pillar surrounded by
-    // floor. Drawing only one slab there leaves a visible notch where the
-    // perpendicular wall would have plugged in.
-    bool WallNeedsBothSlabs(int tx, int ty) const {
-        auto isFloor = [&](int x, int y) {
-            const Tile t = m_grid.At(x, y);
-            return t == Tile::Floor || t == Tile::Grass || t == Tile::Dirt;
-        };
-        const bool hasYFloor = isFloor(tx, ty - 1) || isFloor(tx, ty + 1);
-        const bool hasXFloor = isFloor(tx + 1, ty) || isFloor(tx - 1, ty);
-        if (hasYFloor && hasXFloor) return true;            // pillar / T-junction
-        if (!hasYFloor && !hasXFloor) {
-            // Outside-corner wall: no cardinal floor, but a diagonal cell
-            // sits in a room (which means perpendicular walls meet here).
-            return isFloor(tx - 1, ty - 1) || isFloor(tx + 1, ty - 1)
-                || isFloor(tx - 1, ty + 1) || isFloor(tx + 1, ty + 1);
-        }
-        return false;
-    }
-
-    // Decide which way a wall tile "runs". A wall with a Floor cell directly
-    // north or south is part of an E-W (horizontal) wall row; with floor
-    // east or west, it's part of an N-S (vertical) row. Corners and
-    // isolated walls default to horizontal.
-    bool WallIsHorizontal(int tx, int ty) const {
-        const bool floorN = m_grid.At(tx, ty - 1) == Tile::Floor
-                         || m_grid.At(tx, ty - 1) == Tile::Grass
-                         || m_grid.At(tx, ty - 1) == Tile::Dirt;
-        const bool floorS = m_grid.At(tx, ty + 1) == Tile::Floor
-                         || m_grid.At(tx, ty + 1) == Tile::Grass
-                         || m_grid.At(tx, ty + 1) == Tile::Dirt;
-        const bool floorE = m_grid.At(tx + 1, ty) == Tile::Floor
-                         || m_grid.At(tx + 1, ty) == Tile::Grass
-                         || m_grid.At(tx + 1, ty) == Tile::Dirt;
-        const bool floorW = m_grid.At(tx - 1, ty) == Tile::Floor
-                         || m_grid.At(tx - 1, ty) == Tile::Grass
-                         || m_grid.At(tx - 1, ty) == Tile::Dirt;
-        const bool hasYFloor = floorN || floorS;
-        const bool hasXFloor = floorE || floorW;
-        if (hasYFloor && !hasXFloor) return true;
-        if (hasXFloor && !hasYFloor) return false;
-        return true;
     }
 
     // Pick the floor sprite that should appear UNDER the wall so the room's
@@ -1606,9 +1576,16 @@ protected:
         m_sprites.Add("floorDirt",  128, 0, 64, 32);
         m_sprites.Add("stairs",     192, 0, 64, 32);
         // Row 1 (y=32..127): tall things, 64x96 each
-        m_sprites.Add("wallH",      0,   32, 64, 96);  // E-W slab
+        m_sprites.Add("wallH",      0,   32, 64, 96);  // E-W slab (full)
         m_sprites.Add("portal",     64,  32, 64, 96);
-        m_sprites.Add("wallV",      128, 32, 64, 96);  // N-S slab
+        m_sprites.Add("wallV",      128, 32, 64, 96);  // N-S slab (full)
+        // Half-slab regions overlap the full slabs' pixels but pick out
+        // just the east/west or north/south halves of the parallelogram so
+        // corner / T-junction tiles can draw ARMS instead of full crosses.
+        m_sprites.Add("wallH_W",    0,   32, 32, 96);  // west half of E-W slab
+        m_sprites.Add("wallH_E",    32,  32, 32, 96);  // east half
+        m_sprites.Add("wallV_S",    128, 32, 32, 96);  // south half of N-S slab
+        m_sprites.Add("wallV_N",    160, 32, 32, 96);  // north half
         // Row 2 (y=128..175): player, 32x48 each
         m_sprites.Add("playerS",    0,   128, 32, 48);
         m_sprites.Add("playerN",    32,  128, 32, 48);
