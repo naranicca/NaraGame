@@ -493,6 +493,14 @@ struct RenderItem {
     const GroundItem* groundItem = nullptr;
 };
 
+// Per-frame markers a subclass wants on the minimap (monsters, loot, etc).
+// Position is TILE-space; the minimap projects them itself.
+struct MinimapDot {
+    Vec2 pos{};
+    Color color{};
+    float size = 3.0f;
+};
+
 class WorldScene : public Scene {
 public:
     WorldScene(GameContext* ctx) : m_ctx(ctx) {}
@@ -511,6 +519,7 @@ protected:
     // Per-scene hooks. Defaults are no-ops so TownScene gets a free pass.
     virtual void OnUpdateExtra(float /*dt*/) {}
     virtual void AppendActors(std::vector<RenderItem>& /*items*/) {}
+    virtual void AppendMinimapDots(std::vector<MinimapDot>& /*dots*/) {}
     virtual void DrawWorldOverlay() {}   // drawn after actors, under HUD (e.g. attack VFX)
     virtual void DrawHudExtra() {}
 
@@ -642,6 +651,7 @@ protected:
         // HUD.
         r.DrawText(*m_ctx->font, HudLine(), {16.0f, 12.0f}, Color::White(), 20.0f);
         DrawHudExtra();
+        DrawMinimap();
 
         // Inventory panel overlay last so it sits above all gameplay UI.
         DrawInventoryOverlay();
@@ -875,6 +885,82 @@ protected:
                    Color(0.80f, 0.80f, 0.80f, 1.0f), 12.0f);
     }
 
+    // ----- Minimap (top-right corner) ---------------------------------------
+    // Iso-aligned -- tiles project the same way they do in the world view,
+    // so "up-right on screen" reads as the same direction on both. unit is
+    // adaptive: the iso bbox of (gridW + gridH) tiles is fitted into the
+    // panel with a small inset, so a large dungeon and a small town both
+    // fill the panel sensibly.
+    void DrawMinimap() {
+        if (m_grid.w <= 0 || m_grid.h <= 0) return;
+        Renderer2D& r = *m_ctx->renderer;
+        constexpr float kPanelW = 200.0f;
+        constexpr float kPanelH = 160.0f;
+        constexpr float kMargin = 16.0f;
+        constexpr float kInset  = 6.0f;
+        const Vec2 panel{m_ctx->screenW - kPanelW - kMargin, kMargin + 40.0f};
+
+        r.DrawQuad(panel, {kPanelW, kPanelH}, Color(0.0f, 0.0f, 0.0f, 0.72f));
+
+        // unit = pixels per tile width. Iso bbox: (W+H)*unit/2 wide and
+        // (W+H)*unit/4 tall. Solve for the tighter of the two axes.
+        const float side = static_cast<float>(m_grid.w + m_grid.h);
+        const float availW = kPanelW - 2.0f * kInset;
+        const float availH = kPanelH - 2.0f * kInset;
+        const float unit = std::min(2.0f * availW / side, 4.0f * availH / side);
+        const Vec2 origin{panel.x + kPanelW * 0.5f,
+                          panel.y + kPanelH * 0.5f - (side * 0.25f * unit) * 0.5f
+                                  + (side * 0.25f * unit) * 0.5f};
+        // The two halves of `origin.y` look like a no-op but they read as
+        // "centre vertically, then offset by half the iso height upward so
+        // the diamond is centred not anchored top". Leaving them explicit
+        // makes the math obvious if/when the panel dimensions change.
+
+        auto toMM = [&](float tx, float ty) -> Vec2 {
+            return { origin.x + (tx - ty) * unit * 0.5f,
+                     panel.y + kInset + (tx + ty) * unit * 0.25f };
+        };
+
+        const float cellW = std::max(unit, 1.5f);
+        const float cellH = std::max(unit * 0.5f, 1.0f);
+
+        for (int y = 0; y < m_grid.h; ++y) {
+            for (int x = 0; x < m_grid.w; ++x) {
+                const Tile t = m_grid.At(x, y);
+                if (t == Tile::Empty) continue;
+                Color c;
+                switch (t) {
+                    case Tile::Floor:  c = Color(0.32f, 0.30f, 0.28f, 1.0f); break;
+                    case Tile::Grass:  c = Color(0.28f, 0.50f, 0.24f, 1.0f); break;
+                    case Tile::Dirt:   c = Color(0.55f, 0.42f, 0.28f, 1.0f); break;
+                    case Tile::Wall:   c = Color(0.70f, 0.68f, 0.64f, 1.0f); break;
+                    case Tile::Portal: c = Color(0.30f, 0.65f, 1.00f, 1.0f); break;
+                    case Tile::Stairs: c = Color(1.00f, 0.85f, 0.30f, 1.0f); break;
+                    default: continue;
+                }
+                const Vec2 mm = toMM(static_cast<float>(x), static_cast<float>(y));
+                r.DrawQuad({mm.x - cellW * 0.5f, mm.y - cellH * 0.5f},
+                           {cellW, cellH}, c);
+            }
+        }
+
+        std::vector<MinimapDot> dots;
+        AppendMinimapDots(dots);
+        for (const MinimapDot& d : dots) {
+            const Vec2 mm = toMM(d.pos.x, d.pos.y);
+            r.DrawQuad({mm.x - d.size * 0.5f, mm.y - d.size * 0.5f},
+                       {d.size, d.size}, d.color);
+        }
+
+        // Player marker is drawn last so it can never be hidden under a
+        // monster or item dot that happens to overlap the same minimap pixel.
+        const Vec2 pmm = toMM(m_player.x, m_player.y);
+        r.DrawQuad({pmm.x - 3.0f, pmm.y - 3.0f}, {6.0f, 6.0f},
+                   Color(0.0f, 0.0f, 0.0f, 0.9f));
+        r.DrawQuad({pmm.x - 2.0f, pmm.y - 2.0f}, {4.0f, 4.0f},
+                   Color(0.95f, 0.95f, 1.00f, 1.0f));
+    }
+
     void DrawInventoryOverlay() {
         if (!m_inventoryOpen) return;
         Renderer2D& r = *m_ctx->renderer;
@@ -1106,6 +1192,15 @@ protected:
             it.groundItem = &gi;
             items.push_back(it);
         }
+    }
+
+    void AppendMinimapDots(std::vector<MinimapDot>& dots) override {
+        for (const Monster& m : m_monsters) {
+            if (!m.alive) continue;
+            dots.push_back({m.pos, Color(0.95f, 0.20f, 0.20f, 1.0f), 3.0f});
+        }
+        for (const GroundItem& gi : m_groundItems)
+            dots.push_back({gi.pos, RarityColor(gi.item.rarity), 3.0f});
     }
 
     void DrawWorldOverlay() override {
