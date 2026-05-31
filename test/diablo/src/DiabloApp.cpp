@@ -590,29 +590,20 @@ protected:
         const float testY = m_player.y + stepY + (stepY > 0 ? kPad : -kPad);
         if (!blocked(m_player.x, testY)) m_player.y += stepY;
 
-        // Interact on E. Sweep tiles inside a generous 2-tile radius around
-        // the player and pick the CLOSEST portal/stairs as the target. The
-        // wider radius makes "I'm clearly near the thing" register even
-        // when WASD over- or under-shoots by a tile or two; the closest-
-        // wins tiebreak avoids triggering the wrong tile when two are
-        // somehow nearby.
-        if (Input::IsKeyPressed(Key::E)) {
+        // Auto-interact: walking onto the portal (in town) or the stairs
+        // (in dungeon) triggers OnInteract() automatically -- no key press.
+        // Round to the nearest tile so movement that ends slightly past the
+        // cell centre still counts as "on it"; the single-tile check keeps
+        // the behaviour predictable (no accidental enter from one tile
+        // away). OnInteract changes scene, so return immediately after.
+        {
             const int px = static_cast<int>(std::lround(m_player.x));
             const int py = static_cast<int>(std::lround(m_player.y));
-            float bestSq = 1e9f;
-            bool found = false;
-            for (int dy = -2; dy <= 2; ++dy) {
-                for (int dx = -2; dx <= 2; ++dx) {
-                    const int tx = px + dx, ty = py + dy;
-                    const Tile t = m_grid.At(tx, ty);
-                    if (t != Tile::Portal && t != Tile::Stairs) continue;
-                    const float fdx = m_player.x - tx;
-                    const float fdy = m_player.y - ty;
-                    const float dsq = fdx * fdx + fdy * fdy;
-                    if (dsq < bestSq) { bestSq = dsq; found = true; }
-                }
+            const Tile pt = m_grid.At(px, py);
+            if (pt == Tile::Portal || pt == Tile::Stairs) {
+                OnInteract();
+                return;
             }
-            if (found) OnInteract();
         }
 
         OnUpdateExtra(dt);
@@ -1144,7 +1135,7 @@ protected:
     std::string HudLine() const override {
         char buf[240];
         std::snprintf(buf, sizeof(buf),
-                      "TOWN  -  WASD  -  E portal  -  I inventory  -  V fog %s  -  visits %d  bag %d",
+                      "TOWN  -  WASD walk onto portal  -  I inventory  -  V fog %s  -  visits %d  bag %d",
                       m_ctx->fogOfWar ? "on" : "off",
                       m_ctx->dungeonVisits, (int)m_ctx->inventory.size());
         return buf;
@@ -1358,7 +1349,7 @@ protected:
     std::string HudLine() const override {
         char buf[240];
         std::snprintf(buf, sizeof(buf),
-                      "DUNGEON  -  WASD/Space  -  E stairs  -  I inventory  -  V fog %s  -  kills %d  items %d",
+                      "DUNGEON  -  WASD/Space  -  walk onto stairs  -  I inventory  -  V fog %s  -  kills %d  items %d",
                       m_ctx->fogOfWar ? "on" : "off",
                       m_ctx->monstersKilled, m_ctx->itemsPickedUp);
         return buf;
@@ -1407,7 +1398,7 @@ public:
                                 Color(0.95f, 0.30f, 0.15f, 1.0f));
         m_ctx->DrawTextCentered("press ENTER to begin",   280.0f, 28.0f,
                                 Color(0.85f, 0.80f, 0.70f, 1.0f));
-        m_ctx->DrawTextCentered("WASD move  -  E interact  -  Esc quit",
+        m_ctx->DrawTextCentered("WASD move  -  Space attack  -  Esc quit",
                                 420.0f, 22.0f,
                                 Color(0.7f, 0.65f, 0.55f, 1.0f));
         r.End();
