@@ -33,7 +33,12 @@ enum class BufferUsage { Static, Dynamic };       // Dynamic = CPU-updated per f
 enum class IndexFormat { Uint16, Uint32 };
 enum class TextureFormat { RGBA8 };
 enum class PrimitiveTopology { TriangleList };
-enum class BlendMode { None, Alpha };             // Alpha = src-over
+// Source-over alpha is the default for sprite batches; Additive glows
+// (particles, lights, slash VFX) ignore the destination's alpha and just
+// add the source colour; Multiply darkens by the source (shadows, fog
+// overlays). All three blend the destination alpha back in so a chained
+// pipeline that reads the buffer (e.g. UI on top) still sees usable alpha.
+enum class BlendMode { None, Alpha, Additive, Multiply };
 
 // Sampler filter mode chosen per-texture at creation time. Linear blurs on
 // upscale (good for soft sprites and photos); Point keeps pixels crisp (right

@@ -194,6 +194,19 @@ void Renderer2D::Init(RHIDevice& device) {
     };
     m_pipeline = device.CreatePipeline(pipelineDesc);
 
+    // Same sprite shader and vertex layout, alternate blend states. Created
+    // up-front so SetBlendMode() just picks one in Flush() instead of
+    // building a pipeline on first use (cheap memory, no first-call hitch).
+    {
+        PipelineDesc addDesc = pipelineDesc;
+        addDesc.blend = BlendMode::Additive;
+        m_pipelineAdditive = device.CreatePipeline(addDesc);
+
+        PipelineDesc mulDesc = pipelineDesc;
+        mulDesc.blend = BlendMode::Multiply;
+        m_pipelineMultiply = device.CreatePipeline(mulDesc);
+    }
+
     // Second shader + pipeline for MSDF text. Same vertex layout + camera UBO
     // as the sprite path; only the pixel program differs.
     ShaderDesc msdfShaderDesc;
@@ -282,6 +295,8 @@ void Renderer2D::Shutdown() {
     m_fogShader.reset();
     m_msdfPipeline.reset();
     m_msdfShader.reset();
+    m_pipelineMultiply.reset();
+    m_pipelineAdditive.reset();
     m_pipeline.reset();
     m_shader.reset();
     m_fogTexture = nullptr;
@@ -297,7 +312,8 @@ void Renderer2D::Begin(const Mat4& viewProjection) {
     if (m_cameraBuffer)
         m_cameraBuffer->Update(viewProjection.data, sizeof(Mat4));
     m_inScene = true;
-    m_currentMode = PipelineMode::Sprite;
+    m_currentMode  = PipelineMode::Sprite;
+    m_currentBlend = BlendMode::Alpha;   // every frame starts back at vanilla blend
     m_fogTexture = nullptr;   // each frame opts in via SetFog; defensive reset
                               // also drops dangling pointers from scene swaps
     m_drawCalls = 0;
@@ -318,6 +334,14 @@ void Renderer2D::EnsureSpriteMode() {
     // text pass left us in MSDF mode.
     if (m_currentMode == PipelineMode::MSDF)
         EnsureMode(PipelineMode::Sprite);
+}
+
+void Renderer2D::SetBlendMode(BlendMode mode) {
+    if (m_currentBlend == mode) return;
+    // Different blend = different pipeline = batch break.
+    Flush();
+    StartBatch();
+    m_currentBlend = mode;
 }
 
 void Renderer2D::End() {
@@ -573,7 +597,17 @@ void Renderer2D::Flush() {
     switch (m_currentMode) {
         case PipelineMode::MSDF:      pipeline = m_msdfPipeline.get(); break;
         case PipelineMode::FogSprite: pipeline = m_fogPipeline.get();  break;
-        case PipelineMode::Sprite:    pipeline = m_pipeline.get();     break;
+        case PipelineMode::Sprite:
+            // Sprite mode honours the active blend; MSDF and FogSprite
+            // stay on Alpha to keep the pipeline matrix bounded.
+            switch (m_currentBlend) {
+                case BlendMode::Additive: pipeline = m_pipelineAdditive.get(); break;
+                case BlendMode::Multiply: pipeline = m_pipelineMultiply.get(); break;
+                case BlendMode::Alpha:
+                case BlendMode::None:
+                default:                  pipeline = m_pipeline.get();         break;
+            }
+            break;
     }
     m_device->BindPipeline(pipeline);
     m_device->BindUniformBuffer(0, m_cameraBuffer.get());

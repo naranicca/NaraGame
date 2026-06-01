@@ -174,18 +174,46 @@ D3D11Pipeline::D3D11Pipeline(ID3D11Device* device, const PipelineDesc& desc) {
     if (FAILED(hr))
         NARAGAME_ERROR("CreateInputLayout failed (0x%08lX)", static_cast<unsigned long>(hr));
 
-    // Blend state.
+    // Blend state. Alpha channel stays src-over (ONE / INV_SRC_ALPHA) for
+    // every enabled mode so a buffer downstream still has usable alpha.
     D3D11_BLEND_DESC blend{};
     auto& rt = blend.RenderTarget[0];
     rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    if (desc.blend == BlendMode::Alpha) {
-        rt.BlendEnable = TRUE;
-        rt.SrcBlend = D3D11_BLEND_SRC_ALPHA;
-        rt.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-        rt.BlendOp = D3D11_BLEND_OP_ADD;
-        rt.SrcBlendAlpha = D3D11_BLEND_ONE;
-        rt.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-        rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    switch (desc.blend) {
+        case BlendMode::Alpha:
+            rt.BlendEnable    = TRUE;
+            rt.SrcBlend       = D3D11_BLEND_SRC_ALPHA;
+            rt.DestBlend      = D3D11_BLEND_INV_SRC_ALPHA;
+            rt.BlendOp        = D3D11_BLEND_OP_ADD;
+            rt.SrcBlendAlpha  = D3D11_BLEND_ONE;
+            rt.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+            rt.BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+            break;
+        case BlendMode::Additive:
+            // src.rgb * src.a + dst.rgb -- glow / spark / explosion lighting
+            rt.BlendEnable    = TRUE;
+            rt.SrcBlend       = D3D11_BLEND_SRC_ALPHA;
+            rt.DestBlend      = D3D11_BLEND_ONE;
+            rt.BlendOp        = D3D11_BLEND_OP_ADD;
+            rt.SrcBlendAlpha  = D3D11_BLEND_ONE;
+            rt.DestBlendAlpha = D3D11_BLEND_ONE;
+            rt.BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+            break;
+        case BlendMode::Multiply:
+            // src.rgb * dst.rgb -- shadow / colour grade / fog overlay
+            rt.BlendEnable    = TRUE;
+            rt.SrcBlend       = D3D11_BLEND_DEST_COLOR;
+            rt.DestBlend      = D3D11_BLEND_ZERO;
+            rt.BlendOp        = D3D11_BLEND_OP_ADD;
+            rt.SrcBlendAlpha  = D3D11_BLEND_ONE;
+            rt.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+            rt.BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+            break;
+        case BlendMode::None:
+        default:
+            // Pass-through: src replaces dst with no blending.
+            rt.BlendEnable = FALSE;
+            break;
     }
     device->CreateBlendState(&blend, m_blendState.GetAddressOf());
 

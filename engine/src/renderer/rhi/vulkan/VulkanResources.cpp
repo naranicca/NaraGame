@@ -322,14 +322,40 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& ctx, const PipelineDesc& des
     VkPipelineColorBlendAttachmentState blend{};
     blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    if (desc.blend == BlendMode::Alpha) {
-        blend.blendEnable = VK_TRUE;
-        blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        blend.colorBlendOp = VK_BLEND_OP_ADD;
-        blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    // Mirrors the D3D11 mapping. Alpha channel stays src-over so a chained
+    // pipeline that reads this buffer still gets meaningful alpha back.
+    switch (desc.blend) {
+        case BlendMode::Alpha:
+            blend.blendEnable         = VK_TRUE;
+            blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Additive:
+            blend.blendEnable         = VK_TRUE;
+            blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Multiply:
+            blend.blendEnable         = VK_TRUE;
+            blend.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+            blend.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blend.colorBlendOp        = VK_BLEND_OP_ADD;
+            blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend.alphaBlendOp        = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::None:
+        default:
+            blend.blendEnable = VK_FALSE;
+            break;
     }
     VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     cb.attachmentCount = 1;

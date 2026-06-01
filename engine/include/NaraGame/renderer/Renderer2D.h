@@ -84,6 +84,15 @@ public:
     void DrawText(const MSDFFont& font, const std::string& text, const Vec2& position,
                   const Color& color = Color::White(), float pixelSize = 32.0f);
 
+    // Select the blend mode for subsequent sprite quads. Default Alpha is
+    // src-over; Additive ignores the destination's RGB and just sums (good
+    // for glows / sparks); Multiply darkens the destination by the source
+    // (shadows, colour grades, fog overlays). Only the plain Sprite pipeline
+    // exposes blend variants -- MSDF text and FogSprite stay on Alpha to
+    // avoid pipeline-mode-x-blend-mode explosion. Changing modes flushes
+    // the current batch.
+    void SetBlendMode(BlendMode mode);
+
     // Switch to fog mode: subsequent sprite quads sample `fogTexture` (a low
     // resolution visibility map) per pixel and multiply it into the output,
     // giving pixel-smooth fog of war independent of sprite tile boundaries.
@@ -138,7 +147,9 @@ private:
     std::unique_ptr<RHIShader>   m_shader;
     std::unique_ptr<RHIShader>   m_msdfShader;
     std::unique_ptr<RHIShader>   m_fogShader;
-    std::unique_ptr<RHIPipeline> m_pipeline;
+    std::unique_ptr<RHIPipeline> m_pipeline;            // Sprite, Alpha
+    std::unique_ptr<RHIPipeline> m_pipelineAdditive;    // Sprite, Additive
+    std::unique_ptr<RHIPipeline> m_pipelineMultiply;    // Sprite, Multiply
     std::unique_ptr<RHIPipeline> m_msdfPipeline;
     std::unique_ptr<RHIPipeline> m_fogPipeline;
     std::unique_ptr<RHIBuffer>   m_vertexBuffer;
@@ -155,7 +166,8 @@ private:
     uint32_t m_quadCount = 0;
     uint32_t m_drawCalls = 0;
     RHITexture* m_currentTexture = nullptr;
-    PipelineMode m_currentMode = PipelineMode::Sprite;
+    PipelineMode m_currentMode  = PipelineMode::Sprite;
+    BlendMode    m_currentBlend = BlendMode::Alpha;     // only meaningful in Sprite mode
     bool m_inScene = false;
 
     static constexpr uint32_t kMaxQuads = 20000;
