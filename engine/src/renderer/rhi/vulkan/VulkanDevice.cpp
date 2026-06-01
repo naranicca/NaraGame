@@ -615,6 +615,20 @@ void VulkanDevice::Clear(const Color& color) {
     vkCmdClearAttachments(m_commandBuffer, 1, &ca, 1, &rect);
 }
 
+void VulkanDevice::SetRenderTarget(RHITexture* target) {
+    // TODO: Vulkan offscreen render targets. Needs a per-RT VkFramebuffer +
+    // offscreen render pass (finalLayout = SHADER_READ_ONLY_OPTIMAL) and
+    // an EndRenderPass/BeginRenderPass swap between the backbuffer pass and
+    // the offscreen pass. D3D11 already supports this; Vulkan tracks behind.
+    if (target != nullptr) {
+        static bool warned = false;
+        if (!warned) {
+            NARAGAME_WARN("SetRenderTarget(non-null) not yet implemented on Vulkan backend");
+            warned = true;
+        }
+    }
+}
+
 void VulkanDevice::EndFrame() {
     if (!m_frameValid)
         return;

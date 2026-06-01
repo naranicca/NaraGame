@@ -31,6 +31,13 @@ public:
     virtual void EndFrame() = 0;
     virtual void Present() = 0;
 
+    // Bind a render-target texture (created with TextureDesc::renderTarget
+    // = true) as the active colour target. Subsequent draws land in it, and
+    // its viewport / scissor match the texture's dimensions. Passing nullptr
+    // restores the backbuffer. Clear() after this call wipes the new target.
+    // The previous target's contents become readable as a sampled texture.
+    virtual void SetRenderTarget(RHITexture* target) = 0;
+
     // --- Resource creation ---
     virtual std::unique_ptr<RHIBuffer> CreateBuffer(const BufferDesc& desc) = 0;
     virtual std::unique_ptr<RHITexture> CreateTexture(const TextureDesc& desc) = 0;

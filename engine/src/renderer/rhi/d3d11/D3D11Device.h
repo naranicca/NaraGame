@@ -25,6 +25,8 @@ public:
     void EndFrame() override;
     void Present() override;
 
+    void SetRenderTarget(RHITexture* target) override;
+
     std::unique_ptr<RHIBuffer> CreateBuffer(const BufferDesc& desc) override;
     std::unique_ptr<RHITexture> CreateTexture(const TextureDesc& desc) override;
     std::unique_ptr<RHIShader> CreateShader(const ShaderDesc& desc) override;
@@ -55,7 +57,8 @@ private:
     ComPtr<ID3D11Device> m_device;
     ComPtr<ID3D11DeviceContext> m_context;
     ComPtr<IDXGISwapChain> m_swapChain;
-    ComPtr<ID3D11RenderTargetView> m_renderTarget;
+    ComPtr<ID3D11RenderTargetView> m_renderTarget;   // backbuffer RTV
+    ID3D11RenderTargetView* m_currentRTV = nullptr;  // either backbuffer or an RT texture's RTV
 
     // Fixed-function states shared by 2D rendering.
     ComPtr<ID3D11RasterizerState> m_rasterizer;   // cull none, solid fill

@@ -20,6 +20,7 @@ public:
     void Clear(const Color&) override {}
     void EndFrame() override {}
     void Present() override {}
+    void SetRenderTarget(RHITexture*) override {}
 
     RHIBackend Backend() const override { return RHIBackend::Metal; }
     const char* BackendName() const override { return "Metal (stub)"; }

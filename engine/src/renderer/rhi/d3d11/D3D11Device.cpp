@@ -116,7 +116,11 @@ void D3D11Device::BeginFrame() {
     if (!m_context || !m_renderTarget)
         return;
 
-    ID3D11RenderTargetView* targets[] = {m_renderTarget.Get()};
+    // Reset to backbuffer at the top of every frame so a target left bound
+    // by the previous frame's last draw doesn't leak. Games re-bind via
+    // SetRenderTarget if they want offscreen work this frame.
+    m_currentRTV = m_renderTarget.Get();
+    ID3D11RenderTargetView* targets[] = {m_currentRTV};
     m_context->OMSetRenderTargets(1, targets, nullptr);
 
     D3D11_VIEWPORT viewport{};
@@ -135,10 +139,46 @@ void D3D11Device::BeginFrame() {
 }
 
 void D3D11Device::Clear(const Color& color) {
-    if (!m_context || !m_renderTarget)
+    if (!m_context || !m_currentRTV)
         return;
     const float rgba[4] = {color.r, color.g, color.b, color.a};
-    m_context->ClearRenderTargetView(m_renderTarget.Get(), rgba);
+    m_context->ClearRenderTargetView(m_currentRTV, rgba);
+}
+
+void D3D11Device::SetRenderTarget(RHITexture* target) {
+    if (!m_context) return;
+    if (target == nullptr) {
+        // Back to backbuffer
+        m_currentRTV = m_renderTarget.Get();
+        ID3D11RenderTargetView* targets[] = {m_currentRTV};
+        m_context->OMSetRenderTargets(1, targets, nullptr);
+        D3D11_VIEWPORT vp{};
+        vp.Width = static_cast<float>(m_width);
+        vp.Height = static_cast<float>(m_height);
+        vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+        m_context->RSSetViewports(1, &vp);
+        return;
+    }
+    auto* tex = static_cast<D3D11Texture*>(target);
+    ID3D11RenderTargetView* rtv = tex->RTV();
+    if (rtv == nullptr) {
+        NARAGAME_ERROR("SetRenderTarget: texture wasn't created with renderTarget=true");
+        return;
+    }
+    // Unbind the texture from any sampler slot it might still be living in,
+    // otherwise D3D11 silently nulls the RTV (an SRV/RTV can't both be bound).
+    ID3D11ShaderResourceView* nullSrv[1] = {nullptr};
+    for (uint32_t i = 0; i < 4; ++i)
+        m_context->PSSetShaderResources(i, 1, nullSrv);
+
+    m_currentRTV = rtv;
+    ID3D11RenderTargetView* targets[] = {m_currentRTV};
+    m_context->OMSetRenderTargets(1, targets, nullptr);
+    D3D11_VIEWPORT vp{};
+    vp.Width  = static_cast<float>(tex->Width());
+    vp.Height = static_cast<float>(tex->Height());
+    vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+    m_context->RSSetViewports(1, &vp);
 }
 
 void D3D11Device::EndFrame() {}

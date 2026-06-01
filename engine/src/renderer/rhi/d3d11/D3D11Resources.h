@@ -43,11 +43,14 @@ public:
     bool UpdatePixels(const void* pixels) override;
 
     ID3D11ShaderResourceView* SRV() const { return m_srv.Get(); }
+    // Non-null only when the texture was created with renderTarget = true.
+    ID3D11RenderTargetView* RTV() const { return m_rtv.Get(); }
 
 private:
     ComPtr<ID3D11DeviceContext> m_context;
     ComPtr<ID3D11Texture2D> m_texture;
     ComPtr<ID3D11ShaderResourceView> m_srv;
+    ComPtr<ID3D11RenderTargetView> m_rtv;   // RT-only
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     TextureFilter m_filter = TextureFilter::Linear;

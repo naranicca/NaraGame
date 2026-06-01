@@ -79,13 +79,20 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (desc.renderTarget)
+        td.BindFlags |= D3D11_BIND_RENDER_TARGET;
 
     D3D11_SUBRESOURCE_DATA init{};
     init.pSysMem = desc.pixels;
     init.SysMemPitch = desc.width * 4; // RGBA8
 
+    // Render targets start undefined and get filled by the device's first
+    // draw into them; we never seed them from CPU pixels.
+    const D3D11_SUBRESOURCE_DATA* initPtr =
+        (desc.pixels && !desc.renderTarget) ? &init : nullptr;
+
     HRESULT hr =
-        device->CreateTexture2D(&td, desc.pixels ? &init : nullptr, m_texture.GetAddressOf());
+        device->CreateTexture2D(&td, initPtr, m_texture.GetAddressOf());
     if (FAILED(hr)) {
         NARAGAME_ERROR("CreateTexture2D failed (0x%08lX)", static_cast<unsigned long>(hr));
         return;
@@ -94,6 +101,12 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
     hr = device->CreateShaderResourceView(m_texture.Get(), nullptr, m_srv.GetAddressOf());
     if (FAILED(hr))
         NARAGAME_ERROR("CreateShaderResourceView failed (0x%08lX)", static_cast<unsigned long>(hr));
+
+    if (desc.renderTarget) {
+        hr = device->CreateRenderTargetView(m_texture.Get(), nullptr, m_rtv.GetAddressOf());
+        if (FAILED(hr))
+            NARAGAME_ERROR("CreateRenderTargetView failed (0x%08lX)", static_cast<unsigned long>(hr));
+    }
 }
 
 bool D3D11Texture::UpdatePixels(const void* pixels) {

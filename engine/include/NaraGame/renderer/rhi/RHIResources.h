@@ -36,6 +36,10 @@ struct TextureDesc {
     TextureFormat format = TextureFormat::RGBA8;
     TextureFilter filter = TextureFilter::Linear;
     const void* pixels = nullptr;  // tightly packed, top-to-bottom
+    // When true the texture is created with render-target usage so the
+    // device can draw into it via SetRenderTarget(). pixels is ignored on
+    // RT textures; they start at undefined contents until first drawn into.
+    bool renderTarget = false;
 };
 
 class RHITexture {

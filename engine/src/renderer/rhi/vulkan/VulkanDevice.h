@@ -32,6 +32,7 @@ public:
     void Clear(const Color& color) override;
     void EndFrame() override;
     void Present() override;
+    void SetRenderTarget(RHITexture* target) override;
 
     std::unique_ptr<RHIBuffer> CreateBuffer(const BufferDesc& desc) override;
     std::unique_ptr<RHITexture> CreateTexture(const TextureDesc& desc) override;
