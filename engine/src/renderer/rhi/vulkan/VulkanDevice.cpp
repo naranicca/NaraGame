@@ -62,11 +62,22 @@ VulkanDevice::VulkanDevice(const RHIDeviceDesc& desc)
     if (!CreateSwapchain(m_width, m_height))
         return;
 
-    // Render pass: single color attachment, clear -> store -> present.
+    // Render pass: single color attachment, undefined -> store -> present.
+    //
+    // Why DONT_CARE instead of CLEAR: the render pass opens unconditionally
+    // in BeginFrame() so games that don't call Clear() (e.g. Diablo paints
+    // its own background quad) can still issue draws. With LOAD_OP_CLEAR
+    // the pass would need a clear value at vkCmdBeginRenderPass time, and
+    // the per-frame clear colour isn't known until the game's OnRender
+    // optionally calls Clear(). LOAD_OP_DONT_CARE lets us open the pass
+    // without one; Clear() then uses vkCmdClearAttachments inside the
+    // already-active pass to wipe the colour buffer when the game wants
+    // it. The downside (uninitialised pixels if the game never covers the
+    // whole screen) matches D3D11's behaviour exactly.
     VkAttachmentDescription color{};
     color.format = m_swapFormat;
     color.samples = VK_SAMPLE_COUNT_1_BIT;
-    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -559,21 +570,17 @@ void VulkanDevice::BeginFrame() {
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(m_commandBuffer, &begin);
     m_frameValid = true;
-    m_passActive = false;
-}
 
-void VulkanDevice::Clear(const Color& color) {
-    if (!m_frameValid)
-        return;
-
-    VkClearValue clear{};
-    clear.color = {{color.r, color.g, color.b, color.a}};
+    // Open the render pass right away so the game can issue draw commands
+    // without having to call Clear() first. The pass uses LOAD_OP_DONT_CARE
+    // so we don't need a clear value at BeginRenderPass time; Clear() does
+    // its own vkCmdClearAttachments inside the active pass when invoked.
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_renderPass;
     rp.framebuffer = m_framebuffers[m_imageIndex];
     rp.renderArea.extent = m_swapExtent;
-    rp.clearValueCount = 1;
-    rp.pClearValues = &clear;
+    rp.clearValueCount = 0;
+    rp.pClearValues = nullptr;
     vkCmdBeginRenderPass(m_commandBuffer, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
     // Negative-height viewport flips Y so our top-left-origin matrices match.
@@ -588,6 +595,24 @@ void VulkanDevice::Clear(const Color& color) {
     VkRect2D scissor{{0, 0}, m_swapExtent};
     vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
     m_passActive = true;
+}
+
+void VulkanDevice::Clear(const Color& color) {
+    if (!m_frameValid || !m_passActive)
+        return;
+    // We're already inside the per-frame render pass (opened in BeginFrame),
+    // so wipe the colour attachment with a clear-rect command rather than
+    // starting another pass.
+    VkClearAttachment ca{};
+    ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ca.colorAttachment = 0;
+    ca.clearValue.color = {{color.r, color.g, color.b, color.a}};
+    VkClearRect rect{};
+    rect.rect.offset = {0, 0};
+    rect.rect.extent = m_swapExtent;
+    rect.baseArrayLayer = 0;
+    rect.layerCount = 1;
+    vkCmdClearAttachments(m_commandBuffer, 1, &ca, 1, &rect);
 }
 
 void VulkanDevice::EndFrame() {
