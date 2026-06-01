@@ -396,7 +396,16 @@ void VulkanDevice::CreatePipelineResources() {
     sampler.maxLod = VK_LOD_CLAMP_NONE;
     vkCreateSampler(m_device, &sampler, nullptr, &m_sampler);
 
-    VkDescriptorSetLayoutBinding bindings[2]{};
+    // 4-binding layout shared by all pipelines. The sprite/MSDF shaders only
+    // read bindings 0/1; the fog shader reads all four. Bindings unused by a
+    // shader still need a valid descriptor written (validation requirement)
+    // but the data at those slots is ignored, so substitution with the slot-0
+    // resources is safe -- see GetDescriptorSet().
+    //   binding 0: dynamic UBO  (camera matrix) -- vertex stage
+    //   binding 1: sampler      (sprite atlas)  -- fragment stage
+    //   binding 2: sampler      (fog visibility) -- fragment stage
+    //   binding 3: dynamic UBO  (fog UV xform)   -- vertex stage
+    VkDescriptorSetLayoutBinding bindings[4]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     bindings[0].descriptorCount = 1;
@@ -405,16 +414,24 @@ void VulkanDevice::CreatePipelineResources() {
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[1].descriptorCount = 1;
     bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[3].binding = 3;
+    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    bindings[3].descriptorCount = 1;
+    bindings[3].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     VkDescriptorSetLayoutCreateInfo dl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dl.bindingCount = 2;
+    dl.bindingCount = 4;
     dl.pBindings = bindings;
     vkCreateDescriptorSetLayout(m_device, &dl, nullptr, &m_descriptorLayout);
 
     VkDescriptorPoolSize sizes[2]{};
     sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    sizes[0].descriptorCount = 128;
+    sizes[0].descriptorCount = 256; // 2 UBO bindings per set, ~128 sets
     sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[1].descriptorCount = 128;
+    sizes[1].descriptorCount = 256; // 2 image bindings per set
     VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dp.maxSets = 128;
     dp.poolSizeCount = 2;
@@ -435,8 +452,21 @@ void VulkanDevice::CreatePipelineResources() {
     m_ctx.frame = &m_frame;
 }
 
-VkDescriptorSet VulkanDevice::GetDescriptorSet(VulkanTexture* texture) {
-    const auto it = m_descriptorCache.find(texture->View());
+VkDescriptorSet VulkanDevice::GetDescriptorSet() {
+    // Substitute fog bindings with the slot-0 resources when the active
+    // pipeline doesn't use fog. The shaders for those pipelines don't read
+    // bindings 2/3, but Vulkan still needs every binding in the layout to
+    // hold a valid descriptor at allocation time.
+    VulkanTexture* spriteTex = m_boundTexture;
+    VulkanTexture* fogTex    = m_boundFogTexture ? m_boundFogTexture : spriteTex;
+    VulkanBuffer*  fogUbo    = m_boundFogUbo     ? m_boundFogUbo     : m_boundUbo;
+
+    DescKey key{
+        spriteTex->View(),
+        fogTex->View(),
+        fogUbo->Native(),
+    };
+    const auto it = m_descriptorCache.find(key);
     if (it != m_descriptorCache.end())
         return it->second;
 
@@ -448,32 +478,54 @@ VkDescriptorSet VulkanDevice::GetDescriptorSet(VulkanTexture* texture) {
     if (vkAllocateDescriptorSets(m_device, &ai, &set) != VK_SUCCESS)
         return VK_NULL_HANDLE;
 
-    VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = m_boundUbo->Native();
-    bufInfo.offset = 0;
-    bufInfo.range = 64; // one mat4
+    VkDescriptorBufferInfo cameraBuf{};
+    cameraBuf.buffer = m_boundUbo->Native();
+    cameraBuf.offset = 0;
+    cameraBuf.range  = 64; // one mat4
 
-    VkDescriptorImageInfo imgInfo{};
-    imgInfo.sampler = m_sampler;
-    imgInfo.imageView = texture->View();
-    imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorBufferInfo fogBuf{};
+    fogBuf.buffer = fogUbo->Native();
+    fogBuf.offset = 0;
+    fogBuf.range  = 32; // two vec4 (u/v affine rows)
 
-    VkWriteDescriptorSet writes[2]{};
+    VkDescriptorImageInfo spriteImg{};
+    spriteImg.sampler     = m_sampler;
+    spriteImg.imageView   = spriteTex->View();
+    spriteImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkDescriptorImageInfo fogImg{};
+    fogImg.sampler     = m_sampler;
+    fogImg.imageView   = fogTex->View();
+    fogImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet writes[4]{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = set;
     writes[0].dstBinding = 0;
     writes[0].descriptorCount = 1;
     writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    writes[0].pBufferInfo = &bufInfo;
+    writes[0].pBufferInfo = &cameraBuf;
     writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[1].dstSet = set;
     writes[1].dstBinding = 1;
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].pImageInfo = &imgInfo;
-    vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+    writes[1].pImageInfo = &spriteImg;
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = set;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[2].pImageInfo = &fogImg;
+    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet = set;
+    writes[3].dstBinding = 3;
+    writes[3].descriptorCount = 1;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    writes[3].pBufferInfo = &fogBuf;
+    vkUpdateDescriptorSets(m_device, 4, writes, 0, nullptr);
 
-    m_descriptorCache[texture->View()] = set;
+    m_descriptorCache[key] = set;
     return set;
 }
 
@@ -481,7 +533,11 @@ void VulkanDevice::BeginFrame() {
     m_frameValid = false;
     m_boundLayout = VK_NULL_HANDLE;
     m_boundUbo = nullptr;
+    m_boundUboOffset = 0;
     m_boundTexture = nullptr;
+    m_boundFogUbo = nullptr;
+    m_boundFogUboOffset = 0;
+    m_boundFogTexture = nullptr;
     ++m_frame;
     if (!Valid())
         return;
@@ -610,27 +666,47 @@ void VulkanDevice::BindIndexBuffer(RHIBuffer* buffer, IndexFormat format) {
                                                        : VK_INDEX_TYPE_UINT32);
 }
 
-void VulkanDevice::BindUniformBuffer(uint32_t, RHIBuffer* buffer) {
+void VulkanDevice::BindUniformBuffer(uint32_t slot, RHIBuffer* buffer) {
     if (buffer == nullptr)
         return;
-    m_boundUbo = static_cast<VulkanBuffer*>(buffer);
-    m_boundUboOffset = m_boundUbo->CurrentOffset();
+    auto* vb = static_cast<VulkanBuffer*>(buffer);
+    if (slot == 0) {
+        m_boundUbo = vb;
+        m_boundUboOffset = vb->CurrentOffset();
+    } else {
+        // slot 1 maps to layout binding 3 (fog UV xform). See descriptor
+        // layout note in CreatePipelineResources().
+        m_boundFogUbo = vb;
+        m_boundFogUboOffset = vb->CurrentOffset();
+    }
 }
 
-void VulkanDevice::BindTexture(uint32_t, RHITexture* texture) {
-    m_boundTexture = static_cast<VulkanTexture*>(texture);
+void VulkanDevice::BindTexture(uint32_t slot, RHITexture* texture) {
+    if (slot == 0)
+        m_boundTexture = static_cast<VulkanTexture*>(texture);
+    else
+        m_boundFogTexture = static_cast<VulkanTexture*>(texture);
 }
 
 void VulkanDevice::DrawIndexed(uint32_t indexCount, uint32_t firstIndex) {
     if (!m_frameValid || m_boundLayout == VK_NULL_HANDLE || m_boundUbo == nullptr ||
         m_boundTexture == nullptr)
         return;
-    VkDescriptorSet set = GetDescriptorSet(m_boundTexture);
+    VkDescriptorSet set = GetDescriptorSet();
     if (set == VK_NULL_HANDLE)
         return;
-    const uint32_t dynamicOffset = static_cast<uint32_t>(m_boundUboOffset);
+    // Dynamic offsets are matched to dynamic-UBO bindings in ascending binding
+    // order: index 0 = binding 0 (camera), index 1 = binding 3 (fog xform).
+    // When the fog UBO isn't bound, the descriptor substitutes the camera UBO,
+    // so re-using its offset keeps the read in-bounds.
+    const VkDeviceSize fogOffset =
+        m_boundFogUbo ? m_boundFogUboOffset : m_boundUboOffset;
+    const uint32_t dynamicOffsets[2] = {
+        static_cast<uint32_t>(m_boundUboOffset),
+        static_cast<uint32_t>(fogOffset),
+    };
     vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_boundLayout, 0, 1,
-                            &set, 1, &dynamicOffset);
+                            &set, 2, dynamicOffsets);
     vkCmdDrawIndexed(m_commandBuffer, indexCount, 1, firstIndex, 0, 0);
 }
 

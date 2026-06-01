@@ -56,3 +56,10 @@ Emit-Spv `
     -headerPath "$root\engine\src\renderer\MsdfSpirv.h" `
     -vertSymbol "kMsdfVertSpv" `
     -fragSymbol "kMsdfFragSpv"
+
+Emit-Spv `
+    -vert "$root\engine\shaders\sprite_fog.vert" `
+    -frag "$root\engine\shaders\sprite_fog.frag" `
+    -headerPath "$root\engine\src\renderer\FogSpirv.h" `
+    -vertSymbol "kFogVertSpv" `
+    -fragSymbol "kFogFragSpv"

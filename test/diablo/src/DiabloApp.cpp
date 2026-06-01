@@ -450,6 +450,7 @@ struct Monster {
 // ---------------------------------------------------------------------------
 struct GameContext {
     Renderer2D* renderer = nullptr;
+    RHIDevice*  device   = nullptr;  // for per-scene textures (e.g. fog map)
     MSDFFont*   font     = nullptr;
     TextureAtlas* sprites = nullptr;
     float screenW = kScreenW;
@@ -556,6 +557,21 @@ protected:
 
     void OnEnter() override {
         EnterWorld();
+        // Fog texture lives for the lifetime of this scene. It's sized to
+        // gw*N x gh*N so each world tile gets a kFogSubdiv*kFogSubdiv block
+        // of visibility texels -- enough resolution that the bilinear sample
+        // in the fog shader makes the falloff edge look round, not blocky.
+        m_fogTexW = m_grid.w * kFogSubdiv;
+        m_fogTexH = m_grid.h * kFogSubdiv;
+        m_fogPixels.assign(static_cast<size_t>(m_fogTexW) * m_fogTexH * 4u, 0);
+        TextureDesc td;
+        td.width  = static_cast<uint32_t>(m_fogTexW);
+        td.height = static_cast<uint32_t>(m_fogTexH);
+        td.format = TextureFormat::RGBA8;     // only .R is read by the shader
+        td.filter = TextureFilter::Linear;    // bilinear smooths sub-tile edges
+        td.pixels = m_fogPixels.data();
+        if (m_ctx->device)
+            m_fogTexture = m_ctx->device->CreateTexture(td);
         // SceneManager runs OnUpdate then OnRender; on the FIRST frame after
         // a Change() the manager has already applied the pending push, so
         // OnEnter happens but OnUpdate for the new scene is skipped this
@@ -739,6 +755,141 @@ protected:
             }
             if (!anyChanged) break;
         }
+
+        BuildFogPixels();
+    }
+
+    // DDA grid raycast: returns true if a straight ray from world-space
+    // (px, py) reaches (wx, wy) without crossing any sight-blocking tile.
+    // The destination's OWN tile doesn't count -- a ray that ends exactly on
+    // a wall tile sees that wall (its front face), it just can't see past it.
+    //
+    // Why DDA instead of Bresenham: we sample at sub-cell precision (fog
+    // texels per tile), so the start/end points are fractional. DDA steps
+    // exactly along the ray to each tile boundary, giving precise wall-edge
+    // shadows; Bresenham snaps to integer cells and would leak light around
+    // corners or pinch shadows depending on which neighbour it picked.
+    bool RayHasLOS(float px, float py, float wx, float wy) const {
+        const int endTx = static_cast<int>(std::floor(wx));
+        const int endTy = static_cast<int>(std::floor(wy));
+        int cx = static_cast<int>(std::floor(px));
+        int cy = static_cast<int>(std::floor(py));
+        if (cx == endTx && cy == endTy) return true;
+
+        const float dx = wx - px;
+        const float dy = wy - py;
+        const int   stepX = (dx > 0.0f) ? 1 : (dx < 0.0f ? -1 : 0);
+        const int   stepY = (dy > 0.0f) ? 1 : (dy < 0.0f ? -1 : 0);
+
+        constexpr float kBig = 1.0e30f;
+        // tMax: parametric distance along the ray to the next tile boundary
+        // on each axis. tDelta: distance between successive boundaries.
+        float tMaxX, tMaxY, tDeltaX, tDeltaY;
+        if (stepX > 0) {
+            tMaxX   = ((cx + 1) - px) / dx;
+            tDeltaX = 1.0f / dx;
+        } else if (stepX < 0) {
+            tMaxX   = (cx - px) / dx;          // dx is negative -> positive
+            tDeltaX = -1.0f / dx;
+        } else {
+            tMaxX = tDeltaX = kBig;
+        }
+        if (stepY > 0) {
+            tMaxY   = ((cy + 1) - py) / dy;
+            tDeltaY = 1.0f / dy;
+        } else if (stepY < 0) {
+            tMaxY   = (cy - py) / dy;
+            tDeltaY = -1.0f / dy;
+        } else {
+            tMaxY = tDeltaY = kBig;
+        }
+
+        // Cap iterations to the Manhattan distance plus a safety margin.
+        // Each step crosses exactly one tile boundary so the bound is tight.
+        const int maxIter = std::abs(endTx - cx) + std::abs(endTy - cy) + 4;
+        for (int iter = 0; iter < maxIter; ++iter) {
+            if (tMaxX < tMaxY) {
+                cx += stepX;
+                tMaxX += tDeltaX;
+            } else {
+                cy += stepY;
+                tMaxY += tDeltaY;
+            }
+            if (cx == endTx && cy == endTy) return true;
+            if (cx < 0 || cy < 0 || cx >= m_grid.w || cy >= m_grid.h) return false;
+            if (TileBlocksSight(m_grid.At(cx, cy))) return false;
+        }
+        return false;
+    }
+
+    // Rebuild the sub-tile fog texture from the player position. Every sub-
+    // cell gets its visibility from a per-pixel raycast against the wall
+    // grid, so walls cast pixel-accurate shadows: corners reveal exactly
+    // what's geometrically reachable, and the shadow line behind a wall
+    // tile lands on a clean diagonal instead of a tile-aligned step. The
+    // bilinear sample in the fog shader then softens that one-texel edge
+    // into a smooth gradient on screen.
+    void BuildFogPixels() {
+        if (!m_fogTexture) return;
+        const int W = m_fogTexW, H = m_fogTexH;
+        if (W <= 0 || H <= 0) return;
+
+        if (!SceneFogOfWar()) {
+            // Fog off: full visibility everywhere. We still keep the texture
+            // up to date so a mid-scene V toggle ON picks up correct data on
+            // the very next frame without an extra OnUpdate round-trip.
+            std::fill(m_fogPixels.begin(), m_fogPixels.end(), uint8_t{0xFF});
+            m_fogTexture->UpdatePixels(m_fogPixels.data());
+            return;
+        }
+
+        constexpr float kInnerR = 4.0f;
+        constexpr float kOuterR = 9.0f;
+        const float invBand = 1.0f / (kOuterR - kInnerR);
+        const float invN    = 1.0f / static_cast<float>(kFogSubdiv);
+        const float px = m_player.x;
+        const float py = m_player.y;
+        const int   gw = m_grid.w;
+
+        for (int sy = 0; sy < H; ++sy) {
+            const int ty = sy / kFogSubdiv;
+            const float wy = (sy + 0.5f) * invN;
+            const float ddy = wy - py;
+            for (int sx = 0; sx < W; ++sx) {
+                const int tx = sx / kFogSubdiv;
+                const float wx = (sx + 0.5f) * invN;
+                const float ddx = wx - px;
+                const float d = std::sqrt(ddx * ddx + ddy * ddy);
+
+                float light = 0.0f;
+                if (d < kOuterR) {
+                    // Wall sub-cells use tile-level visibility (LOS + chain
+                    // extension) instead of a strict sub-cell raycast: a
+                    // connected wall row inevitably has its inner neighbours
+                    // sitting on the path from the player to its outer ones,
+                    // and sub-cell raycasting them blocks each other in a
+                    // stripey pattern. Tile-level vis treats the wall row as
+                    // one surface, then the sub-cell distance falloff still
+                    // gives a smooth gradient across the wall sprite.
+                    const bool visible =
+                        TileBlocksSight(m_grid.At(tx, ty))
+                            ? m_lightLevel[static_cast<size_t>(ty) * gw + tx] > 0.0f
+                            : RayHasLOS(px, py, wx, wy);
+                    if (visible) {
+                        if (d <= kInnerR) light = 1.0f;
+                        else              light = (kOuterR - d) * invBand;
+                    }
+                }
+                const uint8_t L8 = static_cast<uint8_t>(
+                    std::clamp(light * 255.0f, 0.0f, 255.0f));
+                const size_t idx = (static_cast<size_t>(sy) * W + sx) * 4u;
+                m_fogPixels[idx + 0] = L8;  // R: visibility multiplier
+                m_fogPixels[idx + 1] = L8;  // G/B/A mirror R so a debug dump
+                m_fogPixels[idx + 2] = L8;  // of the atlas reads as grayscale
+                m_fogPixels[idx + 3] = 0xFF;
+            }
+        }
+        m_fogTexture->UpdatePixels(m_fogPixels.data());
     }
 
     void OnRender() override {
@@ -761,6 +912,30 @@ protected:
         r.DrawQuad({0.0f, 0.0f}, {m_ctx->screenW, m_ctx->screenH},
                    Color(0.0f, 0.0f, 0.0f, 1.0f));
 
+        // Switch to fog mode for the world pass. SetFog uploads a 2x3 affine
+        // transform that maps each vertex's SCREEN coordinates back to fog
+        // texture UV (= world tile coords / grid dims). The shader does the
+        // bilinear sample and multiplies it into the sprite, giving smooth
+        // pixel-level fade across tile boundaries. We pop fog before HUD so
+        // text / minimap / inventory render at full brightness.
+        const bool useFog = SceneFogOfWar() && m_fogTexture != nullptr;
+        m_fogActive = useFog;
+        if (useFog) {
+            const float gw = static_cast<float>(m_grid.w);
+            const float gh = static_cast<float>(m_grid.h);
+            // TileToScreen(tx, ty) = ((tx-ty)*kHalfTileW + cam.x, (tx+ty)*kHalfTileH + cam.y).
+            // Inverting: tx = (sx-cam.x)/kTileW + (sy-cam.y)/kTileH
+            //            ty = (sy-cam.y)/kTileH - (sx-cam.x)/kTileW
+            // Then fog UV = (tx/gw, ty/gh).
+            const float au = 1.0f / (kTileW * gw);
+            const float bu = 1.0f / (kTileH * gw);
+            const float av = -1.0f / (kTileW * gh);
+            const float bv = 1.0f / (kTileH * gh);
+            m_fogURow = Vec4{au, bu, -(au * m_camera.x + bu * m_camera.y), 0.0f};
+            m_fogVRow = Vec4{av, bv, -(av * m_camera.x + bv * m_camera.y), 0.0f};
+            r.SetFog(m_fogTexture.get(), m_fogURow, m_fogVRow);
+        }
+
         // Two-pass painter: floors first (the ground plane lies under
         // everything), then everything else (walls, actors, loot, portal
         // glow) sorted by iso depth. A single mixed pass biased floors
@@ -772,7 +947,11 @@ protected:
             for (int x = 0; x < m_grid.w; ++x) {
                 const Tile t = m_grid.At(x, y);
                 if (t == Tile::Empty) continue;
-                if (SceneFogOfWar() && TileLight(x, y) <= 0.0f) continue;
+                // No tile-level cull: the fog shader multiplies each pixel by
+                // its sub-cell visibility, so tiles outside the radius render
+                // as pure black (= invisible against the background). Letting
+                // them draw means the outer cutoff curves through tiles
+                // instead of stepping at tile borders.
                 if (!TileIsTall(t)) {
                     DrawTile(x, y, t);
                 } else if (t == Tile::Wall) {
@@ -821,6 +1000,11 @@ protected:
 
         DrawWorldOverlay();
 
+        // Leave fog mode so HUD / inventory / minimap render at full
+        // brightness regardless of the player's visibility state.
+        if (useFog)
+            r.SetFog(nullptr, {}, {});
+
         // HUD.
         r.DrawText(*m_ctx->font, HudLine(), {16.0f, 12.0f}, Color::White(), 20.0f);
         DrawHudExtra();
@@ -835,9 +1019,6 @@ protected:
     void DrawTile(int tx, int ty, Tile t) {
         Renderer2D& r = *m_ctx->renderer;
         const Vec2 center = TileToScreen((float)tx, (float)ty, m_camera);
-        const float L     = SceneFogOfWar() ? TileLight(tx, ty) : 1.0f;
-        const float WallL = SceneFogOfWar() ? WallLight(tx, ty) : 1.0f;
-        const Color floorTint(L, L, L, 1.0f);
 
         // TileToScreen(tx, ty) returns the NORTH corner of the tile diamond
         // on screen (since world point (tx, ty) is the tile's NW vertex).
@@ -847,9 +1028,14 @@ protected:
         // Floor sprites are 64x32 with the diamond centred at the sprite's
         // own centre, so the sprite's top-left lands at (center.x - halfW,
         // center.y) for the diamond to align with the tile.
+        //
+        // Visibility tinting (the per-tile L/WallL multiplier we used to
+        // bake into every sprite color) now comes from the fog shader, which
+        // bilinear-samples the visibility texture per pixel. Quad tints stay
+        // White() so they don't darken twice.
         auto drawFloor = [&](const TextureRegion& region) {
             const Vec2 pos{center.x - kHalfTileW, center.y};
-            r.DrawQuad(pos, {kTileW, kFloorTileH}, region, floorTint);
+            r.DrawQuad(pos, {kTileW, kFloorTileH}, region, Color::White());
         };
         auto drawTall = [&](const TextureRegion& region,
                             const Color& tint = Color::White()) {
@@ -858,12 +1044,7 @@ protected:
             // is then at y = center.y + tile height - sprite height.
             const Vec2 pos{center.x - kHalfTileW,
                            center.y + kTileH - kWallSpriteH};
-            // Light multiplies into RGB; the existing alpha (e.g. the wall
-            // occlusion fade) is preserved. Walls use the blended WallL so
-            // they fade alongside the floors they border instead of
-            // standing out at full brightness against a dim corridor.
-            const Color lit{tint.r * WallL, tint.g * WallL, tint.b * WallL, tint.a};
-            r.DrawQuad(pos, {kTileW, kWallSpriteH}, region, lit);
+            r.DrawQuad(pos, {kTileW, kWallSpriteH}, region, tint);
         };
 
         switch (t) {
@@ -872,14 +1053,27 @@ protected:
             case Tile::Dirt:   drawFloor(m_ctx->sprites->Get("floorDirt"));  break;
             case Tile::Stairs: drawFloor(m_ctx->sprites->Get("stairs"));     break;
             case Tile::Wall: {
-                // The floor underlay for walls is painted in the floor
-                // pass (see DrawWallUnderlay) so later walls' underlays
-                // don't overwrite earlier walls' bodies. Here we only
-                // draw the wall sprite itself.
-                const Color tint = WallOcclusionTint(tx, ty);
-                const Color lit{tint.r * WallL, tint.g * WallL,
-                                tint.b * WallL, tint.a};
-                drawTall(m_ctx->sprites->Get("wall"), lit);
+                // The floor underlay for walls is painted in the floor pass
+                // (see DrawWallUnderlay) so later walls' underlays don't
+                // overwrite earlier walls' bodies. Here we only draw the
+                // wall sprite itself.
+                //
+                // Walls have to come out of fog mode for the draw. A wall
+                // sprite is 96px tall and paints UP over the tile NORTH of
+                // its own; with per-pixel fog that top half samples the
+                // northern tile's visibility, so a wall next to a shadowed
+                // floor shows a ghosted shadow on its cap. Switching to
+                // sprite mode and baking the wall's chain-extended light
+                // into the tint keeps the whole sprite at one brightness --
+                // no ghost seam where the wall meets the floor behind it.
+                const float wallLight = WallLight(tx, ty);
+                Color tint = WallOcclusionTint(tx, ty);
+                tint.r *= wallLight;
+                tint.g *= wallLight;
+                tint.b *= wallLight;
+                if (m_fogActive) r.SetFog(nullptr, {}, {});
+                drawTall(m_ctx->sprites->Get("wall"), tint);
+                if (m_fogActive) r.SetFog(m_fogTexture.get(), m_fogURow, m_fogVRow);
                 break;
             }
             case Tile::Portal:
@@ -897,13 +1091,13 @@ protected:
     void DrawWallUnderlay(int tx, int ty) {
         Renderer2D& r = *m_ctx->renderer;
         const Vec2 center = TileToScreen((float)tx, (float)ty, m_camera);
-        const float L = SceneFogOfWar() ? TileLight(tx, ty) : 1.0f;
         const char* name = (SceneFloorKind() == Tile::Grass)
             ? "floorGrass" : "floorStone";
+        // Tint is White() -- the fog shader handles visibility per pixel.
         r.DrawQuad({center.x - kHalfTileW, center.y},
                    {kTileW, kFloorTileH},
                    m_ctx->sprites->Get(name),
-                   Color(L, L, L, 1.0f));
+                   Color::White());
     }
 
     // dominant tile type wins.
@@ -950,14 +1144,11 @@ protected:
         const TextureRegion& reg = m_ctx->sprites->Get(name);
         const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
                        center.y - kPlayerSpriteH};
-        const float L = SceneFogOfWar()
-            ? TileLight(static_cast<int>(std::lround(m.pos.x)),
-                        static_cast<int>(std::lround(m.pos.y)))
-            : 1.0f;
-        const Color baseTint = (m.hurtFlashTimer > 0.0f)
-            ? Color(1.6f, 1.6f, 1.6f, 1.0f)   // overbrighten -> looks like a hit flash
+        // Fog shader applies the visibility multiplier per pixel; the tint
+        // here only carries hit-flash brightening (or White() otherwise).
+        const Color tint = (m.hurtFlashTimer > 0.0f)
+            ? Color(1.6f, 1.6f, 1.6f, 1.0f)
             : Color::White();
-        const Color tint{baseTint.r * L, baseTint.g * L, baseTint.b * L, baseTint.a};
         r.DrawQuad(pos, {kPlayerSpriteW, kPlayerSpriteH}, reg, tint);
 
         // HP bar appears only on damaged monsters so a full-strength room
@@ -977,14 +1168,8 @@ protected:
         Renderer2D& r = *m_ctx->renderer;
         const Vec2 center = TileToScreen(gi.pos.x, gi.pos.y, m_camera);
         const float bob = std::sin(gi.bobPhase) * 2.0f;
-        const float L = SceneFogOfWar()
-            ? TileLight(static_cast<int>(std::lround(gi.pos.x)),
-                        static_cast<int>(std::lround(gi.pos.y)))
-            : 1.0f;
-        const Color core(
-            RarityColor(gi.item.rarity).r * L,
-            RarityColor(gi.item.rarity).g * L,
-            RarityColor(gi.item.rarity).b * L, 1.0f);
+        // Fog shader applies the visibility multiplier per pixel.
+        const Color core = RarityColor(gi.item.rarity);
         // Outer halo first (larger, transparent), inner gem on top -- reads
         // as a glowing pickup against the floor without needing a sprite.
         r.DrawQuad({center.x - 14.0f, center.y - 12.0f + bob}, {28.0f, 18.0f},
@@ -1269,10 +1454,13 @@ protected:
     bool IsRenderItemVisible(const RenderItem& it) const {
         if (!SceneFogOfWar()) return true;
         if (it.kind == RenderItem::Kind::Player) return true;
+        // Walls (and portals, stairs) draw regardless of tile light: the fog
+        // shader fades them per pixel, so a wall on the edge of vision shows
+        // a smooth gradient across its sprite instead of vanishing whole at
+        // the tile-light cutoff.
+        if (it.kind == RenderItem::Kind::Tile) return true;
         int tx = 0, ty = 0;
         switch (it.kind) {
-            case RenderItem::Kind::Tile:
-                tx = it.tx; ty = it.ty; break;
             case RenderItem::Kind::Monster:
                 tx = static_cast<int>(std::lround(it.monster->pos.x));
                 ty = static_cast<int>(std::lround(it.monster->pos.y));
@@ -1281,7 +1469,9 @@ protected:
                 tx = static_cast<int>(std::lround(it.groundItem->pos.x));
                 ty = static_cast<int>(std::lround(it.groundItem->pos.y));
                 break;
-            case RenderItem::Kind::Player: return true;
+            case RenderItem::Kind::Tile:
+            case RenderItem::Kind::Player:
+                return true;
         }
         return TileLight(tx, ty) > 0.0f;
     }
@@ -1289,6 +1479,31 @@ protected:
     std::vector<float> m_lightLevel;      // recomputed every frame in OnUpdate
     bool  m_inventoryOpen   = false;
     float m_playerHurtFlash = 0.0f;   // ticked down by combat code; gated on player tint
+
+    // Cached fog UV affine transform (filled in OnRender). Wall draws need to
+    // temporarily flip out of fog mode and back, so we keep the params handy
+    // instead of recomputing them per wall.
+    Vec4 m_fogURow{};
+    Vec4 m_fogVRow{};
+    bool m_fogActive = false;
+
+    // Pixel-level fog of war. The R channel is the visibility multiplier in
+    // [0, 1] sampled by the fog shader (engine/shaders/sprite_fog.frag). We
+    // subdivide each world tile into kFogSubdiv*kFogSubdiv texels so the
+    // distance-falloff edge curves smoothly through tiles instead of stepping
+    // at tile boundaries. RecomputeVisibility() rebuilds it every player tile
+    // move; the GPU bilinear-samples it via SetFog in OnRender.
+    //
+    // 8 texels per tile means the smallest visible "step" on screen is ~8
+    // pixels for floor tiles (64-wide divided across 8 sub-cells), and the
+    // GPU bilinearly interpolates between neighbours so even those 8-pixel
+    // blocks blend smoothly. 4 was too coarse -- the eye picked up the sub-
+    // cell grid as a separate stepping artifact.
+    static constexpr int kFogSubdiv = 8;
+    std::unique_ptr<RHITexture> m_fogTexture;
+    std::vector<uint8_t>        m_fogPixels;
+    int  m_fogTexW = 0;
+    int  m_fogTexH = 0;
 
     virtual std::string HudLine() const = 0;
 };
@@ -1632,6 +1847,7 @@ protected:
         m_sprites.Add("zombie",     32,  176, 32, 48);
 
         m_ctx.renderer = &m_renderer;
+        m_ctx.device   = &GetDevice();
         m_ctx.font     = &m_font;
         m_ctx.sprites  = &m_sprites;
         m_ctx.makeTitle   = [this]() { return std::make_unique<TitleScene>(&m_ctx); };

@@ -5,6 +5,7 @@
 #include "NaraGame/renderer/Font.h"
 #include "NaraGame/renderer/MSDFFont.h"
 #include "NaraGame/renderer/rhi/RHIDevice.h"
+#include "renderer/FogSpirv.h"    // precompiled Vulkan fog sprite shader
 #include "renderer/MsdfSpirv.h"   // precompiled Vulkan MSDF shader
 #include "renderer/SpriteSpirv.h" // precompiled Vulkan sprite shader
 
@@ -45,6 +46,53 @@ SamplerState uSampler : register(s0);
 
 float4 PSMain(VSOutput input) : SV_TARGET {
     return uTexture.Sample(uSampler, input.uv) * input.color;
+}
+)";
+
+// Fog-sprite shader: vertex stage outputs an additional UV computed from the
+// vertex position via a 2x3 affine transform (two vec4 rows); pixel stage
+// multiplies the sprite by a single-channel visibility sample. Used by the
+// iso games to fade tiles smoothly around the player without per-tile tint
+// stepping -- the full 2x3 lets iso projections invert screen->world tile.
+static const char* kFogSpriteShader = R"(
+cbuffer Camera   : register(b0) { float4x4 uViewProj; };
+cbuffer FogXform : register(b1) {
+    float4 uFogU;   // fogU = uFogU.x*pos.x + uFogU.y*pos.y + uFogU.z
+    float4 uFogV;
+};
+
+struct VSInput {
+    float3 position : POSITION;
+    float4 color    : COLOR;
+    float2 uv       : TEXCOORD0;
+};
+struct VSOutput {
+    float4 position : SV_POSITION;
+    float4 color    : COLOR;
+    float2 uv       : TEXCOORD0;
+    float2 fogUV    : TEXCOORD1;
+};
+
+VSOutput VSMain(VSInput input) {
+    VSOutput output;
+    output.position = mul(uViewProj, float4(input.position, 1.0));
+    output.color = input.color;
+    output.uv = input.uv;
+    output.fogUV = float2(
+        uFogU.x * input.position.x + uFogU.y * input.position.y + uFogU.z,
+        uFogV.x * input.position.x + uFogV.y * input.position.y + uFogV.z
+    );
+    return output;
+}
+
+Texture2D    uTexture : register(t0);
+Texture2D    uFog     : register(t1);
+SamplerState uSampler : register(s0);
+
+float4 PSMain(VSOutput input) : SV_TARGET {
+    float4 tex = uTexture.Sample(uSampler, input.uv);
+    float  fog = uFog.Sample(uSampler, input.fogUV).r;
+    return float4(tex.rgb * input.color.rgb * fog, tex.a * input.color.a);
 }
 )";
 
@@ -162,6 +210,22 @@ void Renderer2D::Init(RHIDevice& device) {
     msdfPipelineDesc.shader = m_msdfShader.get();
     m_msdfPipeline = device.CreatePipeline(msdfPipelineDesc);
 
+    // Third pipeline: same vertex layout as sprite, but pixel shader samples
+    // a second texture (fog visibility) and multiplies it into the output.
+    ShaderDesc fogShaderDesc;
+    fogShaderDesc.vertexSource = kFogSpriteShader;
+    fogShaderDesc.pixelSource = kFogSpriteShader;
+    fogShaderDesc.debugName = "Renderer2D::fogSprite";
+    fogShaderDesc.vertexSpirv = kFogVertSpv;
+    fogShaderDesc.vertexSpirvSize = sizeof(kFogVertSpv);
+    fogShaderDesc.pixelSpirv = kFogFragSpv;
+    fogShaderDesc.pixelSpirvSize = sizeof(kFogFragSpv);
+    m_fogShader = device.CreateShader(fogShaderDesc);
+
+    PipelineDesc fogPipelineDesc = pipelineDesc;
+    fogPipelineDesc.shader = m_fogShader.get();
+    m_fogPipeline = device.CreatePipeline(fogPipelineDesc);
+
     // Dynamic vertex buffer (filled each flush).
     BufferDesc vboDesc;
     vboDesc.type = BufferType::Vertex;
@@ -195,19 +259,32 @@ void Renderer2D::Init(RHIDevice& device) {
     cameraDesc.size = sizeof(Mat4);
     m_cameraBuffer = device.CreateBuffer(cameraDesc);
 
+    // Fog UV xform uniform buffer (two vec4 -- u/v affine rows). Lives for
+    // the renderer's lifetime; SetFog() writes to it before each fog-mode
+    // batch.
+    BufferDesc fogXformDesc;
+    fogXformDesc.type = BufferType::Uniform;
+    fogXformDesc.usage = BufferUsage::Dynamic;
+    fogXformDesc.size = sizeof(Vec4) * 2;
+    m_fogXformBuffer = device.CreateBuffer(fogXformDesc);
+
     m_vertices.reserve(kMaxVertices);
     NARAGAME_INFO("Renderer2D initialized (max %u quads/batch)", kMaxQuads);
 }
 
 void Renderer2D::Shutdown() {
     m_whiteTexture.reset();
+    m_fogXformBuffer.reset();
     m_cameraBuffer.reset();
     m_indexBuffer.reset();
     m_vertexBuffer.reset();
+    m_fogPipeline.reset();
+    m_fogShader.reset();
     m_msdfPipeline.reset();
     m_msdfShader.reset();
     m_pipeline.reset();
     m_shader.reset();
+    m_fogTexture = nullptr;
     m_device = nullptr;
 }
 
@@ -221,6 +298,8 @@ void Renderer2D::Begin(const Mat4& viewProjection) {
         m_cameraBuffer->Update(viewProjection.data, sizeof(Mat4));
     m_inScene = true;
     m_currentMode = PipelineMode::Sprite;
+    m_fogTexture = nullptr;   // each frame opts in via SetFog; defensive reset
+                              // also drops dangling pointers from scene swaps
     m_drawCalls = 0;
     StartBatch();
 }
@@ -230,6 +309,15 @@ void Renderer2D::EnsureMode(PipelineMode mode) {
     Flush();
     StartBatch();
     m_currentMode = mode;
+}
+
+void Renderer2D::EnsureSpriteMode() {
+    // FogSprite is a sprite-family pipeline (same vertex layout, same atlas
+    // input, extra fog sampling). Stay in it so SetFog persists across all
+    // the DrawQuads in a world pass; only fall back to plain Sprite if a
+    // text pass left us in MSDF mode.
+    if (m_currentMode == PipelineMode::MSDF)
+        EnsureMode(PipelineMode::Sprite);
 }
 
 void Renderer2D::End() {
@@ -251,7 +339,7 @@ void Renderer2D::DrawQuad(const Vec2& center, const Vec2& size, float angleRad,
                           const Color& color) {
     if (!m_inScene)
         return;
-    EnsureMode(PipelineMode::Sprite);
+    EnsureSpriteMode();
 
     RHITexture* tex = m_whiteTexture.get();
     if ((m_currentTexture != nullptr && m_currentTexture != tex) || m_quadCount >= kMaxQuads) {
@@ -280,7 +368,7 @@ void Renderer2D::DrawQuad(const Vec2& center, const Vec2& size, float angleRad,
                           const TextureRegion& region, const Color& tint) {
     if (!m_inScene)
         return;
-    EnsureMode(PipelineMode::Sprite);
+    EnsureSpriteMode();
 
     RHITexture* tex = region.texture ? region.texture : m_whiteTexture.get();
     if ((m_currentTexture != nullptr && m_currentTexture != tex) || m_quadCount >= kMaxQuads) {
@@ -309,7 +397,7 @@ void Renderer2D::DrawQuad(const Vec2& position, const Vec2& size, RHITexture* te
                           const Color& tint, const Vec4& uvRect) {
     if (!m_inScene)
         return;
-    EnsureMode(PipelineMode::Sprite);
+    EnsureSpriteMode();
 
     RHITexture* tex = texture ? texture : m_whiteTexture.get();
 
@@ -458,19 +546,44 @@ void Renderer2D::DrawText(const MSDFFont& font, const std::string& text,
     }
 }
 
+void Renderer2D::SetFog(RHITexture* fogTexture, const Vec4& uRow, const Vec4& vRow) {
+    if (fogTexture == nullptr) {
+        // Leaving fog mode: any queued fog quads need to flush before we drop
+        // the texture pointer, or they'd draw with the wrong shader/texture
+        // bindings.
+        EnsureMode(PipelineMode::Sprite);
+        m_fogTexture = nullptr;
+        return;
+    }
+    EnsureMode(PipelineMode::FogSprite);
+    m_fogTexture = fogTexture;
+
+    const Vec4 xform[2] = {uRow, vRow};
+    if (m_fogXformBuffer)
+        m_fogXformBuffer->Update(xform, sizeof(xform));
+}
+
 void Renderer2D::Flush() {
     if (m_quadCount == 0 || m_device == nullptr)
         return;
 
     m_vertexBuffer->Update(m_vertices.data(), m_vertices.size() * sizeof(Vertex));
 
-    RHIPipeline* pipeline =
-        (m_currentMode == PipelineMode::MSDF) ? m_msdfPipeline.get() : m_pipeline.get();
+    RHIPipeline* pipeline = nullptr;
+    switch (m_currentMode) {
+        case PipelineMode::MSDF:      pipeline = m_msdfPipeline.get(); break;
+        case PipelineMode::FogSprite: pipeline = m_fogPipeline.get();  break;
+        case PipelineMode::Sprite:    pipeline = m_pipeline.get();     break;
+    }
     m_device->BindPipeline(pipeline);
     m_device->BindUniformBuffer(0, m_cameraBuffer.get());
     m_device->BindVertexBuffer(m_vertexBuffer.get(), sizeof(Vertex));
     m_device->BindIndexBuffer(m_indexBuffer.get(), IndexFormat::Uint32);
     m_device->BindTexture(0, m_currentTexture);
+    if (m_currentMode == PipelineMode::FogSprite) {
+        m_device->BindUniformBuffer(1, m_fogXformBuffer.get());
+        m_device->BindTexture(1, m_fogTexture);
+    }
     m_device->DrawIndexed(m_quadCount * 6);
     ++m_drawCalls;
 }

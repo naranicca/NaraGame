@@ -11,6 +11,8 @@
 #include <windows.h>
 #include <vulkan/vulkan.h>
 
+#include <cstring>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -53,7 +55,29 @@ private:
     void DestroySwapchain();
     bool CreateSyncAndCommands();
     void CreatePipelineResources(); // sampler, descriptor layout/pool, context
-    VkDescriptorSet GetDescriptorSet(VulkanTexture* texture);
+    VkDescriptorSet GetDescriptorSet();
+
+    // Combined cache key for descriptor sets. Two textures (sprite/fog) plus
+    // the fog UBO buffer disambiguate everything we ever bind: the camera UBO
+    // is a single device-wide buffer so it doesn't need to be part of the key.
+    struct DescKey {
+        VkImageView spriteView = VK_NULL_HANDLE;
+        VkImageView fogView    = VK_NULL_HANDLE;
+        VkBuffer    fogUbo     = VK_NULL_HANDLE;
+        bool operator==(const DescKey& o) const noexcept {
+            return spriteView == o.spriteView && fogView == o.fogView && fogUbo == o.fogUbo;
+        }
+    };
+    struct DescKeyHash {
+        size_t operator()(const DescKey& k) const noexcept {
+            uint64_t a = 0, b = 0, c = 0;
+            std::memcpy(&a, &k.spriteView, sizeof(a));
+            std::memcpy(&b, &k.fogView,    sizeof(b));
+            std::memcpy(&c, &k.fogUbo,     sizeof(c));
+            const std::hash<uint64_t> h;
+            return h(a) ^ (h(b) * 0x9e3779b97f4a7c15ull) ^ (h(c) * 0xc2b2ae3d27d4eb4full);
+        }
+    };
 
     HWND m_hwnd = nullptr;
     uint32_t m_width = 0;
@@ -92,12 +116,19 @@ private:
     VkDescriptorSetLayout m_descriptorLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VulkanContext m_ctx;
-    std::unordered_map<VkImageView, VkDescriptorSet> m_descriptorCache;
+    std::unordered_map<DescKey, VkDescriptorSet, DescKeyHash> m_descriptorCache;
 
     VkPipelineLayout m_boundLayout = VK_NULL_HANDLE;
-    VulkanBuffer* m_boundUbo = nullptr;
-    VkDeviceSize m_boundUboOffset = 0;
-    VulkanTexture* m_boundTexture = nullptr;
+    // Slot 0 (binding 0 / binding 1): camera UBO + sprite texture.
+    VulkanBuffer*  m_boundUbo        = nullptr;
+    VkDeviceSize   m_boundUboOffset  = 0;
+    VulkanTexture* m_boundTexture    = nullptr;
+    // Slot 1 (binding 3 / binding 2): fog xform UBO + fog texture.
+    // Null when the active pipeline doesn't read fog -- GetDescriptorSet()
+    // substitutes the slot-0 resources so the descriptor set is fully valid.
+    VulkanBuffer*  m_boundFogUbo       = nullptr;
+    VkDeviceSize   m_boundFogUboOffset = 0;
+    VulkanTexture* m_boundFogTexture   = nullptr;
 };
 
 } // namespace NaraGame

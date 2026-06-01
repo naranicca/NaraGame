@@ -84,6 +84,24 @@ public:
     void DrawText(const MSDFFont& font, const std::string& text, const Vec2& position,
                   const Color& color = Color::White(), float pixelSize = 32.0f);
 
+    // Switch to fog mode: subsequent sprite quads sample `fogTexture` (a low
+    // resolution visibility map) per pixel and multiply it into the output,
+    // giving pixel-smooth fog of war independent of sprite tile boundaries.
+    // The fog texture's R channel is the visibility multiplier in [0, 1].
+    //
+    // `uRow` and `vRow` together form a 2x3 affine transform that maps each
+    // vertex's (x, y) position to fog UV space:
+    //   fogU = uRow.x*pos.x + uRow.y*pos.y + uRow.z
+    //   fogV = vRow.x*pos.x + vRow.y*pos.y + vRow.z
+    // The .w components are unused. The full 2x3 form (instead of just a
+    // scale + offset) lets iso games invert their screen->world rotation in
+    // the shader so the fog texture stays indexed by tile coordinates.
+    //
+    // Pass `fogTexture == nullptr` to leave fog mode and resume the regular
+    // sprite path (e.g. after the world pass, before drawing the HUD).
+    // Both transitions flush the current batch first.
+    void SetFog(RHITexture* fogTexture, const Vec4& uRow, const Vec4& vRow);
+
     RHITexture* WhiteTexture() const { return m_whiteTexture.get(); }
 
     // Number of Flush() calls (= GPU draw calls) issued between the last
@@ -104,22 +122,34 @@ private:
     void StartBatch();
     void Flush();
 
-    // Two pipelines share everything (vertex layout, camera UBO, sampler,
+    // Three pipelines share everything (vertex layout, camera UBO, sampler,
     // index buffer) except the fragment shader. The current batch tracks
     // which pipeline its quads belong to; changing modes flushes first so
-    // sprite quads and MSDF glyphs never end up in the same draw call.
-    enum class PipelineMode { Sprite, MSDF };
+    // sprite quads, MSDF glyphs, and fog-tinted quads never share a draw call.
+    enum class PipelineMode { Sprite, MSDF, FogSprite };
     void EnsureMode(PipelineMode mode);
+    // DrawQuad needs a sprite-family pipeline (Sprite or FogSprite). If we're
+    // in FogSprite (because the caller did SetFog), keep it; otherwise fall
+    // back to Sprite. Used in place of a bare EnsureMode(Sprite) so SetFog
+    // isn't undone by the very next DrawQuad.
+    void EnsureSpriteMode();
 
     RHIDevice* m_device = nullptr;
-    std::unique_ptr<RHIShader> m_shader;
-    std::unique_ptr<RHIShader> m_msdfShader;
+    std::unique_ptr<RHIShader>   m_shader;
+    std::unique_ptr<RHIShader>   m_msdfShader;
+    std::unique_ptr<RHIShader>   m_fogShader;
     std::unique_ptr<RHIPipeline> m_pipeline;
     std::unique_ptr<RHIPipeline> m_msdfPipeline;
-    std::unique_ptr<RHIBuffer> m_vertexBuffer;
-    std::unique_ptr<RHIBuffer> m_indexBuffer;
-    std::unique_ptr<RHIBuffer> m_cameraBuffer;
-    std::unique_ptr<RHITexture> m_whiteTexture;
+    std::unique_ptr<RHIPipeline> m_fogPipeline;
+    std::unique_ptr<RHIBuffer>   m_vertexBuffer;
+    std::unique_ptr<RHIBuffer>   m_indexBuffer;
+    std::unique_ptr<RHIBuffer>   m_cameraBuffer;
+    std::unique_ptr<RHIBuffer>   m_fogXformBuffer;
+    std::unique_ptr<RHITexture>  m_whiteTexture;
+
+    // Fog state: pointer is not owned (caller manages lifetime). When null,
+    // FogSprite mode falls back to Sprite via SetFog(nullptr).
+    RHITexture* m_fogTexture = nullptr;
 
     std::vector<Vertex> m_vertices;
     uint32_t m_quadCount = 0;
