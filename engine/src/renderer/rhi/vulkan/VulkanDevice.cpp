@@ -62,27 +62,9 @@ VulkanDevice::VulkanDevice(const RHIDeviceDesc& desc)
     if (!CreateSwapchain(m_width, m_height))
         return;
 
-    // Render pass: single color attachment, undefined -> store -> present.
-    //
-    // Why DONT_CARE instead of CLEAR: the render pass opens unconditionally
-    // in BeginFrame() so games that don't call Clear() (e.g. Diablo paints
-    // its own background quad) can still issue draws. With LOAD_OP_CLEAR
-    // the pass would need a clear value at vkCmdBeginRenderPass time, and
-    // the per-frame clear colour isn't known until the game's OnRender
-    // optionally calls Clear(). LOAD_OP_DONT_CARE lets us open the pass
-    // without one; Clear() then uses vkCmdClearAttachments inside the
-    // already-active pass to wipe the colour buffer when the game wants
-    // it. The downside (uninitialised pixels if the game never covers the
-    // whole screen) matches D3D11's behaviour exactly.
-    VkAttachmentDescription color{};
-    color.format = m_swapFormat;
-    color.samples = VK_SAMPLE_COUNT_1_BIT;
-    color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    // Three render passes (see VulkanDevice.h for the contract). They all
+    // share format, samples, store-op, and the same subpass dependency; only
+    // load/initial/final differ.
     VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -94,17 +76,48 @@ VulkanDevice::VulkanDevice(const RHIDeviceDesc& desc)
     dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    rp.attachmentCount = 1;
-    rp.pAttachments = &color;
-    rp.subpassCount = 1;
-    rp.pSubpasses = &subpass;
-    rp.dependencyCount = 1;
-    rp.pDependencies = &dep;
-    if (vkCreateRenderPass(m_device, &rp, nullptr, &m_renderPass) != VK_SUCCESS) {
-        NARAGAME_ERROR("vkCreateRenderPass failed");
-        return;
-    }
+
+    auto makePass = [&](VkFormat format, VkAttachmentLoadOp loadOp,
+                        VkImageLayout init, VkImageLayout final,
+                        VkRenderPass& out, const char* name) -> bool {
+        VkAttachmentDescription color{};
+        color.format = format;
+        color.samples = VK_SAMPLE_COUNT_1_BIT;
+        color.loadOp = loadOp;
+        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color.initialLayout = init;
+        color.finalLayout = final;
+        VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+        rp.attachmentCount = 1;
+        rp.pAttachments = &color;
+        rp.subpassCount = 1;
+        rp.pSubpasses = &subpass;
+        rp.dependencyCount = 1;
+        rp.pDependencies = &dep;
+        if (vkCreateRenderPass(m_device, &rp, nullptr, &out) != VK_SUCCESS) {
+            NARAGAME_ERROR("vkCreateRenderPass(%s) failed", name);
+            return false;
+        }
+        return true;
+    };
+
+    // Backbuffer passes use the swap chain format; offscreen RT uses RGBA8
+    // (VulkanTexture always allocates RGBA8 images, so the offscreen render
+    // pass attachment description must match).
+    if (!makePass(m_swapFormat, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                  VK_IMAGE_LAYOUT_UNDEFINED,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  m_renderPass, "backbuffer entry")) return;
+    if (!makePass(m_swapFormat, VK_ATTACHMENT_LOAD_OP_LOAD,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  m_renderPassResume, "backbuffer resume")) return;
+    if (!makePass(VK_FORMAT_R8G8B8A8_UNORM, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                  VK_IMAGE_LAYOUT_UNDEFINED,
+                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  m_offscreenRenderPass, "offscreen")) return;
 
     // Framebuffers (one per swapchain image).
     m_framebuffers.resize(m_swapViews.size());
@@ -146,6 +159,10 @@ VulkanDevice::~VulkanDevice() {
         vkDestroyCommandPool(m_device, m_commandPool, nullptr);
 
     DestroySwapchain();
+    if (m_offscreenRenderPass)
+        vkDestroyRenderPass(m_device, m_offscreenRenderPass, nullptr);
+    if (m_renderPassResume)
+        vkDestroyRenderPass(m_device, m_renderPassResume, nullptr);
     if (m_renderPass)
         vkDestroyRenderPass(m_device, m_renderPass, nullptr);
     if (m_device)
@@ -269,12 +286,25 @@ bool VulkanDevice::CreateSwapchain(uint32_t width, uint32_t height) {
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &formatCount, nullptr);
     std::vector<VkSurfaceFormatKHR> formats(formatCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &formatCount, formats.data());
+    // Prefer R8G8B8A8_UNORM so the backbuffer matches the format VulkanTexture
+    // always allocates -- otherwise the sprite pipeline's render-pass-format
+    // compatibility check fires when it's bound inside an offscreen RT pass.
+    // B8G8R8A8_UNORM is the fallback if the driver doesn't expose RGBA8.
     VkSurfaceFormatKHR chosen = formats[0];
     for (const auto& f : formats) {
-        if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
+        if (f.format == VK_FORMAT_R8G8B8A8_UNORM &&
             f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             chosen = f;
             break;
+        }
+    }
+    if (chosen.format != VK_FORMAT_R8G8B8A8_UNORM) {
+        for (const auto& f : formats) {
+            if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
+                f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                chosen = f;
+                break;
+            }
         }
     }
     m_swapFormat = chosen.format;
@@ -457,6 +487,7 @@ void VulkanDevice::CreatePipelineResources() {
     m_ctx.queue = m_queue;
     m_ctx.uploadPool = m_commandPool;
     m_ctx.renderPass = m_renderPass;
+    m_ctx.offscreenRenderPass = m_offscreenRenderPass;
     m_ctx.sampler = m_sampler;
     m_ctx.descriptorLayout = m_descriptorLayout;
     m_ctx.minUniformAlignment = props.limits.minUniformBufferOffsetAlignment;
@@ -570,11 +601,12 @@ void VulkanDevice::BeginFrame() {
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(m_commandBuffer, &begin);
     m_frameValid = true;
+    m_activeRT = nullptr;
 
-    // Open the render pass right away so the game can issue draw commands
-    // without having to call Clear() first. The pass uses LOAD_OP_DONT_CARE
-    // so we don't need a clear value at BeginRenderPass time; Clear() does
-    // its own vkCmdClearAttachments inside the active pass when invoked.
+    // Open the backbuffer render pass right away so the game can issue draw
+    // commands without having to call Clear() first. The pass uses
+    // LOAD_OP_DONT_CARE; Clear() does its own vkCmdClearAttachments inside
+    // the active pass when invoked.
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_renderPass;
     rp.framebuffer = m_framebuffers[m_imageIndex];
@@ -600,42 +632,131 @@ void VulkanDevice::BeginFrame() {
 void VulkanDevice::Clear(const Color& color) {
     if (!m_frameValid || !m_passActive)
         return;
-    // We're already inside the per-frame render pass (opened in BeginFrame),
-    // so wipe the colour attachment with a clear-rect command rather than
-    // starting another pass.
+    // We're already inside a render pass (backbuffer or RT). vkCmdClear
+    // Attachments needs a rect that fits inside that pass's render area --
+    // size it from the active target instead of the swap chain extent.
     VkClearAttachment ca{};
     ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     ca.colorAttachment = 0;
     ca.clearValue.color = {{color.r, color.g, color.b, color.a}};
     VkClearRect rect{};
     rect.rect.offset = {0, 0};
-    rect.rect.extent = m_swapExtent;
+    rect.rect.extent = m_activeRT
+        ? VkExtent2D{m_activeRT->Width(), m_activeRT->Height()}
+        : m_swapExtent;
     rect.baseArrayLayer = 0;
     rect.layerCount = 1;
     vkCmdClearAttachments(m_commandBuffer, 1, &ca, 1, &rect);
 }
 
 void VulkanDevice::SetRenderTarget(RHITexture* target) {
-    // TODO: Vulkan offscreen render targets. Needs a per-RT VkFramebuffer +
-    // offscreen render pass (finalLayout = SHADER_READ_ONLY_OPTIMAL) and
-    // an EndRenderPass/BeginRenderPass swap between the backbuffer pass and
-    // the offscreen pass. D3D11 already supports this; Vulkan tracks behind.
-    if (target != nullptr) {
-        static bool warned = false;
-        if (!warned) {
-            NARAGAME_WARN("SetRenderTarget(non-null) not yet implemented on Vulkan backend");
-            warned = true;
-        }
+    if (!m_frameValid)
+        return;
+    if (target == nullptr && m_activeRT == nullptr)
+        return;  // Already on the backbuffer.
+
+    // Close whichever pass is currently active.
+    if (m_passActive) {
+        vkCmdEndRenderPass(m_commandBuffer);
+        m_passActive = false;
     }
+    // Mode-switching descriptor sets cached against the old binding state
+    // are still valid; we just need to invalidate the "what was bound last
+    // before this draw" tracker so Renderer2D's next Flush rebinds.
+    m_boundLayout = VK_NULL_HANDLE;
+
+    if (target == nullptr) {
+        // Resume the backbuffer with LOAD_OP_LOAD so prior contents persist.
+        VkRenderPassBeginInfo rpb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rpb.renderPass  = m_renderPassResume;
+        rpb.framebuffer = m_framebuffers[m_imageIndex];
+        rpb.renderArea.extent = m_swapExtent;
+        vkCmdBeginRenderPass(m_commandBuffer, &rpb, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport vp{};
+        vp.x = 0.0f;
+        vp.y = static_cast<float>(m_swapExtent.height);
+        vp.width  = static_cast<float>(m_swapExtent.width);
+        vp.height = -static_cast<float>(m_swapExtent.height);
+        vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+        vkCmdSetViewport(m_commandBuffer, 0, 1, &vp);
+        VkRect2D scissor{{0, 0}, m_swapExtent};
+        vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
+
+        m_activeRT = nullptr;
+        m_passActive = true;
+        return;
+    }
+
+    auto* tex = static_cast<VulkanTexture*>(target);
+    if (!tex->IsRenderTarget()) {
+        NARAGAME_ERROR("SetRenderTarget: texture wasn't created with renderTarget=true");
+        // Re-open backbuffer so we don't leave the command buffer pass-less.
+        VkRenderPassBeginInfo rpb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rpb.renderPass  = m_renderPassResume;
+        rpb.framebuffer = m_framebuffers[m_imageIndex];
+        rpb.renderArea.extent = m_swapExtent;
+        vkCmdBeginRenderPass(m_commandBuffer, &rpb, VK_SUBPASS_CONTENTS_INLINE);
+        m_passActive = true;
+        return;
+    }
+
+    const VkExtent2D rtExtent{tex->Width(), tex->Height()};
+    VkRenderPassBeginInfo rpb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rpb.renderPass  = m_offscreenRenderPass;
+    rpb.framebuffer = tex->Framebuffer();
+    rpb.renderArea.extent = rtExtent;
+    vkCmdBeginRenderPass(m_commandBuffer, &rpb, VK_SUBPASS_CONTENTS_INLINE);
+
+    VkViewport vp{};
+    vp.x = 0.0f;
+    vp.y = static_cast<float>(rtExtent.height);
+    vp.width  = static_cast<float>(rtExtent.width);
+    vp.height = -static_cast<float>(rtExtent.height);
+    vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+    vkCmdSetViewport(m_commandBuffer, 0, 1, &vp);
+    VkRect2D scissor{{0, 0}, rtExtent};
+    vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
+
+    m_activeRT = tex;
+    m_passActive = true;
 }
 
 void VulkanDevice::EndFrame() {
     if (!m_frameValid)
         return;
+    // If an RT pass was the last thing the game opened, swap back to the
+    // backbuffer so we always finish the frame with the swap chain image
+    // in COLOR_ATTACHMENT_OPTIMAL and ready for the final transition.
+    if (m_passActive && m_activeRT != nullptr) {
+        vkCmdEndRenderPass(m_commandBuffer);
+        m_passActive = false;
+        m_activeRT = nullptr;
+        VkRenderPassBeginInfo rpb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rpb.renderPass  = m_renderPassResume;
+        rpb.framebuffer = m_framebuffers[m_imageIndex];
+        rpb.renderArea.extent = m_swapExtent;
+        vkCmdBeginRenderPass(m_commandBuffer, &rpb, VK_SUBPASS_CONTENTS_INLINE);
+        m_passActive = true;
+    }
     if (m_passActive) {
         vkCmdEndRenderPass(m_commandBuffer);
         m_passActive = false;
     }
+    // Backbuffer is now COLOR_ATTACHMENT_OPTIMAL; transition it to
+    // PRESENT_SRC_KHR for the swap chain.
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    b.image = m_swapImages[m_imageIndex];
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    b.dstAccessMask = 0;
+    vkCmdPipelineBarrier(m_commandBuffer,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &b);
+
     vkEndCommandBuffer(m_commandBuffer);
 }
 

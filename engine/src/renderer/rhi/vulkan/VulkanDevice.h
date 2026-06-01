@@ -99,7 +99,20 @@ private:
     std::vector<VkImage> m_swapImages;
     std::vector<VkImageView> m_swapViews;
     std::vector<VkFramebuffer> m_framebuffers;
-    VkRenderPass m_renderPass = VK_NULL_HANDLE;
+    // Three render passes share the same colour attachment format:
+    //   m_renderPass        -- backbuffer entry: load DONT_CARE, init
+    //                          UNDEFINED -> final COLOR_ATTACHMENT_OPTIMAL.
+    //                          Opened in BeginFrame.
+    //   m_renderPassResume  -- backbuffer resume after an RT round-trip:
+    //                          load LOAD, init/final COLOR_ATTACHMENT_OPTIMAL.
+    //   m_offscreenRenderPass -- RT pass: load DONT_CARE, init UNDEFINED,
+    //                            final SHADER_READ_ONLY_OPTIMAL so the result
+    //                            is sampleable as a sprite immediately.
+    // EndFrame fires an explicit barrier to PRESENT_SRC_KHR for whichever
+    // backbuffer image we end the frame on.
+    VkRenderPass m_renderPass         = VK_NULL_HANDLE;
+    VkRenderPass m_renderPassResume   = VK_NULL_HANDLE;
+    VkRenderPass m_offscreenRenderPass = VK_NULL_HANDLE;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
@@ -109,7 +122,10 @@ private:
 
     uint32_t m_imageIndex = 0;
     bool m_frameValid = false; // false if acquire failed (skip the frame)
-    bool m_passActive = false;
+    bool m_passActive = false; // a render pass (backbuffer OR RT) is open
+    // Pointer when an RT is the active pass; null while the backbuffer pass
+    // is active. Tracked so SetRenderTarget can pick the right resume path.
+    VulkanTexture* m_activeRT = nullptr;
 
     // Stage 2: resources, descriptors, per-draw state.
     uint64_t m_frame = 0;

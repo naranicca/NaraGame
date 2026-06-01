@@ -116,12 +116,14 @@ void VulkanBuffer::Update(const void* data, size_t size, size_t offset) {
 // ===========================================================================
 VulkanTexture::VulkanTexture(const VulkanContext& ctx, const TextureDesc& desc)
     : m_ctx(&ctx), m_width(desc.width), m_height(desc.height) {
+    const bool isRT = desc.renderTarget;
     const VkDeviceSize imageBytes = static_cast<VkDeviceSize>(desc.width) * desc.height * 4;
 
-    // Staging buffer with the pixels.
+    // Render-target textures skip the staging buffer; they're written into by
+    // the GPU via SetRenderTarget, not seeded from CPU pixels.
     VkBuffer staging = VK_NULL_HANDLE;
     VkDeviceMemory stagingMem = VK_NULL_HANDLE;
-    {
+    if (!isRT) {
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bi.size = imageBytes;
         bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -152,7 +154,9 @@ VulkanTexture::VulkanTexture(const VulkanContext& ctx, const TextureDesc& desc)
     ic.arrayLayers = 1;
     ic.samples = VK_SAMPLE_COUNT_1_BIT;
     ic.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ic.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ic.usage = isRT
+        ? (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+        : (VK_IMAGE_USAGE_TRANSFER_DST_BIT     | VK_IMAGE_USAGE_SAMPLED_BIT);
     ic.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ic.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     vkCreateImage(ctx.device, &ic, nullptr, &m_image);
@@ -166,7 +170,10 @@ VulkanTexture::VulkanTexture(const VulkanContext& ctx, const TextureDesc& desc)
     vkAllocateMemory(ctx.device, &ai, nullptr, &m_memory);
     vkBindImageMemory(ctx.device, m_image, m_memory, 0);
 
-    // One-time upload: transition, copy, transition for sampling.
+    // One-time setup: upload pixels (CPU-sourced texture) or just transition
+    // the image into SHADER_READ_ONLY_OPTIMAL so the first sample before any
+    // RT draw lands on a valid layout (the offscreen pass's initialLayout is
+    // UNDEFINED, which discards whatever's there at the start of a draw).
     VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     cbai.commandPool = ctx.uploadPool;
     cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -178,26 +185,43 @@ VulkanTexture::VulkanTexture(const VulkanContext& ctx, const TextureDesc& desc)
     vkBeginCommandBuffer(cmd, &begin);
 
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.image = m_image;
     barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &barrier);
 
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageExtent = {desc.width, desc.height, 1};
-    vkCmdCopyBufferToImage(cmd, staging, m_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    if (isRT) {
+        // UNDEFINED -> SHADER_READ_ONLY_OPTIMAL so descriptor writes can
+        // reference this view straight away. The offscreen render pass will
+        // discard the layout on its next BeginRenderPass anyway.
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+    } else {
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &barrier);
 
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {desc.width, desc.height, 1};
+        vkCmdCopyBufferToImage(cmd, staging, m_image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &barrier);
+    }
 
     vkEndCommandBuffer(cmd);
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -206,8 +230,8 @@ VulkanTexture::VulkanTexture(const VulkanContext& ctx, const TextureDesc& desc)
     vkQueueSubmit(ctx.queue, 1, &submit, VK_NULL_HANDLE);
     vkQueueWaitIdle(ctx.queue);
     vkFreeCommandBuffers(ctx.device, ctx.uploadPool, 1, &cmd);
-    vkDestroyBuffer(ctx.device, staging, nullptr);
-    vkFreeMemory(ctx.device, stagingMem, nullptr);
+    if (staging)    vkDestroyBuffer(ctx.device, staging, nullptr);
+    if (stagingMem) vkFreeMemory(ctx.device, stagingMem, nullptr);
 
     VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     iv.image = m_image;
@@ -215,9 +239,101 @@ VulkanTexture::VulkanTexture(const VulkanContext& ctx, const TextureDesc& desc)
     iv.format = VK_FORMAT_R8G8B8A8_UNORM;
     iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCreateImageView(ctx.device, &iv, nullptr, &m_view);
+
+    if (isRT) {
+        VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fb.renderPass      = ctx.offscreenRenderPass;
+        fb.attachmentCount = 1;
+        fb.pAttachments    = &m_view;
+        fb.width           = desc.width;
+        fb.height          = desc.height;
+        fb.layers          = 1;
+        vkCreateFramebuffer(ctx.device, &fb, nullptr, &m_framebuffer);
+    }
+}
+
+bool VulkanTexture::UpdatePixels(const void* pixels) {
+    if (!pixels || m_image == VK_NULL_HANDLE || m_framebuffer != VK_NULL_HANDLE) {
+        // RT textures don't take CPU pixel updates; the GPU draws into them.
+        return false;
+    }
+    const VkDeviceSize imageBytes =
+        static_cast<VkDeviceSize>(m_width) * m_height * 4;
+
+    // Staging buffer with the new pixels.
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = imageBytes;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(m_ctx->device, &bi, nullptr, &staging);
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(m_ctx->device, staging, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = FindMemoryType(m_ctx->physicalDevice, req.memoryTypeBits,
+                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkAllocateMemory(m_ctx->device, &ai, nullptr, &stagingMem);
+    vkBindBufferMemory(m_ctx->device, staging, stagingMem, 0);
+    void* mapped = nullptr;
+    vkMapMemory(m_ctx->device, stagingMem, 0, imageBytes, 0, &mapped);
+    std::memcpy(mapped, pixels, static_cast<size_t>(imageBytes));
+    vkUnmapMemory(m_ctx->device, stagingMem);
+
+    // One-time command: transition SHADER_READ -> TRANSFER_DST, copy,
+    // transition back to SHADER_READ.
+    VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cbai.commandPool = m_ctx->uploadPool;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_ctx->device, &cbai, &cmd);
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &begin);
+
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.image = m_image;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &b);
+
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {m_width, m_height, 1};
+    vkCmdCopyBufferToImage(cmd, staging, m_image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &b);
+
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    vkQueueSubmit(m_ctx->queue, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_ctx->queue);
+    vkFreeCommandBuffers(m_ctx->device, m_ctx->uploadPool, 1, &cmd);
+    vkDestroyBuffer(m_ctx->device, staging, nullptr);
+    vkFreeMemory(m_ctx->device, stagingMem, nullptr);
+    return true;
 }
 
 VulkanTexture::~VulkanTexture() {
+    if (m_framebuffer)
+        vkDestroyFramebuffer(m_ctx->device, m_framebuffer, nullptr);
     if (m_view)
         vkDestroyImageView(m_ctx->device, m_view, nullptr);
     if (m_image)

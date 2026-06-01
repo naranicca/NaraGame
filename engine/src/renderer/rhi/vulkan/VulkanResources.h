@@ -21,6 +21,10 @@ struct VulkanContext {
     VkQueue queue = VK_NULL_HANDLE;
     VkCommandPool uploadPool = VK_NULL_HANDLE; // one-time transfer commands
     VkRenderPass renderPass = VK_NULL_HANDLE;
+    // Render pass used by render-target textures (load DONT_CARE, finalLayout
+    // SHADER_READ_ONLY_OPTIMAL) so each RT VkImage ends a draw ready to be
+    // sampled back as a sprite.
+    VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
     VkSampler sampler = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptorLayout = VK_NULL_HANDLE;
     VkDeviceSize minUniformAlignment = 256;
@@ -64,13 +68,19 @@ public:
 
     uint32_t Width() const override { return m_width; }
     uint32_t Height() const override { return m_height; }
+    bool UpdatePixels(const void* pixels) override;
     VkImageView View() const { return m_view; }
+    // Framebuffer keyed to the offscreen render pass. Non-null only when the
+    // texture was created with TextureDesc::renderTarget = true.
+    VkFramebuffer Framebuffer() const { return m_framebuffer; }
+    bool IsRenderTarget() const { return m_framebuffer != VK_NULL_HANDLE; }
 
 private:
     const VulkanContext* m_ctx;
     VkImage m_image = VK_NULL_HANDLE;
     VkDeviceMemory m_memory = VK_NULL_HANDLE;
     VkImageView m_view = VK_NULL_HANDLE;
+    VkFramebuffer m_framebuffer = VK_NULL_HANDLE;  // RT-only
     uint32_t m_width = 0;
     uint32_t m_height = 0;
 };
