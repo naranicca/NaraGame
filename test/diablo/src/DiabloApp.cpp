@@ -594,6 +594,20 @@ protected:
         td.pixels = m_fogPixels.data();
         if (m_ctx->device)
             m_fogTexture = m_ctx->device->CreateTexture(td);
+
+        // Minimap RT cache. Allocated here, populated on the first frame
+        // (m_minimapDirty defaults true) so we don't have to fight the
+        // renderer's Begin/End state from inside OnEnter.
+        TextureDesc mmd;
+        mmd.width  = static_cast<uint32_t>(kMinimapW);
+        mmd.height = static_cast<uint32_t>(kMinimapH);
+        mmd.format = TextureFormat::RGBA8;
+        mmd.filter = TextureFilter::Linear;
+        mmd.renderTarget = true;
+        if (m_ctx->device)
+            m_minimapRT = m_ctx->device->CreateTexture(mmd);
+        m_minimapDirty = true;
+
         // SceneManager runs OnUpdate then OnRender; on the FIRST frame after
         // a Change() the manager has already applied the pending push, so
         // OnEnter happens but OnUpdate for the new scene is skipped this
@@ -1510,58 +1524,81 @@ protected:
     // adaptive: the iso bbox of (gridW + gridH) tiles is fitted into the
     // panel with a small inset, so a large dungeon and a small town both
     // fill the panel sensibly.
+    // unit = pixels per tile width. Iso bbox: (W+H)*unit/2 wide and
+    // (W+H)*unit/4 tall. Solve for the tighter of the two axes.
+    float MinimapUnit() const {
+        const float side = static_cast<float>(m_grid.w + m_grid.h);
+        const float availW = kMinimapW - 2.0f * kMinimapInset;
+        const float availH = kMinimapH - 2.0f * kMinimapInset;
+        return std::min(2.0f * availW / side, 4.0f * availH / side);
+    }
+
     void DrawMinimap() {
         if (m_grid.w <= 0 || m_grid.h <= 0) return;
         Renderer2D& r = *m_ctx->renderer;
-        constexpr float kPanelW = 200.0f;
-        constexpr float kPanelH = 160.0f;
         constexpr float kMargin = 16.0f;
-        constexpr float kInset  = 6.0f;
-        const Vec2 panel{m_ctx->screenW - kPanelW - kMargin, kMargin + 40.0f};
+        const Vec2 panel{m_ctx->screenW - kMinimapW - kMargin, kMargin + 40.0f};
 
-        r.DrawQuad(panel, {kPanelW, kPanelH}, Color(0.0f, 0.0f, 0.0f, 0.72f));
+        // First time we render this scene, rasterise the static grid into
+        // the RT. From then on the panel is a single textured quad and we
+        // only re-issue the dynamic dots + player marker each frame.
+        if (m_minimapRT && m_minimapDirty) {
+            r.SetRenderTarget(m_minimapRT.get());
+            r.Clear(Color(0.0f, 0.0f, 0.0f, 0.72f));
 
-        // unit = pixels per tile width. Iso bbox: (W+H)*unit/2 wide and
-        // (W+H)*unit/4 tall. Solve for the tighter of the two axes.
-        const float side = static_cast<float>(m_grid.w + m_grid.h);
-        const float availW = kPanelW - 2.0f * kInset;
-        const float availH = kPanelH - 2.0f * kInset;
-        const float unit = std::min(2.0f * availW / side, 4.0f * availH / side);
-        const Vec2 origin{panel.x + kPanelW * 0.5f,
-                          panel.y + kPanelH * 0.5f - (side * 0.25f * unit) * 0.5f
-                                  + (side * 0.25f * unit) * 0.5f};
-        // The two halves of `origin.y` look like a no-op but they read as
-        // "centre vertically, then offset by half the iso height upward so
-        // the diamond is centred not anchored top". Leaving them explicit
-        // makes the math obvious if/when the panel dimensions change.
+            // In RT-local space the origin is just (panel-x = 0).
+            const float unit = MinimapUnit();
+            const float originX = kMinimapW * 0.5f;
+            const float cellW = std::max(unit, 1.5f);
+            const float cellH = std::max(unit * 0.5f, 1.0f);
+            auto toMMLocal = [&](float tx, float ty) -> Vec2 {
+                return { originX + (tx - ty) * unit * 0.5f,
+                         kMinimapInset + (tx + ty) * unit * 0.25f };
+            };
 
-        auto toMM = [&](float tx, float ty) -> Vec2 {
-            return { origin.x + (tx - ty) * unit * 0.5f,
-                     panel.y + kInset + (tx + ty) * unit * 0.25f };
-        };
-
-        const float cellW = std::max(unit, 1.5f);
-        const float cellH = std::max(unit * 0.5f, 1.0f);
-
-        for (int y = 0; y < m_grid.h; ++y) {
-            for (int x = 0; x < m_grid.w; ++x) {
-                const Tile t = m_grid.At(x, y);
-                if (t == Tile::Empty) continue;
-                Color c;
-                switch (t) {
-                    case Tile::Floor:  c = Color(0.32f, 0.30f, 0.28f, 1.0f); break;
-                    case Tile::Grass:  c = Color(0.28f, 0.50f, 0.24f, 1.0f); break;
-                    case Tile::Dirt:   c = Color(0.55f, 0.42f, 0.28f, 1.0f); break;
-                    case Tile::Wall:     c = Color(0.70f, 0.68f, 0.64f, 1.0f); break;
-                    case Tile::Portal:   c = Color(0.30f, 0.65f, 1.00f, 1.0f); break;
-                    case Tile::Stairs: c = Color(1.00f, 0.85f, 0.30f, 1.0f); break;
-                    default: continue;
+            for (int y = 0; y < m_grid.h; ++y) {
+                for (int x = 0; x < m_grid.w; ++x) {
+                    const Tile t = m_grid.At(x, y);
+                    if (t == Tile::Empty) continue;
+                    Color c;
+                    switch (t) {
+                        case Tile::Floor:  c = Color(0.32f, 0.30f, 0.28f, 1.0f); break;
+                        case Tile::Grass:  c = Color(0.28f, 0.50f, 0.24f, 1.0f); break;
+                        case Tile::Dirt:   c = Color(0.55f, 0.42f, 0.28f, 1.0f); break;
+                        case Tile::Wall:   c = Color(0.70f, 0.68f, 0.64f, 1.0f); break;
+                        case Tile::Portal: c = Color(0.30f, 0.65f, 1.00f, 1.0f); break;
+                        case Tile::Stairs: c = Color(1.00f, 0.85f, 0.30f, 1.0f); break;
+                        default: continue;
+                    }
+                    const Vec2 mm = toMMLocal(static_cast<float>(x),
+                                              static_cast<float>(y));
+                    r.DrawQuad({mm.x - cellW * 0.5f, mm.y - cellH * 0.5f},
+                               {cellW, cellH}, c);
                 }
-                const Vec2 mm = toMM(static_cast<float>(x), static_cast<float>(y));
-                r.DrawQuad({mm.x - cellW * 0.5f, mm.y - cellH * 0.5f},
-                           {cellW, cellH}, c);
             }
+            r.SetRenderTarget(nullptr);
+            m_minimapDirty = false;
         }
+
+        // Sample the cached grid into the screen-space panel. One textured
+        // quad replaces the thousands of tile draws the old path issued.
+        if (m_minimapRT) {
+            r.DrawQuad(panel, {kMinimapW, kMinimapH},
+                       m_minimapRT.get(), Color::White());
+        } else {
+            // Plain backing if RT alloc failed.
+            r.DrawQuad(panel, {kMinimapW, kMinimapH},
+                       Color(0.0f, 0.0f, 0.0f, 0.72f));
+        }
+
+        // Live overlay (screen-space): monster / item dots + player marker.
+        const float unit = MinimapUnit();
+        const float originX = panel.x + kMinimapW * 0.5f;
+        const float originY = panel.y + kMinimapInset;
+        auto toMM = [&](float tx, float ty) -> Vec2 {
+            return { originX + (tx - ty) * unit * 0.5f,
+                     originY + (tx + ty) * unit * 0.25f };
+        };
 
         std::vector<MinimapDot> dots;
         AppendMinimapDots(dots);
@@ -1705,6 +1742,17 @@ protected:
     std::vector<uint8_t>        m_fogPixels;
     int  m_fogTexW = 0;
     int  m_fogTexH = 0;
+
+    // Minimap render-target cache. The grid (tiles) is static for the life
+    // of a scene, so we rasterise it once into m_minimapRT and just sample
+    // it every frame. Monsters, ground items, and the player marker still
+    // draw live over the cached panel so dynamic info stays current. Skips
+    // ~3600 quad calls per frame on the 60x60 town.
+    static constexpr float kMinimapW = 200.0f;
+    static constexpr float kMinimapH = 160.0f;
+    static constexpr float kMinimapInset = 6.0f;
+    std::unique_ptr<RHITexture> m_minimapRT;
+    bool m_minimapDirty = true;
 
     virtual std::string HudLine() const = 0;
 };
