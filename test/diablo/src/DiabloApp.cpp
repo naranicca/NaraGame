@@ -290,7 +290,8 @@ struct TownResult {
 
 TownResult BuildTown() {
     TownResult t;
-    const int gw = 20, gh = 20;
+    // 60x60 grid -- ~9x the 20x20 footprint; player has somewhere to walk to.
+    const int gw = 60, gh = 60;
     t.grid.Resize(gw, gh, Tile::Empty);
     // Grass interior, bordered by walls.
     for (int y = 1; y < gh - 1; ++y)
@@ -304,7 +305,8 @@ TownResult BuildTown() {
         t.grid.Set(0, y, Tile::Wall);
         t.grid.Set(gw - 1, y, Tile::Wall);
     }
-    // A short dirt path from the south wall up toward the portal.
+    // Dirt path runs from the south wall all the way up to the portal at
+    // the middle of the map. Three tiles wide so the player has elbow room.
     const int cx = gw / 2;
     for (int y = gh - 2; y >= gh / 2 + 1; --y) {
         t.grid.Set(cx, y, Tile::Dirt);
@@ -624,14 +626,63 @@ protected:
         const bool down  = Input::IsKeyDown(Key::S) || Input::IsKeyDown(Key::Down);
         const bool left  = Input::IsKeyDown(Key::A) || Input::IsKeyDown(Key::Left);
         const bool right = Input::IsKeyDown(Key::D) || Input::IsKeyDown(Key::Right);
+        const bool keyboardMoving = up || down || left || right;
+
+        // Left-click sets a tile-space move target by inverting the iso
+        // projection. The same transform fog UV uses:
+        //   tx = (sx - cam.x)/kTileW + (sy - cam.y)/kTileH
+        //   ty = (sy - cam.y)/kTileH - (sx - cam.x)/kTileW
+        // Right-click clears any pending click target. Keyboard input wins:
+        // the moment WASD is pressed the click target is forgotten so the
+        // two control schemes don't fight over the same frame's movement.
+        if (Input::IsMousePressed(MouseButton::Left)) {
+            const Vec2 mouse = Input::MousePosition();
+            // Undo the world-pass zoom: pixels around screen centre map 1:1
+            // until we scale back to the underlying world coords. Then run
+            // the same iso inverse fog UV uses.
+            const float worldSx = m_ctx->screenW * 0.5f
+                                + (mouse.x - m_ctx->screenW * 0.5f) / kWorldZoom;
+            const float worldSy = m_ctx->screenH * 0.5f
+                                + (mouse.y - m_ctx->screenH * 0.5f) / kWorldZoom;
+            const float u = (worldSx - m_camera.x) / kTileW;
+            const float v = (worldSy - m_camera.y) / kTileH;
+            m_clickTarget    = { u + v, v - u };
+            m_hasClickTarget = true;
+            m_clickMarkerTtl = 0.4f;
+            // Face the click immediately so the player turns even on the
+            // first frame after the click.
+            const float fdx = m_clickTarget.x - m_player.x;
+            const float fdy = m_clickTarget.y - m_player.y;
+            if (std::fabs(fdx) > std::fabs(fdy))
+                m_facing = (fdx > 0.0f) ? 2 : 3;
+            else
+                m_facing = (fdy > 0.0f) ? 0 : 1;
+        }
+        if (Input::IsMousePressed(MouseButton::Right) || keyboardMoving)
+            m_hasClickTarget = false;
+
+        m_clickMarkerTtl = std::max(0.0f, m_clickMarkerTtl - dt);
 
         // Map W/A/S/D to iso cardinal directions: W=N (-x,-y), S=S (+x,+y),
-        // A=W (-x,+y), D=E (+x,-y). Diagonals combine, normalised.
+        // A=W (-x,+y), D=E (+x,-y). Diagonals combine, normalised. When the
+        // keyboard is idle but a click target is live, fall through to the
+        // (target - player) direction instead.
         float dx = 0.0f, dy = 0.0f;
         if (up)    { dx -= 1.0f; dy -= 1.0f; }
         if (down)  { dx += 1.0f; dy += 1.0f; }
         if (left)  { dx -= 1.0f; dy += 1.0f; }
         if (right) { dx += 1.0f; dy -= 1.0f; }
+        if (!keyboardMoving && m_hasClickTarget) {
+            const float tdx = m_clickTarget.x - m_player.x;
+            const float tdy = m_clickTarget.y - m_player.y;
+            const float td  = std::sqrt(tdx * tdx + tdy * tdy);
+            constexpr float kArriveDist = 0.18f;
+            if (td <= kArriveDist) {
+                m_hasClickTarget = false;
+            } else {
+                dx = tdx; dy = tdy;
+            }
+        }
         const float mag = std::sqrt(dx * dx + dy * dy);
         if (mag > 0.0001f) {
             dx /= mag; dy /= mag;
@@ -651,10 +702,60 @@ protected:
         // half-radius from the tile boundary so they don't visibly clip
         // into the wall sprite's iso footprint.
         const float kPad = 0.20f;
+        const Vec2 startPos = m_player;
         const float testX = m_player.x + stepX + (stepX > 0 ? kPad : -kPad);
         if (!IsBlockedAt(testX, m_player.y)) m_player.x += stepX;
         const float testY = m_player.y + stepY + (stepY > 0 ? kPad : -kPad);
         if (!IsBlockedAt(m_player.x, testY)) m_player.y += stepY;
+
+        // Pillar avoidance for click-to-move: if we wanted to move this
+        // frame but the collision pinned us in place, the target is on the
+        // far side of a wall/pillar. Try a perpendicular strafe -- both
+        // axes simultaneously, since iso-cardinal targets (pure +x or +y)
+        // produce zero step on one axis and the regular axis-separated
+        // slide can't shake them loose. Whichever side ends up closer to
+        // the click target wins; if neither perpendicular is open, the
+        // player is truly boxed in and the target is dropped.
+        const bool didntMove = mag > 0.0001f
+            && std::fabs(m_player.x - startPos.x) < 1e-5f
+            && std::fabs(m_player.y - startPos.y) < 1e-5f;
+        if (m_hasClickTarget && !keyboardMoving && didntMove) {
+            const float lx = -dy, ly = dx;   // 90 deg left of target heading
+            const float rx =  dy, ry = -dx;  // 90 deg right
+            const float probe = kPlayerSpeed * dtClamped;
+            auto canSlide = [&](float fdx, float fdy) {
+                const float tx = m_player.x + fdx + (fdx > 0 ? kPad : -kPad);
+                const float ty = m_player.y + fdy + (fdy > 0 ? kPad : -kPad);
+                return !IsBlockedAt(tx, m_player.y)
+                    || !IsBlockedAt(m_player.x, ty);
+            };
+            const bool canL = canSlide(lx * probe, ly * probe);
+            const bool canR = canSlide(rx * probe, ry * probe);
+            float chosenDx = 0.0f, chosenDy = 0.0f;
+            if (canL && !canR) { chosenDx = lx; chosenDy = ly; }
+            else if (canR && !canL) { chosenDx = rx; chosenDy = ry; }
+            else if (canL && canR) {
+                // Both open -- pick the side that brings us nearer the target.
+                const float dxL = m_clickTarget.x - (m_player.x + lx);
+                const float dyL = m_clickTarget.y - (m_player.y + ly);
+                const float dxR = m_clickTarget.x - (m_player.x + rx);
+                const float dyR = m_clickTarget.y - (m_player.y + ry);
+                const float distL = dxL * dxL + dyL * dyL;
+                const float distR = dxR * dxR + dyR * dyR;
+                if (distL <= distR) { chosenDx = lx; chosenDy = ly; }
+                else                { chosenDx = rx; chosenDy = ry; }
+            } else {
+                m_hasClickTarget = false;
+            }
+            if (chosenDx != 0.0f || chosenDy != 0.0f) {
+                const float sx = chosenDx * kPlayerSpeed * dtClamped;
+                const float sy = chosenDy * kPlayerSpeed * dtClamped;
+                const float ttx = m_player.x + sx + (sx > 0 ? kPad : -kPad);
+                if (!IsBlockedAt(ttx, m_player.y)) m_player.x += sx;
+                const float tty = m_player.y + sy + (sy > 0 ? kPad : -kPad);
+                if (!IsBlockedAt(m_player.x, tty)) m_player.y += sy;
+            }
+        }
 
         // Auto-interact: walking onto the portal (in town) or the stairs
         // (in dungeon) triggers OnInteract() automatically -- no key press.
@@ -871,11 +972,25 @@ protected:
         const float py = m_player.y;
         const int   gw = m_grid.w;
 
-        for (int sy = 0; sy < H; ++sy) {
+        // Only sub-cells within kOuterR of the player can ever be lit. Clear
+        // the whole texture first, then raycast just the window around the
+        // player. On a 60x60 town the full 480x480 sub-cell raycast is ~2M
+        // op/frame; this keeps it under a tenth of that without touching
+        // visible fog quality.
+        std::fill(m_fogPixels.begin(), m_fogPixels.end(), uint8_t{0});
+        const int subPx = static_cast<int>(std::floor(px * kFogSubdiv));
+        const int subPy = static_cast<int>(std::floor(py * kFogSubdiv));
+        const int subR  = static_cast<int>(std::ceil(kOuterR * kFogSubdiv)) + 1;
+        const int sxStart = std::max(0, subPx - subR);
+        const int syStart = std::max(0, subPy - subR);
+        const int sxEnd   = std::min(W - 1, subPx + subR);
+        const int syEnd   = std::min(H - 1, subPy + subR);
+
+        for (int sy = syStart; sy <= syEnd; ++sy) {
             const int ty = sy / kFogSubdiv;
             const float wy = (sy + 0.5f) * invN;
             const float ddy = wy - py;
-            for (int sx = 0; sx < W; ++sx) {
+            for (int sx = sxStart; sx <= sxEnd; ++sx) {
                 const int tx = sx / kFogSubdiv;
                 const float wx = (sx + 0.5f) * invN;
                 const float ddx = wx - px;
@@ -920,7 +1035,20 @@ protected:
         m_camera = { m_ctx->screenW * 0.5f - playerScreen0.x,
                      m_ctx->screenH * 0.5f - playerScreen0.y };
 
-        r.Begin(Renderer2D::ScreenCamera(m_ctx->screenW, m_ctx->screenH));
+        // World pass uses a zoomed ortho so tiles + characters read bigger
+        // without changing any sprite sizes. The visible window shrinks to
+        // (screenW/zoom) x (screenH/zoom), centred on the screen midpoint,
+        // and that region gets stretched to fill the backbuffer. m_camera
+        // is unchanged -- it still maps the player to screen centre, which
+        // is also the ortho's centre, so the player stays pinned in the
+        // middle of the view at the new zoom level.
+        const float vw = m_ctx->screenW / kWorldZoom;
+        const float vh = m_ctx->screenH / kWorldZoom;
+        const float cxz = m_ctx->screenW * 0.5f;
+        const float cyz = m_ctx->screenH * 0.5f;
+        r.Begin(mat4::Ortho(cxz - vw * 0.5f, cxz + vw * 0.5f,
+                            cyz + vh * 0.5f, cyz - vh * 0.5f,
+                            -1.0f, 1.0f));
 
         // Engine doesn't clear the backbuffer in BeginFrame, so paint a full
         // background here. Without this, leftover pixels from the prior scene
@@ -1020,10 +1148,34 @@ protected:
 
         DrawWorldOverlay();
 
+        // Click-to-move target marker -- a small fading diamond on the tile
+        // the player is walking toward. Pulses for the first 0.4s after the
+        // click (m_clickMarkerTtl), then stays as a faint waypoint until
+        // arrival so the player can see where they're headed.
+        if (m_hasClickTarget) {
+            const Vec2 marker = TileToScreen(m_clickTarget.x, m_clickTarget.y, m_camera);
+            const float pulse = (m_clickMarkerTtl > 0.0f) ? (m_clickMarkerTtl / 0.4f) : 0.0f;
+            const float baseAlpha = 0.35f + 0.45f * pulse;
+            const float size = 6.0f + 8.0f * pulse;
+            // Outer halo
+            r.DrawQuad({marker.x - size, marker.y - size * 0.5f},
+                       {size * 2.0f, size},
+                       Color(1.0f, 0.95f, 0.55f, baseAlpha * 0.5f));
+            // Inner diamond core
+            r.DrawQuad({marker.x - 3.0f, marker.y - 1.5f}, {6.0f, 3.0f},
+                       Color(1.0f, 1.0f, 0.85f, baseAlpha));
+        }
+
         // Leave fog mode so HUD / inventory / minimap render at full
         // brightness regardless of the player's visibility state.
         if (useFog)
             r.SetFog(nullptr, {}, {});
+
+        // End the zoomed world pass and start a 1:1 HUD pass. Otherwise the
+        // HUD text, minimap, and inventory panel would inherit the world
+        // zoom and either oversize the screen or overflow the safe area.
+        r.End();
+        r.Begin(Renderer2D::ScreenCamera(m_ctx->screenW, m_ctx->screenH));
 
         // HUD.
         r.DrawText(*m_ctx->font, HudLine(), {16.0f, 12.0f}, Color::White(), 20.0f);
@@ -1516,6 +1668,19 @@ protected:
     bool  m_inventoryOpen   = false;
     float m_playerHurtFlash = 0.0f;   // ticked down by combat code; gated on player tint
 
+    // World-pass camera zoom. The ortho in OnRender shrinks the visible
+    // window to (screenW/zoom) x (screenH/zoom) and stretches it across the
+    // backbuffer, so sprites and tiles read bigger. Mouse-to-tile inversion
+    // in OnUpdate undoes the same zoom so clicks land where the player
+    // visually clicked.
+    static constexpr float kWorldZoom = 1.7f;
+
+    // Click-to-move target. Set by a left mouse press; cleared when the
+    // player arrives, or when keyboard input takes over.
+    Vec2  m_clickTarget    {0.0f, 0.0f};   // tile-space
+    bool  m_hasClickTarget = false;
+    float m_clickMarkerTtl = 0.0f;          // separate fade for the on-floor marker
+
     // Cached fog UV affine transform (filled in OnRender). Wall draws need to
     // temporarily flip out of fog mode and back, so we keep the params handy
     // instead of recomputing them per wall.
@@ -1776,39 +1941,109 @@ protected:
         Renderer2D& r = *m_ctx->renderer;
         const Vec2 fd = FacingDir(m_facing);
 
-        // Slash arc -- three streaks in front of the player, each rotated
-        // slightly so they read as a blade sweep instead of a flat blob.
-        // World-space so the arc scrolls with the camera.
+        // Anchor the VFX one tile in front of the player. World-space so it
+        // scrolls with the camera.
         const Vec2 worldHit = { m_player.x + fd.x * 0.85f,
                                 m_player.y + fd.y * 0.85f };
         const Vec2 screen = TileToScreen(worldHit.x, worldHit.y, m_camera);
         const float t = 1.0f - (m_slashTimer / kSlashDuration);   // 0 -> 1
-        const float alpha = (1.0f - t) * 0.85f;                   // fade as t grows
 
-        // Facing in screen space -- the swing axis is perpendicular to this.
+        // Facing in screen space -- the swing axis sweeps around this.
         const Vec2 here  = TileToScreen(m_player.x,        m_player.y,        {0,0});
         const Vec2 ahead = TileToScreen(m_player.x + fd.x, m_player.y + fd.y, {0,0});
         const float sxFwd = ahead.x - here.x;
         const float syFwd = ahead.y - here.y;
-        const float len = std::sqrt(sxFwd * sxFwd + syFwd * syFwd);
-        if (len < 0.001f) return;
-        const float fwdAngle = std::atan2(syFwd, sxFwd);  // facing direction
-        // The blade sweeps from -arc to +arc over the animation lifetime.
-        constexpr float kArcSpan = 1.4f;   // radians, ~80 degrees total
-        const float angle = fwdAngle + (t - 0.5f) * kArcSpan;
+        const float fwdLen = std::sqrt(sxFwd * sxFwd + syFwd * syFwd);
+        if (fwdLen < 0.001f) return;
+        const float fwdAngle = std::atan2(syFwd, sxFwd);
+        constexpr float kArcSpan = 1.6f;   // radians, ~90 degrees total
 
-        // Long, thin streak in the swing direction; aliased to a quad with
-        // rotation handled by Renderer2D's rotated DrawQuad overload.
-        const float streakLen = 36.0f;
-        const float streakThk = 6.0f;
-        const Vec2 streakCenter{
-            screen.x + std::cos(angle) * 6.0f,
-            screen.y + std::sin(angle) * 6.0f,
-        };
-        r.DrawQuad(streakCenter, {streakLen, streakThk}, angle,
-                   Color(1.0f, 0.95f, 0.75f, alpha));
-        r.DrawQuad(streakCenter, {streakLen * 0.6f, streakThk * 0.4f}, angle,
-                   Color(1.0f, 1.0f, 1.0f, alpha));  // bright core
+        // (1) Wide soft glow at the swing's current position -- gives the
+        // arc some volume against the floor.
+        {
+            const float glowAngle = fwdAngle + (t - 0.5f) * kArcSpan;
+            const float glowSize = 26.0f + 8.0f * (1.0f - std::fabs(t - 0.5f) * 2.0f);
+            const Vec2 glowCenter{
+                screen.x + std::cos(glowAngle) * 8.0f,
+                screen.y + std::sin(glowAngle) * 8.0f,
+            };
+            const float glowAlpha = 0.35f * (1.0f - std::fabs(t - 0.5f) * 1.6f);
+            if (glowAlpha > 0.0f) {
+                r.DrawQuad(glowCenter, {glowSize * 1.4f, glowSize}, glowAngle,
+                           Color(1.0f, 0.75f, 0.30f, glowAlpha));
+            }
+        }
+
+        // (2) Motion-blurred trail of streaks. Each iteration places a streak
+        // at an earlier point in the swing's arc, fading and shrinking with
+        // age. Together they read as a curved blade trail rather than a
+        // single rotated quad.
+        constexpr int kTrailCount = 6;
+        for (int i = 0; i < kTrailCount; ++i) {
+            const float tt = t - (i / static_cast<float>(kTrailCount)) * 0.55f;
+            if (tt < 0.0f || tt > 1.0f) continue;
+            const float angle = fwdAngle + (tt - 0.5f) * kArcSpan;
+            const float fade  = (1.0f - tt) * (1.0f - i / static_cast<float>(kTrailCount));
+            const float lenScale = 1.0f - 0.10f * i;
+            const float thkScale = 1.0f - 0.13f * i;
+            const float streakLen = 42.0f * lenScale;
+            const float streakThk = 8.0f  * thkScale;
+            const Vec2 streakCenter{
+                screen.x + std::cos(angle) * 10.0f,
+                screen.y + std::sin(angle) * 10.0f,
+            };
+            // Warm outer streak
+            r.DrawQuad(streakCenter, {streakLen, streakThk}, angle,
+                       Color(1.00f, 0.78f, 0.30f, fade * 0.70f));
+            // Bright inner core
+            r.DrawQuad(streakCenter, {streakLen * 0.65f, streakThk * 0.35f}, angle,
+                       Color(1.00f, 0.98f, 0.85f, fade * 0.95f));
+        }
+
+        // (3) Impact flash in the first ~30% of the animation. A bright burst
+        // at the swing's centre that quickly contracts -- sells the "hit" feel
+        // even when nothing is in melee range.
+        if (t < 0.35f) {
+            const float fk = 1.0f - (t / 0.35f);
+            const float flashSize = 28.0f * fk + 6.0f;
+            r.DrawQuad({screen.x - flashSize * 0.5f, screen.y - flashSize * 0.25f},
+                       {flashSize, flashSize * 0.5f},
+                       Color(1.0f, 0.95f, 0.7f, 0.55f * fk));
+            // Tight white pop in the very first frames
+            if (t < 0.12f) {
+                const float pop = 1.0f - (t / 0.12f);
+                const float pSize = 14.0f * pop + 4.0f;
+                r.DrawQuad({screen.x - pSize * 0.5f, screen.y - pSize * 0.5f},
+                           {pSize, pSize},
+                           Color(1.0f, 1.0f, 1.0f, 0.85f * pop));
+            }
+        }
+
+        // (4) Sparks scattered along the leading edge of the swing. Each one
+        // uses a hash of the spark index for stable per-attack jitter so the
+        // pattern looks intentional but isn't perfectly symmetrical.
+        constexpr int kSparkCount = 8;
+        for (int i = 0; i < kSparkCount; ++i) {
+            // Cheap deterministic jitter: distinct angle + distance per spark
+            const float jAngle = ((i * 1327) % 100) / 100.0f - 0.5f;       // [-0.5, 0.5]
+            const float jDist  = ((i *  733) % 100) / 100.0f;              // [0, 1]
+            const float spAngle = fwdAngle + (t - 0.5f) * kArcSpan
+                                + jAngle * 0.6f;
+            const float spDist  = 14.0f + jDist * 22.0f;
+            const float spX = screen.x + std::cos(spAngle) * spDist;
+            const float spY = screen.y + std::sin(spAngle) * spDist;
+            // Sparks fade over the slash lifetime; the further-out ones
+            // appear later in the swing to suggest particles flung outward.
+            const float spawnT = jDist * 0.4f;          // 0..0.4
+            if (t < spawnT) continue;
+            const float age = (t - spawnT) / std::max(0.001f, 1.0f - spawnT);
+            const float sparkAlpha = (1.0f - age) * 0.95f;
+            const float sparkSize = 2.5f - age * 1.5f;
+            if (sparkSize <= 0.0f) continue;
+            r.DrawQuad({spX - sparkSize, spY - sparkSize},
+                       {sparkSize * 2.0f, sparkSize * 2.0f},
+                       Color(1.0f, 0.95f, 0.65f, sparkAlpha));
+        }
     }
 
     void DrawHudExtra() override {
