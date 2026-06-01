@@ -67,8 +67,14 @@ constexpr float kPlayerSpeed = 3.5f; // tiles per second
 // Sprite atlas regions (must match _make_sprites.ps1 layout).
 constexpr float kFloorTileH  = 32.0f;
 constexpr float kWallSpriteH = 96.0f;
-constexpr float kPlayerSpriteW = 32.0f;
-constexpr float kPlayerSpriteH = 48.0f;
+// Player + monster sit on a 32x48 grid. The earlier 64x96 player draw made
+// the figure tower over the rest of the cast; the facing distinction comes
+// from the sprite art itself (front face, back-of-head, side profile)
+// instead of frame size.
+constexpr float kPlayerSpriteW  = 32.0f;
+constexpr float kPlayerSpriteH  = 48.0f;
+constexpr float kMonsterSpriteW = 32.0f;
+constexpr float kMonsterSpriteH = 48.0f;
 
 // ---------------------------------------------------------------------------
 // Iso math.
@@ -178,14 +184,24 @@ DungeonGenResult GenerateDungeon(uint32_t seed, int gw = 40, int gh = 40) {
                 r.grid.Set(x, y, Tile::Floor);
     }
 
-    // Connect rooms in order with L-shaped corridors (1 tile wide).
+    // Connect rooms in order with L-shaped corridors. Each segment is two
+    // tiles wide -- single-tile corridors looked claustrophobic and the
+    // player can't sidestep monsters in them. CarveLineX extends downward
+    // (y+1), CarveLineY extends rightward (x+1); at an L corner both lines
+    // overlap into a 2x2 elbow so the turn isn't pinched.
     auto CarveLineX = [&](int y, int x0, int x1) {
         if (x0 > x1) std::swap(x0, x1);
-        for (int x = x0; x <= x1; ++x) r.grid.Set(x, y, Tile::Floor);
+        for (int x = x0; x <= x1; ++x) {
+            r.grid.Set(x, y,     Tile::Floor);
+            r.grid.Set(x, y + 1, Tile::Floor);
+        }
     };
     auto CarveLineY = [&](int x, int y0, int y1) {
         if (y0 > y1) std::swap(y0, y1);
-        for (int y = y0; y <= y1; ++y) r.grid.Set(x, y, Tile::Floor);
+        for (int y = y0; y <= y1; ++y) {
+            r.grid.Set(x,     y, Tile::Floor);
+            r.grid.Set(x + 1, y, Tile::Floor);
+        }
     };
     std::uniform_int_distribution<int> coinDist(0, 1);
     for (size_t i = 1; i < rooms.size(); ++i) {
@@ -546,6 +562,10 @@ protected:
     virtual void AppendMinimapDots(std::vector<MinimapDot>& /*dots*/) {}
     virtual void DrawWorldOverlay() {}   // drawn after actors, under HUD (e.g. attack VFX)
     virtual void DrawHudExtra() {}
+
+    // Screen-space offset applied to the player sprite this frame -- subclasses
+    // use it to lunge during an attack animation. Defaults to no offset.
+    virtual Vec2 PlayerDrawOffset() const { return {0.0f, 0.0f}; }
 
     // Whether the fog of war applies in THIS scene. Tracks the global
     // ctx->fogOfWar toggle by default; subclasses can override if a
@@ -1053,10 +1073,10 @@ protected:
             case Tile::Dirt:   drawFloor(m_ctx->sprites->Get("floorDirt"));  break;
             case Tile::Stairs: drawFloor(m_ctx->sprites->Get("stairs"));     break;
             case Tile::Wall: {
-                // The floor underlay for walls is painted in the floor pass
-                // (see DrawWallUnderlay) so later walls' underlays don't
-                // overwrite earlier walls' bodies. Here we only draw the
-                // wall sprite itself.
+                // The floor underlay for walls is painted in the floor
+                // pass (see DrawWallUnderlay) so later walls' underlays
+                // don't overwrite earlier walls' bodies. Here we only
+                // draw the wall sprite itself.
                 //
                 // Walls have to come out of fog mode for the draw. A wall
                 // sprite is 96px tall and paints UP over the tile NORTH of
@@ -1112,12 +1132,18 @@ protected:
         // fwd >= 0 catches the sort-key ties at corners too (wall (1, 19)
         // and player at (1.5, 18.5) both sum to 20.0 -- the wall would
         // otherwise paint over the player half the time).
+        //
+        // Alpha is kept low (0.25) so when several occluding walls overlap,
+        // the cap/south/east face boundaries don't pile up into visible
+        // seams between adjacent transparent walls. The original 0.50 made
+        // each wall's faces tint the next one's, leaving a sharp colour
+        // discontinuity along every interior wall edge.
         const float dx = static_cast<float>(tx) - m_player.x;
         const float dy = static_cast<float>(ty) - m_player.y;
         const float fwd  = dx + dy;
         const float side = dx - dy;
         if (fwd >= 0.0f && fwd < 3.5f && std::fabs(side) < 1.6f)
-            return Color(1.0f, 1.0f, 1.0f, 0.50f);
+            return Color(1.0f, 1.0f, 1.0f, 0.25f);
         return Color::White();
     }
 
@@ -1128,12 +1154,22 @@ protected:
         const TextureRegion& reg = m_ctx->sprites->Get(names[m_facing]);
         // Anchor the sprite's bottom at the tile's floor centre, i.e. the
         // exact screen point TileToScreen(player.x, player.y) returns.
-        const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
-                       center.y - kPlayerSpriteH};
+        const Vec2 offset = PlayerDrawOffset();
+        const Vec2 pos{center.x - kPlayerSpriteW * 0.5f + offset.x,
+                       center.y - kPlayerSpriteH       + offset.y};
         const Color tint = (m_ctx->playerHp < m_ctx->EffectiveMaxHp() && m_playerHurtFlash > 0.0f)
             ? Color(1.0f, 0.4f, 0.4f, 1.0f)
             : Color::White();
+        // Drop out of fog mode for the player draw -- same fix as walls.
+        // A 32x48 sprite paints up over the tile NORTH of the player, and
+        // per-pixel fog there samples that other tile's visibility, which
+        // is darker (further from the player or raycast-occluded) and
+        // leaks through as a shadow on the player's head/torso. The
+        // player is always at the centre of visibility anyway, so a flat
+        // tint reads as "always lit" without any shadow seam at the feet.
+        if (m_fogActive) r.SetFog(nullptr, {}, {});
         r.DrawQuad(pos, {kPlayerSpriteW, kPlayerSpriteH}, reg, tint);
+        if (m_fogActive) r.SetFog(m_fogTexture.get(), m_fogURow, m_fogVRow);
     }
 
     void DrawMonster(const Monster& m) {
@@ -1142,21 +1178,21 @@ protected:
         const Vec2 center = TileToScreen(m.pos.x, m.pos.y, m_camera);
         const char* name = (m.kind == Monster::Kind::Skeleton) ? "skeleton" : "zombie";
         const TextureRegion& reg = m_ctx->sprites->Get(name);
-        const Vec2 pos{center.x - kPlayerSpriteW * 0.5f,
-                       center.y - kPlayerSpriteH};
+        const Vec2 pos{center.x - kMonsterSpriteW * 0.5f,
+                       center.y - kMonsterSpriteH};
         // Fog shader applies the visibility multiplier per pixel; the tint
         // here only carries hit-flash brightening (or White() otherwise).
         const Color tint = (m.hurtFlashTimer > 0.0f)
             ? Color(1.6f, 1.6f, 1.6f, 1.0f)
             : Color::White();
-        r.DrawQuad(pos, {kPlayerSpriteW, kPlayerSpriteH}, reg, tint);
+        r.DrawQuad(pos, {kMonsterSpriteW, kMonsterSpriteH}, reg, tint);
 
         // HP bar appears only on damaged monsters so a full-strength room
         // doesn't look like a UI dump.
         if (m.hp < m.maxHp) {
             const float barW = 26.0f;
             const float barH = 4.0f;
-            const Vec2 barPos{center.x - barW * 0.5f, center.y - kPlayerSpriteH - 6.0f};
+            const Vec2 barPos{center.x - barW * 0.5f, center.y - kMonsterSpriteH - 6.0f};
             r.DrawQuad(barPos, {barW, barH}, Color(0.15f, 0.05f, 0.05f, 0.85f));
             r.DrawQuad({barPos.x + 1.0f, barPos.y + 1.0f},
                        {(barW - 2.0f) * std::max(0.0f, m.hp / m.maxHp), barH - 2.0f},
@@ -1712,19 +1748,67 @@ protected:
             dots.push_back({gi.pos, RarityColor(gi.item.rarity), 3.0f});
     }
 
+    // While a slash is active, lunge the player sprite in their facing
+    // direction. The bell curve (4 * t * (1-t)) peaks at the middle of the
+    // animation: sprite slides forward, then retracts, which on a 0.16s
+    // window reads as a clear swing.
+    Vec2 PlayerDrawOffset() const override {
+        if (m_slashTimer <= 0.0f) return {0.0f, 0.0f};
+        const float t = 1.0f - (m_slashTimer / kSlashDuration);  // 0 -> 1
+        const float bell = 4.0f * t * (1.0f - t);
+        // Convert iso-tile facing to screen-space direction by projecting one
+        // step in front of the player and subtracting the player's screen
+        // position. That way the lunge angle matches the facing visually.
+        const Vec2 fd = FacingDir(m_facing);
+        const Vec2 here  = TileToScreen(m_player.x,        m_player.y,        {0,0});
+        const Vec2 ahead = TileToScreen(m_player.x + fd.x, m_player.y + fd.y, {0,0});
+        const float dx = ahead.x - here.x;
+        const float dy = ahead.y - here.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 0.001f) return {0.0f, 0.0f};
+        constexpr float kMaxLunge = 8.0f; // screen pixels at peak
+        return { dx / len * bell * kMaxLunge,
+                 dy / len * bell * kMaxLunge };
+    }
+
     void DrawWorldOverlay() override {
         if (m_slashTimer <= 0.0f) return;
-        // Slash: a soft translucent quad one tile in front of the player,
-        // fades out as the timer ticks down. World-space, not HUD-space, so
-        // it scrolls with the camera.
         Renderer2D& r = *m_ctx->renderer;
         const Vec2 fd = FacingDir(m_facing);
-        const Vec2 worldHit = { m_player.x + fd.x, m_player.y + fd.y };
+
+        // Slash arc -- three streaks in front of the player, each rotated
+        // slightly so they read as a blade sweep instead of a flat blob.
+        // World-space so the arc scrolls with the camera.
+        const Vec2 worldHit = { m_player.x + fd.x * 0.85f,
+                                m_player.y + fd.y * 0.85f };
         const Vec2 screen = TileToScreen(worldHit.x, worldHit.y, m_camera);
-        const float alpha = m_slashTimer / kSlashDuration;
-        const float w = 44.0f, h = 24.0f;
-        r.DrawQuad({screen.x - w * 0.5f, screen.y - h * 0.5f}, {w, h},
-                   Color(1.0f, 0.95f, 0.7f, 0.55f * alpha));
+        const float t = 1.0f - (m_slashTimer / kSlashDuration);   // 0 -> 1
+        const float alpha = (1.0f - t) * 0.85f;                   // fade as t grows
+
+        // Facing in screen space -- the swing axis is perpendicular to this.
+        const Vec2 here  = TileToScreen(m_player.x,        m_player.y,        {0,0});
+        const Vec2 ahead = TileToScreen(m_player.x + fd.x, m_player.y + fd.y, {0,0});
+        const float sxFwd = ahead.x - here.x;
+        const float syFwd = ahead.y - here.y;
+        const float len = std::sqrt(sxFwd * sxFwd + syFwd * syFwd);
+        if (len < 0.001f) return;
+        const float fwdAngle = std::atan2(syFwd, sxFwd);  // facing direction
+        // The blade sweeps from -arc to +arc over the animation lifetime.
+        constexpr float kArcSpan = 1.4f;   // radians, ~80 degrees total
+        const float angle = fwdAngle + (t - 0.5f) * kArcSpan;
+
+        // Long, thin streak in the swing direction; aliased to a quad with
+        // rotation handled by Renderer2D's rotated DrawQuad overload.
+        const float streakLen = 36.0f;
+        const float streakThk = 6.0f;
+        const Vec2 streakCenter{
+            screen.x + std::cos(angle) * 6.0f,
+            screen.y + std::sin(angle) * 6.0f,
+        };
+        r.DrawQuad(streakCenter, {streakLen, streakThk}, angle,
+                   Color(1.0f, 0.95f, 0.75f, alpha));
+        r.DrawQuad(streakCenter, {streakLen * 0.6f, streakThk * 0.4f}, angle,
+                   Color(1.0f, 1.0f, 1.0f, alpha));  // bright core
     }
 
     void DrawHudExtra() override {
@@ -1837,7 +1921,9 @@ protected:
         // sprite just has to fill the diamond and the lit cap on top.
         m_sprites.Add("wall",       0,   32, 64, 96);
         m_sprites.Add("portal",     64,  32, 64, 96);
-        // Row 2 (y=128..175): player, 32x48 each
+        // Row 2 (y=128..175): player, 32x48 each. Sprite art (front face vs
+        // back-of-head vs side profile) carries the facing cue instead of
+        // a larger frame, so the figure matches the monster scale.
         m_sprites.Add("playerS",    0,   128, 32, 48);
         m_sprites.Add("playerN",    32,  128, 32, 48);
         m_sprites.Add("playerE",    64,  128, 32, 48);
