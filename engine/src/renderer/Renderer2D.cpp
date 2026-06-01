@@ -311,6 +311,7 @@ Mat4 Renderer2D::ScreenCamera(float width, float height) {
 void Renderer2D::Begin(const Mat4& viewProjection) {
     if (m_cameraBuffer)
         m_cameraBuffer->Update(viewProjection.data, sizeof(Mat4));
+    m_savedViewProj = viewProjection;  // SetRenderTarget(nullptr) restores this
     m_inScene = true;
     m_currentMode  = PipelineMode::Sprite;
     m_currentBlend = BlendMode::Alpha;   // every frame starts back at vanilla blend
@@ -342,6 +343,38 @@ void Renderer2D::SetBlendMode(BlendMode mode) {
     Flush();
     StartBatch();
     m_currentBlend = mode;
+}
+
+void Renderer2D::SetRenderTarget(RHITexture* target) {
+    if (!m_inScene || m_device == nullptr)
+        return;
+    // Flush whatever was being batched against the previous target so it
+    // actually lands there before we swap attachments.
+    Flush();
+    StartBatch();
+    m_device->SetRenderTarget(target);
+    // Match the camera to whichever target is now active. When returning to
+    // the backbuffer, replay the viewProj Begin() saved -- typically the
+    // game's screen-space ortho (possibly with a custom zoom).
+    Mat4 cam;
+    if (target == nullptr) {
+        cam = m_savedViewProj;
+    } else {
+        cam = ScreenCamera(static_cast<float>(target->Width()),
+                           static_cast<float>(target->Height()));
+    }
+    if (m_cameraBuffer)
+        m_cameraBuffer->Update(cam.data, sizeof(Mat4));
+}
+
+void Renderer2D::Clear(const Color& color) {
+    if (!m_inScene || m_device == nullptr)
+        return;
+    // Flush first so an unsuspecting Clear after a few mid-frame draws
+    // doesn't quietly wipe them off the currently bound attachment.
+    Flush();
+    StartBatch();
+    m_device->Clear(color);
 }
 
 void Renderer2D::End() {

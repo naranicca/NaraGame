@@ -84,6 +84,29 @@ public:
     void DrawText(const MSDFFont& font, const std::string& text, const Vec2& position,
                   const Color& color = Color::White(), float pixelSize = 32.0f);
 
+    // Bind an offscreen render target (texture created with renderTarget=true).
+    // Flushes the current batch, switches the device's colour attachment, and
+    // swaps the camera UBO to a 1:1 ortho sized to the texture so DrawQuad
+    // coordinates land where you'd expect inside the RT. Pass nullptr to
+    // restore the backbuffer; the camera the most recent Begin() set up
+    // becomes active again automatically.
+    //
+    // Typical pattern inside one Begin/End:
+    //   r.Begin(ScreenCamera(screenW, screenH));
+    //   r.DrawQuad(...);             // backbuffer
+    //   r.SetRenderTarget(rt);
+    //   r.Clear(skyBlue);
+    //   r.DrawQuad(...);             // lands in rt
+    //   r.SetRenderTarget(nullptr);
+    //   r.DrawQuad(rt, ...);         // sample rt on the backbuffer
+    //   r.End();
+    void SetRenderTarget(RHITexture* target);
+
+    // Clear the currently bound colour attachment. Convenience wrapper around
+    // RHIDevice::Clear that also flushes the batch first so a Clear after
+    // mid-frame draws doesn't surprise you by wiping them.
+    void Clear(const Color& color);
+
     // Select the blend mode for subsequent sprite quads. Default Alpha is
     // src-over; Additive ignores the destination's RGB and just sums (good
     // for glows / sparks); Multiply darkens the destination by the source
@@ -169,6 +192,12 @@ private:
     PipelineMode m_currentMode  = PipelineMode::Sprite;
     BlendMode    m_currentBlend = BlendMode::Alpha;     // only meaningful in Sprite mode
     bool m_inScene = false;
+
+    // Cached viewProj from the most recent Begin() so a SetRenderTarget swap
+    // can put the camera back when it returns to the backbuffer. Without
+    // this, callers would have to re-issue ScreenCamera() themselves after
+    // every round trip.
+    Mat4 m_savedViewProj{};
 
     static constexpr uint32_t kMaxQuads = 20000;
     static constexpr uint32_t kMaxVertices = kMaxQuads * 4;
