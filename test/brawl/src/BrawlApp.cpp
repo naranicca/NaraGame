@@ -86,6 +86,16 @@ constexpr float kEnemyRetreatRange  = 2.5f;
 constexpr float kEnemyHurtFlash     = 0.10f;
 constexpr float kEnemyWanderCd      = 0.9f;
 
+// Knockback: a bullet hit pushes the victim back along the bullet's flight
+// direction. We apply it as an impulse (instantaneous velocity) that decays
+// exponentially each frame and pushes through axis-separated wall collision,
+// so a wall behind the victim stops the slide instead of letting them clip.
+// Enemies get a bigger nudge than the player so combat reads "I hit them" but
+// the player doesn't feel yanked around by every stray shot.
+constexpr float kEnemyKnockbackV  = 7.5f;   // tiles/s, initial
+constexpr float kPlayerKnockbackV = 4.5f;
+constexpr float kKnockbackDecay   = 8.0f;   // 1/s; smaller = longer slide
+
 // Waves.
 constexpr int   kFirstWaveSize = 3;
 constexpr int   kWaveIncrement = 2;
@@ -259,6 +269,7 @@ struct Enemy {
     // enemies strafe around instead of marching in a straight line.
     Vec2 wander{0.0f, 0.0f};
     float wanderCd = 0.0f;
+    Vec2 knockback{0.0f, 0.0f};   // residual hit impulse, decays in UpdateEnemies
 };
 
 // ---------------------------------------------------------------------------
@@ -412,6 +423,7 @@ public:
         m_ctx->wave  = 0;
         m_facing     = {1.0f, 0.0f};
         m_moveDir    = {1.0f, 0.0f};
+        m_playerKnockback = {0.0f, 0.0f};
         m_autoLocked = false;
         m_autoPulse  = 0.0f;
         m_modeFlash  = 0.0f;
@@ -521,6 +533,20 @@ private:
         if (arenaPxH < kScreenH - 60.0f) { minY = (kScreenH - arenaPxH) * 0.5f; maxY = minY; }
         m_camOrigin.x = std::max(minX, std::min(maxX, wantedOrigin.x));
         m_camOrigin.y = std::max(minY, std::min(maxY, wantedOrigin.y));
+    }
+
+    // Distance-only visibility: a wall outside the light disc is hidden, a
+    // wall inside it tints with the same quadratic falloff the floor uses,
+    // and crucially no LOS check — so walls behind other walls still draw
+    // (the user wants the "what's around me" silhouette, not a flashlight
+    // cone). Returning 0 means "skip this wall entirely".
+    float WallLight(int tx, int ty) const {
+        const float dx = float(tx) + 0.5f - m_player.x;
+        const float dy = float(ty) + 0.5f - m_player.y;
+        const float d2 = dx * dx + dy * dy;
+        const float r2 = kLightRange * kLightRange;
+        if (d2 >= r2) return 0.0f;
+        return 1.0f - d2 / r2;
     }
 
     // Proper grid-DDA "does this ray hit a wall before reaching (bx, by)?"
@@ -662,6 +688,24 @@ private:
         if (!CircleBlockedByWalls(m_grid, nx, m_player.y, kPlayerR)) m_player.x = nx;
         if (!CircleBlockedByWalls(m_grid, m_player.x, ny, kPlayerR)) m_player.y = ny;
 
+        // Bullet-hit knockback: apply residual impulse with wall slide, then
+        // bleed it off exponentially so it fades within ~0.5s. The threshold
+        // prevents floating-point dust from carrying movement forever.
+        if (m_playerKnockback.x * m_playerKnockback.x +
+            m_playerKnockback.y * m_playerKnockback.y > 0.01f) {
+            const float kx = m_playerKnockback.x * dt;
+            const float ky = m_playerKnockback.y * dt;
+            if (!CircleBlockedByWalls(m_grid, m_player.x + kx, m_player.y, kPlayerR))
+                m_player.x += kx;
+            if (!CircleBlockedByWalls(m_grid, m_player.x, m_player.y + ky, kPlayerR))
+                m_player.y += ky;
+            const float decay = std::exp(-kKnockbackDecay * dt);
+            m_playerKnockback.x *= decay;
+            m_playerKnockback.y *= decay;
+        } else {
+            m_playerKnockback = {0.0f, 0.0f};
+        }
+
         // Aim. Branches on the active mode; both modes write m_facing so the
         // gun barrel + bullet spawn share a single code path below.
         m_autoLocked = false;
@@ -731,6 +775,14 @@ private:
                     if (dx * dx + dy * dy < rr * rr) {
                         e.hp -= kPlayerBulletDmg;
                         e.hurtFlash = kEnemyHurtFlash;
+                        // Knockback along the bullet's normalised flight dir.
+                        const float vlen = std::sqrt(b.vel.x * b.vel.x +
+                                                     b.vel.y * b.vel.y);
+                        if (vlen > 0.001f) {
+                            const float s = kEnemyKnockbackV / vlen;
+                            e.knockback.x = b.vel.x * s;
+                            e.knockback.y = b.vel.y * s;
+                        }
                         b.alive = false;
                         if (e.hp <= 0) {
                             e.alive = false;
@@ -746,6 +798,13 @@ private:
                 if (dx * dx + dy * dy < rr * rr && m_playerHurt <= 0.0f) {
                     m_ctx->playerHp -= kEnemyBulletDmg;
                     m_playerHurt = kPlayerHurtIFrame;
+                    const float vlen = std::sqrt(b.vel.x * b.vel.x +
+                                                 b.vel.y * b.vel.y);
+                    if (vlen > 0.001f) {
+                        const float s = kPlayerKnockbackV / vlen;
+                        m_playerKnockback.x = b.vel.x * s;
+                        m_playerKnockback.y = b.vel.y * s;
+                    }
                     b.alive = false;
                 }
             }
@@ -793,6 +852,24 @@ private:
             const float ny = e.pos.y + wantDir.y * step;
             if (!CircleBlockedByWalls(m_grid, nx, e.pos.y, kEnemyR)) e.pos.x = nx;
             if (!CircleBlockedByWalls(m_grid, e.pos.x, ny, kEnemyR)) e.pos.y = ny;
+
+            // Bullet-hit knockback (same axis-separated slide + exp decay as
+            // the player). Runs after the AI's own move so a heavy impulse
+            // briefly overrides the chase direction.
+            if (e.knockback.x * e.knockback.x +
+                e.knockback.y * e.knockback.y > 0.01f) {
+                const float kx = e.knockback.x * dt;
+                const float ky = e.knockback.y * dt;
+                if (!CircleBlockedByWalls(m_grid, e.pos.x + kx, e.pos.y, kEnemyR))
+                    e.pos.x += kx;
+                if (!CircleBlockedByWalls(m_grid, e.pos.x, e.pos.y + ky, kEnemyR))
+                    e.pos.y += ky;
+                const float decay = std::exp(-kKnockbackDecay * dt);
+                e.knockback.x *= decay;
+                e.knockback.y *= decay;
+            } else {
+                e.knockback = {0.0f, 0.0f};
+            }
 
             // Shoot if within range and a rough LOS (no wall on the segment).
             if (dist < kEnemyShootRange && e.fireCd <= 0.0f && HasLOS(e.pos, m_player)) {
@@ -935,7 +1012,30 @@ private:
                 fogOnNow = wantFog;
             }
             switch (it.kind) {
-                case 0: DrawWall(r, it.index % kArenaW, it.index / kArenaW); break;
+                case 0: {
+                    const int tx = it.index % kArenaW;
+                    const int ty = it.index / kArenaW;
+                    if (!fogActive) {
+                        DrawWallFlat(r, tx, ty);
+                        break;
+                    }
+                    // Closest point on the wall's footprint to the player —
+                    // if even that is outside the light disc the whole wall
+                    // is dark and we can use the 3-quad black fast path
+                    // instead of sub-dividing.
+                    const float cpx = std::max(float(tx),
+                        std::min(m_player.x, float(tx + 1)));
+                    const float cpy = std::max(float(ty),
+                        std::min(m_player.y, float(ty + 1)));
+                    const float ddx = m_player.x - cpx;
+                    const float ddy = m_player.y - cpy;
+                    if (ddx * ddx + ddy * ddy >= kLightRange * kLightRange) {
+                        DrawWallBlack(r, tx, ty);
+                    } else {
+                        DrawWallShadowed(r, tx, ty);
+                    }
+                    break;
+                }
                 case 1: DrawEnemy(r, m_enemies[it.index]); break;
                 case 2: DrawPlayer(r); break;
                 case 3: DrawBullet(r, m_bullets[it.index]); break;
@@ -948,20 +1048,97 @@ private:
         }
     }
 
-    void DrawWall(Renderer2D& r, int tx, int ty) {
+    // Per-vertex tint for walls — without it, every wall is tinted by its
+    // single centre value and adjacent walls show a hard step in brightness
+    // at their boundary. Each face is broken into a small grid and every
+    // sub-quad samples its own world position, so a sub-quad on the seam
+    // between two walls matches the equivalent sub-quad on the other side
+    // and the chain reads as one continuous surface. Only runs when the
+    // wall is in the lit area — the caller bails before we get here when
+    // shadows are off, so the fast 3-quad path is preserved for that case.
+    void DrawWallShadowed(Renderer2D& r, int tx, int ty) {
+        constexpr int kSub = 6;
         const Vec2 p = W2S({float(tx), float(ty)}, m_camOrigin);
-        // Side face (the "front" of the wall facing the camera).
-        r.DrawQuad({p.x, p.y - kWallScreenH + kTileH},
-                   {kTileW, kWallScreenH},
-                   kWallSide);
-        // Top face — drawn at the wall's top edge in screen space.
-        r.DrawQuad({p.x, p.y - kWallScreenH},
-                   {kTileW, kTileH},
-                   kWallTop);
-        // Thin highlight strip along the top edge so wall corners read in 3D.
-        r.DrawQuad({p.x, p.y - kWallScreenH},
-                   {kTileW, 3.0f},
-                   kWallEdge);
+        const float sw      = kTileW       / float(kSub);
+        const float shTop   = kTileH       / float(kSub);
+        const float shSide  = kWallScreenH / float(kSub);
+
+        const float r2 = kLightRange * kLightRange;
+        auto TintAt = [this, r2](float wx, float wy) -> float {
+            const float dx = wx - m_player.x;
+            const float dy = wy - m_player.y;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 >= r2) return 0.0f;
+            return 1.0f - d2 / r2;
+        };
+        auto mul = [](const Color& c, float t) {
+            return Color(c.r * t, c.g * t, c.b * t, c.a);
+        };
+
+        // Side face — single horizontal strip (Y-axis doesn't change tint).
+        // Sub-quads outside the disc collapse to black (mul by t=0); they
+        // still draw so the wall reads as a black silhouette in the dark,
+        // not as a hole in the scene.
+        for (int sx = 0; sx < kSub; ++sx) {
+            const float wx = float(tx) + (sx + 0.5f) / kSub;
+            const float t  = TintAt(wx, float(ty) + 1.0f);
+            r.DrawQuad({p.x + sx * sw, p.y}, {sw, shSide * kSub},
+                       mul(kWallSide, t));
+        }
+
+        // Top face. World coords span (tx..tx+1, ty..ty+1) at z=1 — so
+        // sub-divide in both axes. The seam at world Y=ty is exactly where
+        // the north wall (if any) would have its top face's south edge,
+        // and at ty+1 it meets THIS wall's own side face's south edge;
+        // both meet at matching world coords, which is what makes the
+        // brightness continuous across chains.
+        for (int sy = 0; sy < kSub; ++sy) {
+            for (int sx = 0; sx < kSub; ++sx) {
+                const float wx = float(tx) + (sx + 0.5f) / kSub;
+                const float wy = float(ty) + (sy + 0.5f) / kSub;
+                const float t  = TintAt(wx, wy);
+                r.DrawQuad({p.x + sx * sw,
+                            p.y - kWallScreenH + sy * shTop},
+                           {sw, shTop}, mul(kWallTop, t));
+            }
+        }
+
+        // Edge highlight — same skip rule as before (only the northernmost
+        // wall in a vertical chain draws it).
+        if (m_grid.At(tx, ty - 1) != Tile::Wall) {
+            for (int sx = 0; sx < kSub; ++sx) {
+                const float wx = float(tx) + (sx + 0.5f) / kSub;
+                const float t  = TintAt(wx, float(ty));
+                r.DrawQuad({p.x + sx * sw, p.y - kWallScreenH},
+                           {sw, 3.0f}, mul(kWallEdge, t));
+            }
+        }
+    }
+
+    // Fully-outside-the-disc fast path. Three flat black quads — no need to
+    // sub-divide because every sub-quad would compute t=0 anyway.
+    void DrawWallBlack(Renderer2D& r, int tx, int ty) {
+        const Vec2 p = W2S({float(tx), float(ty)}, m_camOrigin);
+        const Color black(0.0f, 0.0f, 0.0f, 1.0f);
+        r.DrawQuad({p.x, p.y}, {kTileW, kWallScreenH}, black);
+        r.DrawQuad({p.x, p.y - kWallScreenH}, {kTileW, kTileH}, black);
+        // Edge highlight on a fully-dark wall reads as black-on-black, but
+        // still skip when there's a wall above so the chain looks the same
+        // in the dark as it does in light.
+        if (m_grid.At(tx, ty - 1) != Tile::Wall) {
+            r.DrawQuad({p.x, p.y - kWallScreenH}, {kTileW, 3.0f}, black);
+        }
+    }
+
+    // Unshaded fast path used when SHADOWS is off — three flat quads, no
+    // per-subquad work.
+    void DrawWallFlat(Renderer2D& r, int tx, int ty) {
+        const Vec2 p = W2S({float(tx), float(ty)}, m_camOrigin);
+        r.DrawQuad({p.x, p.y}, {kTileW, kWallScreenH}, kWallSide);
+        r.DrawQuad({p.x, p.y - kWallScreenH}, {kTileW, kTileH}, kWallTop);
+        if (m_grid.At(tx, ty - 1) != Tile::Wall) {
+            r.DrawQuad({p.x, p.y - kWallScreenH}, {kTileW, 3.0f}, kWallEdge);
+        }
     }
 
     void DrawPlayer(Renderer2D& r) {
@@ -1155,6 +1332,7 @@ private:
     // auto-aim cone keeps pointing where they were heading. Initialised right
     // so the cone has *some* direction on the very first frame.
     Vec2    m_moveDir{1.0f, 0.0f};
+    Vec2    m_playerKnockback{0.0f, 0.0f};   // bullet-hit impulse, decays each frame
     Vec2    m_camOrigin{0.0f, 0.0f};
     float   m_playerHurt = 0.0f;
     float   m_fireCd     = 0.0f;
