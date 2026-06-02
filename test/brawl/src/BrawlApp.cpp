@@ -94,7 +94,16 @@ constexpr float kEnemyWanderCd      = 0.9f;
 // the player doesn't feel yanked around by every stray shot.
 constexpr float kEnemyKnockbackV  = 7.5f;   // tiles/s, initial
 constexpr float kPlayerKnockbackV = 4.5f;
-constexpr float kKnockbackDecay   = 8.0f;   // 1/s; smaller = longer slide
+constexpr float kKnockbackDecay   = 12.0f;  // 1/s; smaller = longer slide
+
+// Death sparkle — four 8-pointed star particles erupting radially from a
+// killed enemy. Lifetime is short and there's slight aerodynamic drag so the
+// burst reads as "pop" not "drift".
+constexpr float kStarSpeed = 4.5f;          // tiles/s, initial radial speed
+constexpr float kStarLife  = 0.55f;         // seconds
+constexpr float kStarDrag  = 3.0f;          // 1/s velocity decay
+constexpr float kStarSpin  = 8.0f;          // rad/s — alternating sign per pair
+constexpr float kStarPx    = 30.0f;         // screen pixels at spawn
 
 // Waves.
 constexpr int   kFirstWaveSize = 3;
@@ -258,6 +267,22 @@ struct Bullet {
     bool alive = true;
 };
 
+// One "star" of a sparkle burst — both the gold death star and the white
+// bullet-vs-wall spark use this same struct. Per-particle life/size/color
+// keeps EmitDeathStars and EmitWallSparks driving the same update + draw
+// pipeline without forking into two particle systems.
+struct StarParticle {
+    Vec2  pos{};
+    Vec2  vel{};
+    float angle = 0.0f;
+    float spin  = 0.0f;
+    float age   = 0.0f;
+    float life  = 0.55f;
+    float size  = 30.0f;
+    Color color{1.0f, 0.93f, 0.32f, 1.0f};
+    bool  alive = true;
+};
+
 struct Enemy {
     Vec2 pos;
     Vec2 aim{1.0f, 0.0f};
@@ -418,6 +443,7 @@ public:
         m_fireCd     = 0.0f;
         m_bullets.clear();
         m_enemies.clear();
+        m_particles.clear();
         m_waveTimer  = 0.0f;
         m_waveActive = false;
         m_ctx->wave  = 0;
@@ -430,6 +456,100 @@ public:
         m_shadowFlash = 0.0f;
         m_lastShadowSrc = {1e9f, 1e9f};
         EnsureShadowTexture();
+        EnsureStarTexture();
+    }
+
+    // Bake the sparkle sprite into an RGBA8 texture. Layout: a Gaussian-ish
+    // bright core + cos²(2θ)^n "ray" modulation (4 main rays at 0/π/2 and
+    // 4 dimmer rays rotated π/4 between them). Rays fade with radius so
+    // the sprite reaches alpha 0 at the texture edge — drawn rotated, the
+    // soft falloff hides any sampling aliasing.
+    void EnsureStarTexture() {
+        if (m_starTex) return;
+        constexpr int kN = 128;
+        std::vector<uint8_t> px(size_t(kN) * kN * 4);
+        for (int y = 0; y < kN; ++y) {
+            for (int x = 0; x < kN; ++x) {
+                const float fx = (float(x) + 0.5f) / float(kN) * 2.0f - 1.0f;
+                const float fy = (float(y) + 0.5f) / float(kN) * 2.0f - 1.0f;
+                const float r2 = fx * fx + fy * fy;
+                float intensity = 0.0f;
+                if (r2 < 1.0f) {
+                    const float r     = std::sqrt(r2);
+                    const float core  = std::exp(-r2 * 7.0f);
+                    const float theta = std::atan2(fy, fx);
+                    const float ray4  = std::pow(std::fabs(std::cos(theta * 2.0f)), 20.0f);
+                    const float ray4d = std::pow(std::fabs(std::cos(theta * 2.0f - 0.78539816f)), 32.0f);
+                    const float fade  = 1.0f - r;
+                    intensity = core + (ray4 * 0.90f + ray4d * 0.55f) * fade;
+                    if (intensity > 1.0f) intensity = 1.0f;
+                }
+                const uint8_t v = uint8_t(intensity * 255.0f + 0.5f);
+                const size_t i = (size_t(y) * kN + x) * 4;
+                px[i + 0] = v;
+                px[i + 1] = v;
+                px[i + 2] = v;
+                px[i + 3] = v;
+            }
+        }
+        TextureDesc td;
+        td.width  = kN;
+        td.height = kN;
+        td.format = TextureFormat::RGBA8;
+        td.filter = TextureFilter::Linear;
+        td.pixels = px.data();
+        if (m_ctx->device)
+            m_starTex = m_ctx->device->CreateTexture(td);
+        if (m_starTex)
+            m_starRegion = TextureRegion::FromPixels(
+                m_starTex.get(), 0.0f, 0.0f, float(kN), float(kN));
+    }
+
+    // Spawn 4 gold star particles erupting radially from `at`. Used on enemy
+    // death; we randomise the base angle a bit so consecutive kills don't
+    // all spit out an identical cross.
+    void EmitDeathStars(Vec2 at) {
+        std::uniform_real_distribution<float> jitter(0.0f, 1.5707963f);
+        const float base = jitter(m_rng);
+        for (int i = 0; i < 4; ++i) {
+            const float a = base + i * 1.5707963f;          // 90° apart
+            StarParticle p;
+            p.pos   = at;
+            p.vel   = { std::cos(a) * kStarSpeed,
+                        std::sin(a) * kStarSpeed };
+            p.angle = a;
+            p.spin  = (i & 1) ? -kStarSpin : kStarSpin;
+            p.life  = kStarLife;
+            p.size  = kStarPx;
+            p.color = Color(1.0f, 0.93f, 0.32f, 1.0f);
+            m_particles.push_back(p);
+        }
+    }
+
+    // Bullet-vs-wall spark: 5 small white sparkles flying back along the
+    // bullet's incoming direction within a wide cone. Short life, small
+    // sprite, fast spin — reads as "pang!" not as a death burst.
+    void EmitWallSparks(Vec2 at, Vec2 bulletVel) {
+        const float v2 = bulletVel.x * bulletVel.x + bulletVel.y * bulletVel.y;
+        if (v2 < 1e-6f) return;
+        const float backAng = std::atan2(-bulletVel.y, -bulletVel.x);
+        std::uniform_real_distribution<float> spread(-1.0f, 1.0f);     // ~±57°
+        std::uniform_real_distribution<float> spd(2.0f, 4.0f);
+        std::uniform_real_distribution<float> rot(-3.14159f, 3.14159f);
+        constexpr int kCount = 5;
+        for (int i = 0; i < kCount; ++i) {
+            const float a = backAng + spread(m_rng);
+            const float s = spd(m_rng);
+            StarParticle p;
+            p.pos   = at;
+            p.vel   = { std::cos(a) * s, std::sin(a) * s };
+            p.angle = rot(m_rng);
+            p.spin  = (i & 1) ? -14.0f : 14.0f;
+            p.life  = 0.25f;
+            p.size  = 11.0f;
+            p.color = Color(1.0f, 1.0f, 1.0f, 1.0f);
+            m_particles.push_back(p);
+        }
     }
 
     // Allocate (or reallocate, if subdiv ever changes) the shadow texture
@@ -475,6 +595,7 @@ public:
         UpdatePlayer(dt);
         UpdateBullets(dt);
         UpdateEnemies(dt);
+        UpdateParticles(dt);
         UpdateWaves(dt);
         if (m_ctx->shadowsOn) UpdateShadows();
 
@@ -488,19 +609,26 @@ public:
         r.Begin(Renderer2D::ScreenCamera(kScreenW, kScreenH));
         r.DrawQuad({0, 0}, {kScreenW, kScreenH}, kBgClear);
 
-        // World pass: the floor pass and entities sample the shadow texture
-        // so they tint by visibility; DrawSorted internally bypasses fog for
-        // each wall sprite so the wall's upward extrusion doesn't pick up
-        // the dark of the floor behind it (see DrawSorted's note).
+        // Only the FLOOR pass uses the fog/shadow texture — for it the
+        // screen-Y → world-Y inverse maps cleanly back to its own tile. Walls
+        // and entities don't, because their sprites extend upward in screen
+        // space and would sample texels for tiles that aren't theirs (walls
+        // pick up the dark of the floor behind them; entities in shadow pick
+        // up the bright of the wall in front of them). They both tint
+        // themselves manually instead — walls via per-sub-quad distance,
+        // entities via SampleShadowAt on their feet position.
         const bool fogActive = m_ctx->shadowsOn && m_shadowTex != nullptr;
-        const float invW = 1.0f / (kArenaW * kTileW);
-        const float invH = 1.0f / (kArenaH * kTileH);
-        const Vec4 uRow{ invW, 0.0f, -m_camOrigin.x * invW, 0.0f };
-        const Vec4 vRow{ 0.0f, invH, -m_camOrigin.y * invH, 0.0f };
-        if (fogActive) r.SetFog(m_shadowTex.get(), uRow, vRow);
+        if (fogActive) {
+            const float invW = 1.0f / (kArenaW * kTileW);
+            const float invH = 1.0f / (kArenaH * kTileH);
+            const Vec4 uRow{ invW, 0.0f, -m_camOrigin.x * invW, 0.0f };
+            const Vec4 vRow{ 0.0f, invH, -m_camOrigin.y * invH, 0.0f };
+            r.SetFog(m_shadowTex.get(), uRow, vRow);
+        }
         DrawArenaFloor(r);
-        DrawSorted(r, fogActive, uRow, vRow);
         if (fogActive) r.SetFog(nullptr, {}, {});
+        DrawSorted(r, fogActive);
+        DrawParticles(r);
         DrawAutoAimOverlay(r);
         DrawHud(r);
 
@@ -533,6 +661,19 @@ private:
         if (arenaPxH < kScreenH - 60.0f) { minY = (kScreenH - arenaPxH) * 0.5f; maxY = minY; }
         m_camOrigin.x = std::max(minX, std::min(maxX, wantedOrigin.x));
         m_camOrigin.y = std::max(minY, std::min(maxY, wantedOrigin.y));
+    }
+
+    // Read the shadow texture on the CPU at a single world point. Entities
+    // tint themselves by this so their sprite — which extends upward off
+    // their feet and would otherwise sample texels for *other* tiles via
+    // SetFog's screen-Y → world-Y inverse — uses one value tied to their
+    // actual position. Point-sampled; one tint per sprite is what we want.
+    float SampleShadowAt(Vec2 wp) const {
+        if (!m_ctx->shadowsOn || m_shadowPixels.empty()) return 1.0f;
+        const int x = int(wp.x * kShadowSubdiv);
+        const int y = int(wp.y * kShadowSubdiv);
+        if (x < 0 || y < 0 || x >= m_shadowW || y >= m_shadowH) return 1.0f;
+        return m_shadowPixels[(size_t(y) * m_shadowW + x) * 4] / 255.0f;
     }
 
     // Distance-only visibility: a wall outside the light disc is hidden, a
@@ -666,12 +807,20 @@ private:
             m_modeFlash = 0.8f;
         }
 
-        // Movement.
+        // Movement. WASD is locked out while the player is being knocked
+        // back from a bullet hit — the impulse should feel like a yank, not
+        // something you can cancel by holding the opposite direction. The
+        // facing / auto-aim / shooting paths below keep working so the
+        // player can still aim and return fire mid-slide.
+        const bool kbActive = (m_playerKnockback.x * m_playerKnockback.x +
+                               m_playerKnockback.y * m_playerKnockback.y > 0.01f);
         Vec2 input{0.0f, 0.0f};
-        if (Input::IsKeyDown(Key::A) || Input::IsKeyDown(Key::Left))  input.x -= 1.0f;
-        if (Input::IsKeyDown(Key::D) || Input::IsKeyDown(Key::Right)) input.x += 1.0f;
-        if (Input::IsKeyDown(Key::W) || Input::IsKeyDown(Key::Up))    input.y -= 1.0f;
-        if (Input::IsKeyDown(Key::S) || Input::IsKeyDown(Key::Down))  input.y += 1.0f;
+        if (!kbActive) {
+            if (Input::IsKeyDown(Key::A) || Input::IsKeyDown(Key::Left))  input.x -= 1.0f;
+            if (Input::IsKeyDown(Key::D) || Input::IsKeyDown(Key::Right)) input.x += 1.0f;
+            if (Input::IsKeyDown(Key::W) || Input::IsKeyDown(Key::Up))    input.y -= 1.0f;
+            if (Input::IsKeyDown(Key::S) || Input::IsKeyDown(Key::Down))  input.y += 1.0f;
+        }
         const float ilen = std::sqrt(input.x * input.x + input.y * input.y);
         if (ilen > 0.001f) {
             input = { input.x / ilen, input.y / ilen };
@@ -759,8 +908,9 @@ private:
             if (b.life >= kBulletLife) { b.alive = false; continue; }
             const float nx = b.pos.x + b.vel.x * dt;
             const float ny = b.pos.y + b.vel.y * dt;
-            // Walls stop bullets.
+            // Walls stop bullets — and throw a white spark burst.
             if (CircleBlockedByWalls(m_grid, nx, ny, kBulletR)) {
+                EmitWallSparks(b.pos, b.vel);
                 b.alive = false; continue;
             }
             b.pos.x = nx;
@@ -787,6 +937,7 @@ private:
                         if (e.hp <= 0) {
                             e.alive = false;
                             m_ctx->score += kScorePerKill;
+                            EmitDeathStars(e.pos);
                         }
                         break;
                     }
@@ -886,6 +1037,23 @@ private:
                         m_enemies.end());
     }
 
+    void UpdateParticles(float dt) {
+        for (StarParticle& p : m_particles) {
+            if (!p.alive) continue;
+            p.age += dt;
+            if (p.age >= p.life) { p.alive = false; continue; }
+            p.pos.x += p.vel.x * dt;
+            p.pos.y += p.vel.y * dt;
+            const float drag = std::exp(-kStarDrag * dt);
+            p.vel.x *= drag;
+            p.vel.y *= drag;
+            p.angle += p.spin * dt;
+        }
+        m_particles.erase(std::remove_if(m_particles.begin(), m_particles.end(),
+                                         [](const StarParticle& p) { return !p.alive; }),
+                          m_particles.end());
+    }
+
     void UpdateWaves(float dt) {
         if (!m_waveActive) {
             if (m_enemies.empty()) {
@@ -966,16 +1134,11 @@ private:
     }
 
     // Walls + bullets + player + enemies, painter-sorted by feet world-Y.
-    //
-    // When fogActive is true the caller has already bound the shadow texture
-    // for the floor pass; this function toggles fog OFF for each wall and
-    // back ON for entities. Walls extrude upward on screen, so their pixels
-    // map to a world-Y *one tile north* of the wall — sampling the shadow
-    // texel there pulls in the dark of the floor behind the wall, which made
-    // the wall top look like it was sitting in someone else's shadow. With
-    // fog off during wall draws the wall sprite shows its true colour.
-    void DrawSorted(Renderer2D& r, bool fogActive,
-                    const Vec4& uRow, const Vec4& vRow) {
+    // Caller has fog OFF by the time we get here (it's only on for the floor
+    // pass) — walls compute their distance tint per sub-quad and entities
+    // tint via SampleShadowAt(feet). fogActive just tells us whether the
+    // light disc is active, so we know whether to apply those tints at all.
+    void DrawSorted(Renderer2D& r, bool fogActive) {
         struct Item {
             float sortY;
             int   kind;   // 0 wall, 1 enemy, 2 player, 3 bullet
@@ -1003,14 +1166,7 @@ private:
                       return a.kind < b.kind;
                   });
 
-        bool fogOnNow = fogActive;          // caller's state on entry
         for (const Item& it : items) {
-            const bool wantFog = fogActive && (it.kind != 0);
-            if (wantFog != fogOnNow) {
-                if (wantFog) r.SetFog(m_shadowTex.get(), uRow, vRow);
-                else         r.SetFog(nullptr, {}, {});
-                fogOnNow = wantFog;
-            }
             switch (it.kind) {
                 case 0: {
                     const int tx = it.index % kArenaW;
@@ -1040,11 +1196,6 @@ private:
                 case 2: DrawPlayer(r); break;
                 case 3: DrawBullet(r, m_bullets[it.index]); break;
             }
-        }
-        // Leave the renderer in whatever fog state the caller started in.
-        if (fogOnNow != fogActive) {
-            if (fogActive) r.SetFog(m_shadowTex.get(), uRow, vRow);
-            else           r.SetFog(nullptr, {}, {});
         }
     }
 
@@ -1143,34 +1294,43 @@ private:
 
     void DrawPlayer(Renderer2D& r) {
         const Vec2 feet = W2S(m_player, m_camOrigin);
+        const float L = SampleShadowAt(m_player);
+        auto tint = [L](const Color& c) {
+            return Color(c.r * L, c.g * L, c.b * L, c.a);
+        };
         DrawShadow(r, {feet.x, feet.y + 6.0f}, 18.0f);
 
         // Body: 26x18 squat torso so the upper half (head) reads above shoulders.
         const Color body = (m_playerHurt > 0.0f) ? kPlayerHurt : kPlayerBody;
-        r.DrawQuad({feet.x - 14.0f, feet.y - 22.0f}, {28.0f, 18.0f}, body);
+        r.DrawQuad({feet.x - 14.0f, feet.y - 22.0f}, {28.0f, 18.0f}, tint(body));
         // Head.
-        r.DrawQuad({feet.x - 9.0f, feet.y - 36.0f}, {18.0f, 16.0f}, kPlayerHead);
+        r.DrawQuad({feet.x - 9.0f, feet.y - 36.0f}, {18.0f, 16.0f}, tint(kPlayerHead));
         // Gun barrel: thin rotated quad pointing where the player aims, on
         // top of the body. Use the screen-space angle so the barrel matches
         // bullet travel under the Y compression.
         const float ang = WorldDirToScreenAngle(m_facing);
         const Vec2 gunMid{ feet.x + std::cos(ang) * 16.0f,
                            feet.y + std::sin(ang) * 16.0f - 18.0f };
-        r.DrawQuad(gunMid, {18.0f, 5.0f}, ang, kPlayerGun);
+        r.DrawQuad(gunMid, {18.0f, 5.0f}, ang, tint(kPlayerGun));
     }
 
     void DrawEnemy(Renderer2D& r, const Enemy& e) {
         const Vec2 feet = W2S(e.pos, m_camOrigin);
+        const float L = SampleShadowAt(e.pos);
+        auto tint = [L](const Color& c) {
+            return Color(c.r * L, c.g * L, c.b * L, c.a);
+        };
         DrawShadow(r, {feet.x, feet.y + 5.0f}, 16.0f);
         const Color body = (e.hurtFlash > 0.0f) ? Color(1.0f, 1.0f, 1.0f, 1.0f) : kEnemyBody;
-        r.DrawQuad({feet.x - 13.0f, feet.y - 20.0f}, {26.0f, 17.0f}, body);
-        r.DrawQuad({feet.x - 8.0f,  feet.y - 32.0f}, {16.0f, 14.0f}, kEnemyHead);
+        r.DrawQuad({feet.x - 13.0f, feet.y - 20.0f}, {26.0f, 17.0f}, tint(body));
+        r.DrawQuad({feet.x - 8.0f,  feet.y - 32.0f}, {16.0f, 14.0f}, tint(kEnemyHead));
         const float ang = WorldDirToScreenAngle(e.aim);
         const Vec2 gunMid{ feet.x + std::cos(ang) * 14.0f,
                            feet.y + std::sin(ang) * 14.0f - 16.0f };
-        r.DrawQuad(gunMid, {14.0f, 4.0f}, ang, kEnemyGun);
+        r.DrawQuad(gunMid, {14.0f, 4.0f}, ang, tint(kEnemyGun));
 
-        // HP pip strip above head — small dots so HP reads at a glance.
+        // HP pip strip above head — same tint, so a hidden enemy doesn't
+        // give itself away with a floating red bar in the dark.
         const float dotW = 5.0f;
         const float dotH = 3.0f;
         const float gap  = 2.0f;
@@ -1180,7 +1340,7 @@ private:
                                        : Color(0.20f, 0.10f, 0.10f, 0.7f);
             r.DrawQuad({feet.x - stripW * 0.5f + i * (dotW + gap),
                         feet.y - 42.0f},
-                       {dotW, dotH}, c);
+                       {dotW, dotH}, tint(c));
         }
     }
 
@@ -1234,9 +1394,28 @@ private:
         r.DrawQuad({t.x + c - tk,   t.y + feetOffset + c - ln}, {tk, ln}, rc);
     }
 
+    // One rotated textured quad per particle — the sprite's per-pixel alpha
+    // does all the shape work, so a single DrawQuad gives a smoother result
+    // than the previous 4-quad cross at any rotation. spriteSize is sized
+    // to ~2.2× the "main star width" so the soft rays fit inside the quad.
+    void DrawParticles(Renderer2D& r) {
+        if (!m_starTex || m_particles.empty()) return;
+        for (const StarParticle& p : m_particles) {
+            if (!p.alive) continue;
+            const Vec2 sp = W2S(p.pos, m_camOrigin);
+            const float t = 1.0f - (p.age / p.life);
+            const float visible = p.size * (0.55f + 0.45f * t);
+            const float spriteSize = visible * 2.2f;
+            const Color tint(p.color.r, p.color.g, p.color.b, p.color.a * t);
+            r.DrawQuad(sp, {spriteSize, spriteSize}, p.angle, m_starRegion, tint);
+        }
+    }
+
     void DrawBullet(Renderer2D& r, const Bullet& b) {
         const Vec2 sp = W2S(b.pos, m_camOrigin);
-        const Color c = b.fromPlayer ? kPBullet : kEBullet;
+        const float L = SampleShadowAt(b.pos);
+        const Color base = b.fromPlayer ? kPBullet : kEBullet;
+        const Color c(base.r * L, base.g * L, base.b * L, base.a);
         // Tiny trail — a faded copy 4-6px behind the bullet's screen velocity.
         const float ang = std::atan2(b.vel.y * kYCompress, b.vel.x);
         const Vec2 tail{ sp.x - std::cos(ang) * 8.0f,
@@ -1347,11 +1526,19 @@ private:
     // toggle flips on. Drives Renderer2D::SetFog during the world pass.
     std::unique_ptr<RHITexture> m_shadowTex;
     std::vector<uint8_t>        m_shadowPixels;   // tightly packed RGBA8
+    // Procedural sparkle sprite used by every death star. Generated once on
+    // scene entry — a smooth 128×128 RGBA8 with bright core + 4 main rays
+    // and 4 shorter diagonal rays. Drawn rotated with linear filtering, so
+    // it stays sharp at any orientation instead of the chunky look the
+    // axis-aligned rotated rectangles produced.
+    std::unique_ptr<RHITexture> m_starTex;
+    TextureRegion               m_starRegion;
     int     m_shadowW = 0, m_shadowH = 0;
     Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
     float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
-    std::vector<Bullet> m_bullets;
-    std::vector<Enemy>  m_enemies;
+    std::vector<Bullet>        m_bullets;
+    std::vector<Enemy>         m_enemies;
+    std::vector<StarParticle>  m_particles;
     bool    m_waveActive = false;
     float   m_waveTimer  = 0.0f;
 
