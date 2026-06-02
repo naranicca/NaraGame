@@ -278,6 +278,29 @@ constexpr float kAutoAimRange     = 10.0f;   // world tiles
 constexpr float kAutoAimConeCos   = 0.707f;  // ≈ cos(45°), so 90° full cone
 
 // ---------------------------------------------------------------------------
+// Ray-cast wall shadows.
+//   A low-res visibility texture rebuilt every time the player moves: for
+//   each sub-tile texel we ray-cast from the player to the texel's world
+//   position, and write a multiplicative light value [0, 1]. Walls block
+//   the ray (texel = kAmbient). Within line-of-sight the value falls off
+//   quadratically from 1.0 at the player to kAmbient at kLightRange.
+//   The texture rides Renderer2D's existing fog pipeline (R channel = light
+//   multiplier) so no new shader / RHI path is needed; it works on both
+//   D3D11 and Vulkan out of the box.
+// ---------------------------------------------------------------------------
+constexpr int   kShadowSubdiv = 24;    // texels per tile per axis — 24 makes
+                                       // each texel ≈ 2×1.5 screen px so the
+                                       // shadow staircase falls below the eye's
+                                       // resolution after the bilinear filter.
+                                       // Affordable thanks to the DDA-based
+                                       // ShadowRayHitsWall below; the older
+                                       // step=0.25 HasLOS would have made the
+                                       // update too slow at this density.
+constexpr float kLightRange   = 9.0f;  // world tiles; quadratic falloff
+constexpr float kAmbient      = 0.08f; // floor in shadow tints to this — dark, but
+                                       // not zero so silhouettes stay readable
+
+// ---------------------------------------------------------------------------
 // Shared context between scenes.
 // ---------------------------------------------------------------------------
 struct GameContext {
@@ -289,6 +312,7 @@ struct GameContext {
     int   playerHp = kPlayerHpMax;
     bool  newRun   = true;
     AimMode aimMode = AimMode::Auto;
+    bool    shadowsOn = true;
     std::function<std::unique_ptr<Scene>()> makeArena;
     std::function<std::unique_ptr<Scene>()> makeTitle;
     std::function<std::unique_ptr<Scene>()> makeGameOver;
@@ -360,7 +384,7 @@ public:
                          540.0f, 22.0f, Color(0.75f, 0.85f, 0.85f, 1.0f));
         DrawCenteredText(r, *m_ctx->font, "AUTO: auto-fire on lock   MOUSE: click to shoot",
                          574.0f, 22.0f, Color(1.00f, 0.85f, 0.30f, 1.0f));
-        DrawCenteredText(r, *m_ctx->font, "T toggle aim mode   R rebuild   Esc back",
+        DrawCenteredText(r, *m_ctx->font, "T aim mode   H shadows   R rebuild   Esc back",
                          608.0f, 22.0f, Color(0.65f, 0.75f, 0.75f, 1.0f));
         r.End();
     }
@@ -391,6 +415,26 @@ public:
         m_autoLocked = false;
         m_autoPulse  = 0.0f;
         m_modeFlash  = 0.0f;
+        m_shadowFlash = 0.0f;
+        m_lastShadowSrc = {1e9f, 1e9f};
+        EnsureShadowTexture();
+    }
+
+    // Allocate (or reallocate, if subdiv ever changes) the shadow texture
+    // sized to the current arena. Called once on scene entry; UpdateShadows
+    // only ever re-uploads pixels via UpdatePixels(), never recreates.
+    void EnsureShadowTexture() {
+        m_shadowW = kArenaW * kShadowSubdiv;
+        m_shadowH = kArenaH * kShadowSubdiv;
+        m_shadowPixels.assign(size_t(m_shadowW) * m_shadowH * 4, 255);
+        TextureDesc td;
+        td.width  = uint32_t(m_shadowW);
+        td.height = uint32_t(m_shadowH);
+        td.format = TextureFormat::RGBA8;
+        td.filter = TextureFilter::Linear;
+        td.pixels = m_shadowPixels.data();
+        if (m_ctx->device)
+            m_shadowTex = m_ctx->device->CreateTexture(td);
     }
 
     void OnUpdate(float dt) override {
@@ -408,11 +452,19 @@ public:
             return;
         }
 
+        if (Input::IsKeyPressed(Key::H)) {
+            m_ctx->shadowsOn = !m_ctx->shadowsOn;
+            m_shadowFlash = 0.8f;
+            m_lastShadowSrc = {1e9f, 1e9f};   // force a fresh upload when re-enabled
+        }
+        m_shadowFlash = std::max(0.0f, m_shadowFlash - dt);
+
         UpdateCameraToPlayer();
         UpdatePlayer(dt);
         UpdateBullets(dt);
         UpdateEnemies(dt);
         UpdateWaves(dt);
+        if (m_ctx->shadowsOn) UpdateShadows();
 
         if (m_ctx->playerHp <= 0) {
             Manager().Change(m_ctx->makeGameOver());
@@ -424,8 +476,19 @@ public:
         r.Begin(Renderer2D::ScreenCamera(kScreenW, kScreenH));
         r.DrawQuad({0, 0}, {kScreenW, kScreenH}, kBgClear);
 
+        // World pass: the floor pass and entities sample the shadow texture
+        // so they tint by visibility; DrawSorted internally bypasses fog for
+        // each wall sprite so the wall's upward extrusion doesn't pick up
+        // the dark of the floor behind it (see DrawSorted's note).
+        const bool fogActive = m_ctx->shadowsOn && m_shadowTex != nullptr;
+        const float invW = 1.0f / (kArenaW * kTileW);
+        const float invH = 1.0f / (kArenaH * kTileH);
+        const Vec4 uRow{ invW, 0.0f, -m_camOrigin.x * invW, 0.0f };
+        const Vec4 vRow{ 0.0f, invH, -m_camOrigin.y * invH, 0.0f };
+        if (fogActive) r.SetFog(m_shadowTex.get(), uRow, vRow);
         DrawArenaFloor(r);
-        DrawSorted(r);
+        DrawSorted(r, fogActive, uRow, vRow);
+        if (fogActive) r.SetFog(nullptr, {}, {});
         DrawAutoAimOverlay(r);
         DrawHud(r);
 
@@ -458,6 +521,87 @@ private:
         if (arenaPxH < kScreenH - 60.0f) { minY = (kScreenH - arenaPxH) * 0.5f; maxY = minY; }
         m_camOrigin.x = std::max(minX, std::min(maxX, wantedOrigin.x));
         m_camOrigin.y = std::max(minY, std::min(maxY, wantedOrigin.y));
+    }
+
+    // Proper grid-DDA "does this ray hit a wall before reaching (bx, by)?"
+    // Visits exactly the tiles the ray crosses, so the work is O(|Δtx|+|Δty|)
+    // instead of HasLOS's O(length / 0.25) step-walk — roughly 3× faster for
+    // the long rays the shadow update fires every frame. Bracketed by
+    // start/end so a ray that begins or ends inside a wall still answers
+    // correctly. Returns true if the path is blocked.
+    bool ShadowRayHitsWall(Vec2 a, Vec2 b) const {
+        int tx = int(a.x), ty = int(a.y);
+        const int bx = int(b.x), by = int(b.y);
+        if (m_grid.At(tx, ty) == Tile::Wall) return true;
+        if (tx == bx && ty == by) return false;
+        const float dx = b.x - a.x, dy = b.y - a.y;
+        const int sx = (dx > 0) ? 1 : -1;
+        const int sy = (dy > 0) ? 1 : -1;
+        const float ix = (dx == 0.0f) ? 1e18f : std::fabs(1.0f / dx);
+        const float iy = (dy == 0.0f) ? 1e18f : std::fabs(1.0f / dy);
+        // Distance (in ray-t) to the next x / y grid line ahead of the start.
+        float nextX = (sx > 0) ? (float(tx + 1) - a.x) * ix
+                               : (a.x - float(tx))     * ix;
+        float nextY = (sy > 0) ? (float(ty + 1) - a.y) * iy
+                               : (a.y - float(ty))     * iy;
+        const int maxSteps = std::abs(bx - tx) + std::abs(by - ty) + 2;
+        for (int i = 0; i < maxSteps; ++i) {
+            if (nextX < nextY) { tx += sx; nextX += ix; }
+            else               { ty += sy; nextY += iy; }
+            if (tx == bx && ty == by) return false;
+            if (m_grid.At(tx, ty) == Tile::Wall) return true;
+        }
+        return false;
+    }
+
+    // Rebuild the shadow texture from the current player position. Walks
+    // every sub-tile texel and writes a light multiplier in [0, 1]:
+    //   * Wall texel               → 1.0 (so neighbouring floor isn't dimmed
+    //                                 by linear-filter bleed at the wall edge)
+    //   * Floor texel, LOS clear   → max(ambient, 1 - (d/R)²)
+    //   * Floor texel, LOS blocked → ambient (visible but dim)
+    // The ray-cast is the same HasLOS the rest of the gameplay uses, so the
+    // shadow boundary matches what enemies see and shoot through. We skip
+    // entirely when the player hasn't moved much since the last upload —
+    // most frames are no-ops while the player is reading the map.
+    void UpdateShadows() {
+        if (!m_shadowTex) return;
+        const Vec2 src = m_player;
+        const float dx0 = src.x - m_lastShadowSrc.x;
+        const float dy0 = src.y - m_lastShadowSrc.y;
+        if (dx0 * dx0 + dy0 * dy0 < 0.01f * 0.01f) return;   // ~0.01 tile threshold
+        m_lastShadowSrc = src;
+
+        const float invR2 = 1.0f / (kLightRange * kLightRange);
+        const float inv   = 1.0f / float(kShadowSubdiv);
+        for (int sy = 0; sy < m_shadowH; ++sy) {
+            for (int sx = 0; sx < m_shadowW; ++sx) {
+                const float wx = (sx + 0.5f) * inv;
+                const float wy = (sy + 0.5f) * inv;
+                float light;
+                if (m_grid.At(int(wx), int(wy)) == Tile::Wall) {
+                    light = 1.0f;
+                } else {
+                    const float dx = wx - src.x;
+                    const float dy = wy - src.y;
+                    const float d2 = dx * dx + dy * dy;
+                    if (!ShadowRayHitsWall(src, {wx, wy})) {
+                        float fall = 1.0f - d2 * invR2;
+                        if (fall < 0.0f) fall = 0.0f;
+                        light = (fall > kAmbient) ? fall : kAmbient;
+                    } else {
+                        light = kAmbient;
+                    }
+                }
+                const uint8_t v = uint8_t(light * 255.0f + 0.5f);
+                const size_t idx = (size_t(sy) * m_shadowW + sx) * 4;
+                m_shadowPixels[idx + 0] = v;
+                m_shadowPixels[idx + 1] = v;
+                m_shadowPixels[idx + 2] = v;
+                m_shadowPixels[idx + 3] = 255;
+            }
+        }
+        m_shadowTex->UpdatePixels(m_shadowPixels.data());
     }
 
     // Scan all live enemies and return the closest one inside the auto-aim
@@ -745,7 +889,16 @@ private:
     }
 
     // Walls + bullets + player + enemies, painter-sorted by feet world-Y.
-    void DrawSorted(Renderer2D& r) {
+    //
+    // When fogActive is true the caller has already bound the shadow texture
+    // for the floor pass; this function toggles fog OFF for each wall and
+    // back ON for entities. Walls extrude upward on screen, so their pixels
+    // map to a world-Y *one tile north* of the wall — sampling the shadow
+    // texel there pulls in the dark of the floor behind the wall, which made
+    // the wall top look like it was sitting in someone else's shadow. With
+    // fog off during wall draws the wall sprite shows its true colour.
+    void DrawSorted(Renderer2D& r, bool fogActive,
+                    const Vec4& uRow, const Vec4& vRow) {
         struct Item {
             float sortY;
             int   kind;   // 0 wall, 1 enemy, 2 player, 3 bullet
@@ -773,13 +926,25 @@ private:
                       return a.kind < b.kind;
                   });
 
+        bool fogOnNow = fogActive;          // caller's state on entry
         for (const Item& it : items) {
+            const bool wantFog = fogActive && (it.kind != 0);
+            if (wantFog != fogOnNow) {
+                if (wantFog) r.SetFog(m_shadowTex.get(), uRow, vRow);
+                else         r.SetFog(nullptr, {}, {});
+                fogOnNow = wantFog;
+            }
             switch (it.kind) {
                 case 0: DrawWall(r, it.index % kArenaW, it.index / kArenaW); break;
                 case 1: DrawEnemy(r, m_enemies[it.index]); break;
                 case 2: DrawPlayer(r); break;
                 case 3: DrawBullet(r, m_bullets[it.index]); break;
             }
+        }
+        // Leave the renderer in whatever fog state the caller started in.
+        if (fogOnNow != fogActive) {
+            if (fogActive) r.SetFog(m_shadowTex.get(), uRow, vRow);
+            else           r.SetFog(nullptr, {}, {});
         }
     }
 
@@ -948,6 +1113,22 @@ private:
                    Color(0.0f, 0.0f, 0.0f, 0.50f));
         r.DrawText(*m_ctx->font, modeText, {26.0f, 60.0f}, modeColor, 20.0f);
 
+        // Shadow toggle pill, same shape as the AIM pill but one row down.
+        const bool shadOn = m_ctx->shadowsOn;
+        const Color shadBase = shadOn ? Color(0.55f, 0.85f, 0.45f, 1.0f)
+                                      : Color(0.65f, 0.65f, 0.65f, 1.0f);
+        const float sfade = (m_shadowFlash > 0.0f) ? (m_shadowFlash / 0.8f) : 0.0f;
+        const Color shadColor(
+            shadBase.r + (1.0f - shadBase.r) * sfade,
+            shadBase.g + (1.0f - shadBase.g) * sfade,
+            shadBase.b + (1.0f - shadBase.b) * sfade,
+            1.0f);
+        const char* shadText = shadOn ? "SHADOWS: ON   [H] off"
+                                      : "SHADOWS: OFF  [H] on";
+        r.DrawQuad({16.0f, 88.0f}, {230.0f, 26.0f},
+                   Color(0.0f, 0.0f, 0.0f, 0.50f));
+        r.DrawText(*m_ctx->font, shadText, {26.0f, 92.0f}, shadColor, 20.0f);
+
         // Wave preamble — center prompt when between waves.
         if (!m_waveActive && m_enemies.empty()) {
             const float t = m_waveTimer / kBetweenWaves;
@@ -983,6 +1164,14 @@ private:
     Vec2    m_autoTargetPos{0.0f, 0.0f};
     float   m_autoPulse = 0.0f;     // reticle blink
     float   m_modeFlash = 0.0f;     // brief HUD highlight after a mode toggle
+    // Ray-cast shadow texture (R = light multiplier in [0, 1]). Rebuilt by
+    // UpdateShadows() any time the player moves a non-trivial amount or the
+    // toggle flips on. Drives Renderer2D::SetFog during the world pass.
+    std::unique_ptr<RHITexture> m_shadowTex;
+    std::vector<uint8_t>        m_shadowPixels;   // tightly packed RGBA8
+    int     m_shadowW = 0, m_shadowH = 0;
+    Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
+    float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
     std::vector<Bullet> m_bullets;
     std::vector<Enemy>  m_enemies;
     bool    m_waveActive = false;
