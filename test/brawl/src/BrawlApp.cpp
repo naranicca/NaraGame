@@ -13,6 +13,7 @@
 //   Game over: Enter restart, Esc title
 
 #include <NaraGame/assets/MSDFFontLoader.h>
+#include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
 #include <NaraGame/core/Log.h>
@@ -94,7 +95,7 @@ constexpr float kEnemyWanderCd      = 0.9f;
 // the player doesn't feel yanked around by every stray shot.
 constexpr float kEnemyKnockbackV  = 7.5f;   // tiles/s, initial
 constexpr float kPlayerKnockbackV = 4.5f;
-constexpr float kKnockbackDecay   = 12.0f;  // 1/s; smaller = longer slide
+constexpr float kKnockbackDecay   = 18.0f;  // 1/s; smaller = longer slide
 
 // Death sparkle — four 8-pointed star particles erupting radially from a
 // killed enemy. Lifetime is short and there's slight aerodynamic drag so the
@@ -104,6 +105,48 @@ constexpr float kStarLife  = 0.55f;         // seconds
 constexpr float kStarDrag  = 3.0f;          // 1/s velocity decay
 constexpr float kStarSpin  = 8.0f;          // rad/s — alternating sign per pair
 constexpr float kStarPx    = 30.0f;         // screen pixels at spawn
+
+// Kill popup — "KILL N" floats up from the death spot and fades out.
+constexpr float kPopupLife = 1.20f;         // seconds
+constexpr float kPopupRise = 1.40f;         // world tiles/s of upward drift
+constexpr float kPopupPx   = 26.0f;         // text size in screen pixels
+
+// Crit: independent per-shot roll on a player bullet vs enemy hit. At
+// kCritMult × the base damage a crit one-shots a full-HP enemy, which is
+// the rush moment — the popup grows + turns red-orange so the player
+// always sees it land.
+constexpr float kCritChance = 0.08f;
+constexpr int   kCritMult   = 2;
+
+// Coin drops — 2-4 coins shoot out of each killed enemy, arc upward under
+// gravity, bounce on the floor (z is height in world tiles), and settle.
+// Player walks through them to auto-pick up for bonus score.
+constexpr int   kCoinMinPerKill = 2;
+constexpr int   kCoinMaxPerKill = 4;
+constexpr float kCoinGravity    = 26.0f;   // tiles/s² downward in z
+constexpr float kCoinBounce     = 0.5f;    // |new vz| / |old vz| on impact
+constexpr float kCoinFriction   = 0.65f;   // horizontal damp per bounce
+constexpr float kCoinSettleVz   = 0.8f;    // |vz| below this on impact → stop
+constexpr float kCoinInitVzMin  = 5.0f;    // initial up speed
+constexpr float kCoinInitVzMax  = 7.0f;
+constexpr float kCoinInitVxyMin = 0.7f;    // initial radial speed
+constexpr float kCoinInitVxyMax = 1.8f;
+constexpr float kCoinPickupR    = 0.55f;   // world units; player overlaps coin
+constexpr float kCoinR          = 0.08f;   // collision radius vs walls
+constexpr float kCoinWallBounce = 0.45f;   // per-axis bounce damping on wall
+constexpr int   kCoinScore      = 5;
+constexpr float kCoinSpinSpeed  = 14.0f;   // rad/s about the visible "axis"
+// Sprite layout: 10 frames of the rotation cycle laid out in 5×2 cells of
+// the sheet, but the cells aren't on a clean even pitch — the artist left
+// padding around each frame. Hard-coded top-left coords from the source
+// PNG; each frame is exactly 67×67 px and there's an 8 px gap between
+// columns and 42 px between rows. We draw the quad square because the
+// frame itself is square.
+constexpr int   kCoinFrameCount = 10;
+constexpr float kCoinFrameW     = 67.0f;
+constexpr float kCoinFrameH     = 67.0f;
+constexpr float kCoinSpriteW    = 22.0f;
+constexpr float kCoinSpriteH    = 22.0f;
 
 // Waves.
 constexpr int   kFirstWaveSize = 3;
@@ -267,6 +310,34 @@ struct Bullet {
     bool alive = true;
 };
 
+// Floating text that pops out of a hit/death spot and drifts upward while
+// fading. Anchored in world space so the camera scroll keeps it tied to
+// the spot, not glued to the screen. The struct carries its own text +
+// colour + size + life so we can drive both KILL and CRIT popups (and
+// future ones) through one pipeline.
+// Coin drop. World-space (pos.x, pos.y) for floor-projection + z height in
+// tiles. Once settled, vx/vy/vz are zero and it just sits waiting for pickup.
+struct Coin {
+    Vec2  pos{};
+    Vec2  vel{};
+    float z       = 0.0f;
+    float vz      = 0.0f;
+    float spin    = 0.0f;
+    bool  settled = false;
+    bool  alive   = true;
+};
+
+struct Popup {
+    Vec2  pos{};
+    char  text[24] = {};
+    Color color = Color::White();
+    float pxSize = 26.0f;
+    float life   = 1.20f;
+    float age    = 0.0f;
+    bool  bold   = false;   // fake-bold: render text in a ring of offsets
+    bool  alive  = true;
+};
+
 // One "star" of a sparkle burst — both the gold death star and the white
 // bullet-vs-wall spark use this same struct. Per-particle life/size/color
 // keeps EmitDeathStars and EmitWallSparks driving the same update + draw
@@ -345,13 +416,13 @@ struct GameContext {
     RHIDevice*  device   = nullptr;
     int   score    = 0;
     int   wave     = 0;
+    int   kills    = 0;
     int   playerHp = kPlayerHpMax;
     bool  newRun   = true;
     AimMode aimMode = AimMode::Auto;
     bool    shadowsOn = true;
     std::function<std::unique_ptr<Scene>()> makeArena;
     std::function<std::unique_ptr<Scene>()> makeTitle;
-    std::function<std::unique_ptr<Scene>()> makeGameOver;
 };
 
 // ---------------------------------------------------------------------------
@@ -394,6 +465,7 @@ public:
         if (Input::IsKeyPressed(Key::Enter) || Input::IsKeyPressed(Key::Space)) {
             m_ctx->score    = 0;
             m_ctx->wave     = 0;
+            m_ctx->kills    = 0;
             m_ctx->playerHp = kPlayerHpMax;
             m_ctx->newRun   = true;
             Manager().Change(m_ctx->makeArena());
@@ -444,6 +516,8 @@ public:
         m_bullets.clear();
         m_enemies.clear();
         m_particles.clear();
+        m_popups.clear();
+        m_coins.clear();
         m_waveTimer  = 0.0f;
         m_waveActive = false;
         m_ctx->wave  = 0;
@@ -455,8 +529,42 @@ public:
         m_modeFlash  = 0.0f;
         m_shadowFlash = 0.0f;
         m_lastShadowSrc = {1e9f, 1e9f};
+        m_dead = false;
+        m_deathPulse = 0.0f;
+        m_paused = false;
+        m_pausePulse = 0.0f;
         EnsureShadowTexture();
         EnsureStarTexture();
+        EnsureCoinSprite();
+    }
+
+    // Load the coin sprite sheet once and cache TextureRegions for each of
+    // the 10 frames. The frame origins come straight from the artist's
+    // layout (uneven 8 / 42 px gaps), so we don't try to derive them by
+    // dividing the texture size.
+    void EnsureCoinSprite() {
+        if (m_coinTex || !m_ctx->device) return;
+        const std::string path =
+            std::string(NARAGAME_ASSETS_DIR) + "/coin.png";
+        m_coinTex = LoadTexture(*m_ctx->device, path);
+        if (!m_coinTex) {
+            NARAGAME_WARN("brawl: coin sprite '%s' missing — coins will be invisible",
+                          path.c_str());
+            return;
+        }
+        // (x, y) top-left of each 67×67 frame, in PNG pixel coords.
+        static const float kOrigins[kCoinFrameCount][2] = {
+            { 24.0f,  42.0f}, { 99.0f,  42.0f}, {174.0f,  42.0f},
+            {249.0f,  42.0f}, {324.0f,  42.0f},
+            { 24.0f, 151.0f}, { 99.0f, 151.0f}, {174.0f, 151.0f},
+            {249.0f, 151.0f}, {324.0f, 151.0f},
+        };
+        for (int i = 0; i < kCoinFrameCount; ++i) {
+            m_coinFrames[i] = TextureRegion::FromPixels(
+                m_coinTex.get(),
+                kOrigins[i][0], kOrigins[i][1],
+                kCoinFrameW,   kCoinFrameH);
+        }
     }
 
     // Bake the sparkle sprite into an RGBA8 texture. Layout: a Gaussian-ish
@@ -526,6 +634,51 @@ public:
         }
     }
 
+    // Spawn 2-4 coins erupting from `at`, each with a random radial speed
+    // and upward vz so the burst arcs out in a small fountain.
+    void EmitCoins(Vec2 at) {
+        std::uniform_int_distribution<int>   countDist(kCoinMinPerKill, kCoinMaxPerKill);
+        std::uniform_real_distribution<float> angle(0.0f, 6.2831853f);
+        std::uniform_real_distribution<float> vzDist(kCoinInitVzMin, kCoinInitVzMax);
+        std::uniform_real_distribution<float> vxyDist(kCoinInitVxyMin, kCoinInitVxyMax);
+        const int n = countDist(m_rng);
+        for (int i = 0; i < n; ++i) {
+            const float a   = angle(m_rng);
+            const float vxy = vxyDist(m_rng);
+            Coin c;
+            c.pos  = at;
+            c.vel  = { std::cos(a) * vxy, std::sin(a) * vxy };
+            c.vz   = vzDist(m_rng);
+            c.spin = angle(m_rng);
+            m_coins.push_back(c);
+        }
+    }
+
+    // KILL count popup — yellow, normal size, drifts up from the kill spot.
+    void EmitKillPopup(Vec2 at, int number) {
+        Popup p;
+        p.pos = at;
+        std::snprintf(p.text, sizeof(p.text), "KILL %d", number);
+        p.color  = Color(1.0f, 0.93f, 0.32f, 1.0f);
+        p.pxSize = kPopupPx;
+        p.life   = kPopupLife;
+        m_popups.push_back(p);
+    }
+
+    // CRIT! popup — red-orange, bigger, spawned slightly higher than the
+    // KILL popup (world Y offset −0.4 tile ≈ 14 screen px) so when a crit
+    // also kills the two read as a stacked pair instead of overlapping.
+    void EmitCritPopup(Vec2 at) {
+        Popup p;
+        p.pos    = { at.x, at.y - 0.4f };
+        std::snprintf(p.text, sizeof(p.text), "CRITICAL");
+        p.color  = Color(1.00f, 0.42f, 0.22f, 1.0f);
+        p.pxSize = kPopupPx * 1.45f;
+        p.life   = kPopupLife;
+        p.bold   = true;
+        m_popups.push_back(p);
+    }
+
     // Bullet-vs-wall spark: 5 small white sparkles flying back along the
     // bullet's incoming direction within a wide cone. Short life, small
     // sprite, fast spin — reads as "pang!" not as a death burst.
@@ -570,10 +723,50 @@ public:
     }
 
     void OnUpdate(float dt) override {
+        // Esc means different things in different states:
+        //   - dead    → quit to title (matches the death overlay's hint)
+        //   - paused  → resume (toggle off)
+        //   - playing → pause (toggle on)
         if (Input::IsKeyPressed(Key::Escape)) {
-            Manager().Change(m_ctx->makeTitle());
+            if (m_dead) {
+                Manager().Change(m_ctx->makeTitle());
+                return;
+            }
+            m_paused = !m_paused;
+            m_pausePulse = 0.0f;
+        }
+
+        m_shadowFlash = std::max(0.0f, m_shadowFlash - dt);
+
+        // Once dead we freeze gameplay updates but keep particles running
+        // and listen for restart input.
+        if (m_dead) {
+            m_deathPulse += dt;
+            UpdateParticles(dt);
+            UpdatePopups(dt);
+            UpdateCoins(dt, /*pickupEnabled=*/false);
+            if (Input::IsKeyPressed(Key::Enter) || Input::IsKeyPressed(Key::Space)) {
+                m_ctx->playerHp = kPlayerHpMax;
+                m_ctx->score    = 0;
+                m_ctx->wave     = 0;
+                m_ctx->kills    = 0;
+                Manager().Change(m_ctx->makeArena());
+            }
             return;
         }
+
+        // Paused: everything freezes (no enemy AI, no bullets, no spawns,
+        // no shadow rebuild). Only the pulse-blink animation and Q-to-quit
+        // listen for input.
+        if (m_paused) {
+            m_pausePulse += dt;
+            if (Input::IsKeyPressed(Key::Q)) {
+                Manager().Change(m_ctx->makeTitle());
+            }
+            return;
+        }
+
+        // Gameplay-only inputs.
         if (Input::IsKeyPressed(Key::R)) {
             Rebuild();
             m_bullets.clear();
@@ -583,24 +776,25 @@ public:
             m_ctx->wave  = 0;
             return;
         }
-
         if (Input::IsKeyPressed(Key::H)) {
             m_ctx->shadowsOn = !m_ctx->shadowsOn;
             m_shadowFlash = 0.8f;
             m_lastShadowSrc = {1e9f, 1e9f};   // force a fresh upload when re-enabled
         }
-        m_shadowFlash = std::max(0.0f, m_shadowFlash - dt);
 
         UpdateCameraToPlayer();
         UpdatePlayer(dt);
         UpdateBullets(dt);
         UpdateEnemies(dt);
         UpdateParticles(dt);
+        UpdatePopups(dt);
+        UpdateCoins(dt, /*pickupEnabled=*/true);
         UpdateWaves(dt);
         if (m_ctx->shadowsOn) UpdateShadows();
 
         if (m_ctx->playerHp <= 0) {
-            Manager().Change(m_ctx->makeGameOver());
+            m_dead = true;
+            m_deathPulse = 0.0f;
         }
     }
 
@@ -629,8 +823,11 @@ public:
         if (fogActive) r.SetFog(nullptr, {}, {});
         DrawSorted(r, fogActive);
         DrawParticles(r);
+        DrawPopups(r);
         DrawAutoAimOverlay(r);
         DrawHud(r);
+        if (m_paused) DrawPauseOverlay(r);
+        if (m_dead)   DrawDeathOverlay(r);
 
         r.End();
     }
@@ -923,21 +1120,30 @@ private:
                     const float dy = e.pos.y - b.pos.y;
                     const float rr = (e.hp > 0 ? kEnemyR + kBulletR : 0.0f);
                     if (dx * dx + dy * dy < rr * rr) {
-                        e.hp -= kPlayerBulletDmg;
+                        std::uniform_real_distribution<float> roll(0.0f, 1.0f);
+                        const bool isCrit = roll(m_rng) < kCritChance;
+                        const int  dmg = isCrit ? kPlayerBulletDmg * kCritMult
+                                                : kPlayerBulletDmg;
+                        e.hp -= dmg;
                         e.hurtFlash = kEnemyHurtFlash;
                         // Knockback along the bullet's normalised flight dir.
                         const float vlen = std::sqrt(b.vel.x * b.vel.x +
                                                      b.vel.y * b.vel.y);
                         if (vlen > 0.001f) {
-                            const float s = kEnemyKnockbackV / vlen;
+                            const float s = (isCrit ? 1.4f : 1.0f) *
+                                            kEnemyKnockbackV / vlen;
                             e.knockback.x = b.vel.x * s;
                             e.knockback.y = b.vel.y * s;
                         }
                         b.alive = false;
+                        if (isCrit) EmitCritPopup(e.pos);
                         if (e.hp <= 0) {
                             e.alive = false;
                             m_ctx->score += kScorePerKill;
+                            ++m_ctx->kills;
                             EmitDeathStars(e.pos);
+                            EmitKillPopup(e.pos, m_ctx->kills);
+                            EmitCoins(e.pos);
                         }
                         break;
                     }
@@ -1035,6 +1241,68 @@ private:
         m_enemies.erase(std::remove_if(m_enemies.begin(), m_enemies.end(),
                                        [](const Enemy& e) { return !e.alive; }),
                         m_enemies.end());
+    }
+
+    // pickupEnabled lets the dead branch keep coins bouncing without letting
+    // the dead player magically vacuum them.
+    void UpdateCoins(float dt, bool pickupEnabled) {
+        for (Coin& c : m_coins) {
+            if (!c.alive) continue;
+            if (!c.settled) {
+                c.vz   -= kCoinGravity * dt;
+                // Axis-separated wall slide + bounce: a coin that would push
+                // into a wall on the X axis stays put on X and its vx flips
+                // (with damping). Same on Y. Without this coins can fly
+                // through walls and settle inside unreachable tiles.
+                const float nx = c.pos.x + c.vel.x * dt;
+                if (CircleBlockedByWalls(m_grid, nx, c.pos.y, kCoinR))
+                    c.vel.x = -c.vel.x * kCoinWallBounce;
+                else
+                    c.pos.x = nx;
+                const float ny = c.pos.y + c.vel.y * dt;
+                if (CircleBlockedByWalls(m_grid, c.pos.x, ny, kCoinR))
+                    c.vel.y = -c.vel.y * kCoinWallBounce;
+                else
+                    c.pos.y = ny;
+                c.z    += c.vz * dt;
+                c.spin += kCoinSpinSpeed * dt;
+                if (c.z <= 0.0f) {
+                    c.z = 0.0f;
+                    if (-c.vz < kCoinSettleVz) {
+                        c.settled = true;
+                        c.vz  = 0.0f;
+                        c.vel = {0.0f, 0.0f};
+                    } else {
+                        c.vz    = -c.vz * kCoinBounce;
+                        c.vel.x *= kCoinFriction;
+                        c.vel.y *= kCoinFriction;
+                    }
+                }
+            }
+            if (pickupEnabled) {
+                const float dx = c.pos.x - m_player.x;
+                const float dy = c.pos.y - m_player.y;
+                if (dx * dx + dy * dy < kCoinPickupR * kCoinPickupR) {
+                    m_ctx->score += kCoinScore;
+                    c.alive = false;
+                }
+            }
+        }
+        m_coins.erase(std::remove_if(m_coins.begin(), m_coins.end(),
+                                     [](const Coin& c) { return !c.alive; }),
+                      m_coins.end());
+    }
+
+    void UpdatePopups(float dt) {
+        for (Popup& p : m_popups) {
+            if (!p.alive) continue;
+            p.age += dt;
+            if (p.age >= p.life) { p.alive = false; continue; }
+            p.pos.y -= kPopupRise * dt;     // float upward (south→north)
+        }
+        m_popups.erase(std::remove_if(m_popups.begin(), m_popups.end(),
+                                      [](const Popup& p) { return !p.alive; }),
+                       m_popups.end());
     }
 
     void UpdateParticles(float dt) {
@@ -1159,6 +1427,8 @@ private:
         // above walls and players sharing the same Y.
         for (size_t i = 0; i < m_bullets.size(); ++i)
             items.push_back({m_bullets[i].pos.y + 0.001f, 3, int(i)});
+        for (size_t i = 0; i < m_coins.size(); ++i)
+            items.push_back({m_coins[i].pos.y - 0.001f, 4, int(i)});
 
         std::sort(items.begin(), items.end(),
                   [](const Item& a, const Item& b) {
@@ -1195,6 +1465,7 @@ private:
                 case 1: DrawEnemy(r, m_enemies[it.index]); break;
                 case 2: DrawPlayer(r); break;
                 case 3: DrawBullet(r, m_bullets[it.index]); break;
+                case 4: DrawCoin(r, m_coins[it.index]); break;
             }
         }
     }
@@ -1398,6 +1669,41 @@ private:
     // does all the shape work, so a single DrawQuad gives a smoother result
     // than the previous 4-quad cross at any rotation. spriteSize is sized
     // to ~2.2× the "main star width" so the soft rays fit inside the quad.
+    // Floating "KILL N" text — anchored in world space so it scrolls with
+    // the kill spot. Fades alpha by remaining life; horizontal-centred via
+    // Font::Measure so any width of number lays flush above its anchor.
+    void DrawPopups(Renderer2D& r) {
+        if (m_popups.empty()) return;
+        for (const Popup& p : m_popups) {
+            if (!p.alive) continue;
+            const Vec2 sp = W2S(p.pos, m_camOrigin);
+            const float t = 1.0f - (p.age / p.life);
+            const Vec2 ts = m_ctx->font->Measure(p.text, p.pxSize);
+            const float bx = sp.x - ts.x * 0.5f;
+            const float by = sp.y - 32.0f;
+            const Color body(p.color.r, p.color.g, p.color.b, t);
+            // Soft shadow for legibility on either floor or sparkle.
+            r.DrawText(*m_ctx->font, p.text,
+                       {bx + 2.0f, by + 2.0f},
+                       Color(0.0f, 0.0f, 0.0f, t * 0.65f), p.pxSize);
+            // Fake-bold for crit: paint the body 8 times around the centre
+            // before the centre draw, thickening the glyph strokes by ~1.5px
+            // without needing a separate bold font asset.
+            if (p.bold) {
+                constexpr float kOff = 1.5f;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) continue;
+                        r.DrawText(*m_ctx->font, p.text,
+                                   {bx + dx * kOff, by + dy * kOff},
+                                   body, p.pxSize);
+                    }
+                }
+            }
+            r.DrawText(*m_ctx->font, p.text, {bx, by}, body, p.pxSize);
+        }
+    }
+
     void DrawParticles(Renderer2D& r) {
         if (!m_starTex || m_particles.empty()) return;
         for (const StarParticle& p : m_particles) {
@@ -1408,6 +1714,41 @@ private:
             const float spriteSize = visible * 2.2f;
             const Color tint(p.color.r, p.color.g, p.color.b, p.color.a * t);
             r.DrawQuad(sp, {spriteSize, spriteSize}, p.angle, m_starRegion, tint);
+        }
+    }
+
+    // Coin: textured sprite with the 10-frame rotation cycle. The active
+    // frame is picked from c.spin so the same kCoinSpinSpeed that drives
+    // physics also drives the visible flip. Renders a floor shadow that
+    // shrinks with z and the body lifted by z·kTileH.
+    void DrawCoin(Renderer2D& r, const Coin& c) {
+        const Vec2 feet = W2S(c.pos, m_camOrigin);
+        const float L = SampleShadowAt(c.pos);
+
+        // Floor shadow shrinks as the coin rises — a tiny depth cue.
+        const float shadeShrink = 1.0f / (1.0f + c.z * 0.6f);
+        const float shadeW = 10.0f * shadeShrink;
+        const float shadeH = 3.0f  * shadeShrink;
+        r.DrawQuad({feet.x - shadeW * 0.5f, feet.y - shadeH * 0.5f},
+                   {shadeW, shadeH},
+                   Color(0.0f, 0.0f, 0.0f, 0.35f * L));
+
+        const float liftPx = c.z * kTileH;
+        const Vec2 sp{ feet.x, feet.y - liftPx };
+
+        // Spin → frame index. fmod into [0, 2π) without std::fmod's
+        // negative-result surprise, then quantise to 10 buckets.
+        constexpr float kTwoPi = 6.2831853f;
+        const float wrapped = c.spin - std::floor(c.spin / kTwoPi) * kTwoPi;
+        int frame = int(wrapped * float(kCoinFrameCount) / kTwoPi);
+        if (frame < 0) frame = 0;
+        if (frame >= kCoinFrameCount) frame = kCoinFrameCount - 1;
+
+        if (m_coinTex) {
+            const Color tint(L, L, L, 1.0f);
+            r.DrawQuad({sp.x - kCoinSpriteW * 0.5f, sp.y - kCoinSpriteH * 0.5f},
+                       {kCoinSpriteW, kCoinSpriteH},
+                       m_coinFrames[frame], tint);
         }
     }
 
@@ -1424,6 +1765,43 @@ private:
                    Color(c.r, c.g, c.b, 0.55f));
         // Bullet body — small quad rotated to face direction of travel.
         r.DrawQuad(sp, {10.0f, 6.0f}, ang, c);
+    }
+
+    // Mid-run pause overlay. A light dim so the player can still see the
+    // frozen state (positions of enemies, where their next shot would go),
+    // plus a "PAUSED" label and a blinking resume / quit hint.
+    void DrawPauseOverlay(Renderer2D& r) {
+        r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                   Color(0.0f, 0.0f, 0.0f, 0.35f));
+        DrawCenteredText(r, *m_ctx->font, "PAUSED",
+                         kScreenH * 0.32f, 84.0f,
+                         Color(1.0f, 1.0f, 1.0f, 1.0f));
+        const float blink = 0.5f + 0.5f * std::sin(m_pausePulse * 3.0f);
+        DrawCenteredText(r, *m_ctx->font, "Esc resume   Q quit to title",
+                         kScreenH * 0.55f, 26.0f,
+                         Color(1.0f, 1.0f, 1.0f, blink));
+    }
+
+    // Game-over overlay drawn on top of the frozen play screen. Dim layer
+    // first, then big red GAME OVER, the run summary, and a blinking
+    // restart prompt. Lives on top of the HUD so the player can still see
+    // their wave/score in the bar above.
+    void DrawDeathOverlay(Renderer2D& r) {
+        r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                   Color(0.0f, 0.0f, 0.0f, 0.55f));
+        DrawCenteredText(r, *m_ctx->font, "GAME OVER",
+                         kScreenH * 0.30f, 96.0f,
+                         Color(0.95f, 0.30f, 0.30f, 1.0f));
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "WAVE %d   SCORE %d",
+                      m_ctx->wave, m_ctx->score);
+        DrawCenteredText(r, *m_ctx->font, buf,
+                         kScreenH * 0.45f, 34.0f,
+                         Color(1.0f, 1.0f, 1.0f, 1.0f));
+        const float blink = 0.5f + 0.5f * std::sin(m_deathPulse * 3.0f);
+        DrawCenteredText(r, *m_ctx->font, "Enter retry   Esc title",
+                         kScreenH * 0.60f, 28.0f,
+                         Color(1.0f, 1.0f, 1.0f, blink));
     }
 
     void DrawHud(Renderer2D& r) {
@@ -1533,57 +1911,32 @@ private:
     // axis-aligned rotated rectangles produced.
     std::unique_ptr<RHITexture> m_starTex;
     TextureRegion               m_starRegion;
+    // Coin sprite sheet (5×2 frames). Loaded once per scene from
+    // assets/coin.png; m_coinFrames[i] points at frame i in cell-row order.
+    std::unique_ptr<RHITexture> m_coinTex;
+    TextureRegion               m_coinFrames[kCoinFrameCount];
     int     m_shadowW = 0, m_shadowH = 0;
     Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
     float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
     std::vector<Bullet>        m_bullets;
     std::vector<Enemy>         m_enemies;
     std::vector<StarParticle>  m_particles;
+    std::vector<Popup>         m_popups;
+    std::vector<Coin>          m_coins;
     bool    m_waveActive = false;
     float   m_waveTimer  = 0.0f;
+    // True once the player's HP hits zero. We stay in this scene instead of
+    // pushing a GameOver overlay: gameplay updates pause, particles keep
+    // animating, and a blinking GAME OVER text waits for Enter/Esc.
+    bool    m_dead       = false;
+    float   m_deathPulse = 0.0f;
+    // True while the player has hit Esc mid-run. Freezes all gameplay
+    // updates and dims the screen with an overlay.
+    bool    m_paused     = false;
+    float   m_pausePulse = 0.0f;
 
     std::mt19937 m_rngArena{0};
     std::mt19937 m_rng{std::random_device{}()};
-};
-
-// ---------------------------------------------------------------------------
-// Game over.
-// ---------------------------------------------------------------------------
-class GameOverScene : public Scene {
-public:
-    explicit GameOverScene(GameContext* ctx) : m_ctx(ctx) {}
-    void OnEnter() override { m_t = 0.0f; }
-    void OnUpdate(float dt) override {
-        m_t += dt;
-        if (Input::IsKeyPressed(Key::Enter) || Input::IsKeyPressed(Key::Space)) {
-            m_ctx->score = 0;
-            m_ctx->wave = 0;
-            m_ctx->playerHp = kPlayerHpMax;
-            Manager().Change(m_ctx->makeArena());
-        }
-        if (Input::IsKeyPressed(Key::Escape)) {
-            Manager().Change(m_ctx->makeTitle());
-        }
-    }
-    void OnRender() override {
-        Renderer2D& r = *m_ctx->renderer;
-        r.Begin(Renderer2D::ScreenCamera(kScreenW, kScreenH));
-        r.DrawQuad({0, 0}, {kScreenW, kScreenH}, Color(0.10f, 0.05f, 0.05f, 1.0f));
-        DrawCenteredText(r, *m_ctx->font, "GAME OVER", 200.0f, 96.0f,
-                         Color(0.95f, 0.30f, 0.30f, 1.0f));
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "WAVE %d   SCORE %d", m_ctx->wave, m_ctx->score);
-        DrawCenteredText(r, *m_ctx->font, buf, 330.0f, 36.0f,
-                         Color(1.0f, 1.0f, 1.0f, 1.0f));
-        const float blink = 0.5f + 0.5f * std::sin(m_t * 3.0f);
-        DrawCenteredText(r, *m_ctx->font, "Enter retry   Esc title",
-                         440.0f, 28.0f,
-                         Color(1.0f, 1.0f, 1.0f, blink));
-        r.End();
-    }
-private:
-    GameContext* m_ctx = nullptr;
-    float m_t = 0.0f;
 };
 
 } // namespace
@@ -1610,8 +1963,6 @@ protected:
         m_ctx.device   = &GetDevice();
         m_ctx.makeArena    = [this] { return std::make_unique<ArenaScene>(&m_ctx); };
         m_ctx.makeTitle    = [this] { return std::make_unique<TitleScene>(&m_ctx); };
-        m_ctx.makeGameOver = [this] { return std::make_unique<GameOverScene>(&m_ctx); };
-
         m_scenes.Change(m_ctx.makeTitle());
     }
 
