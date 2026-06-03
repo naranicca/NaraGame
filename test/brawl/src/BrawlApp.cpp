@@ -68,6 +68,12 @@ constexpr float kPlayerSpeed = 5.2f;
 constexpr int   kPlayerHpMax = 100;
 constexpr float kPlayerHurtIFrame = 0.55f;
 constexpr float kPlayerFireCd     = 0.18f;
+constexpr float kPlayerRegenRate  = 1.00f;  // HP/sec while standing still
+// Idle auto-turn: when the player is standing still in Auto mode and any
+// enemy is in sight, m_moveDir rotates toward that enemy at this angular
+// speed. Slow enough to look deliberate, fast enough to keep up with a
+// moving target.
+constexpr float kPlayerTurnSpeed  = 7.0f;   // rad/s
 
 // Bullets.
 constexpr float kBulletR        = 0.13f;
@@ -97,14 +103,9 @@ constexpr float kEnemyKnockbackV  = 7.5f;   // tiles/s, initial
 constexpr float kPlayerKnockbackV = 4.5f;
 constexpr float kKnockbackDecay   = 18.0f;  // 1/s; smaller = longer slide
 
-// Death sparkle — four 8-pointed star particles erupting radially from a
-// killed enemy. Lifetime is short and there's slight aerodynamic drag so the
-// burst reads as "pop" not "drift".
-constexpr float kStarSpeed = 4.5f;          // tiles/s, initial radial speed
-constexpr float kStarLife  = 0.55f;         // seconds
+// Sparkle aerodynamic drag — shared by every StarParticle (currently only
+// the wall-hit white sparks, but the system is generic).
 constexpr float kStarDrag  = 3.0f;          // 1/s velocity decay
-constexpr float kStarSpin  = 8.0f;          // rad/s — alternating sign per pair
-constexpr float kStarPx    = 30.0f;         // screen pixels at spawn
 
 // Kill popup — "KILL N" floats up from the death spot and fades out.
 constexpr float kPopupLife = 1.20f;         // seconds
@@ -135,7 +136,8 @@ constexpr float kCoinPickupR    = 0.55f;   // world units; player overlaps coin
 constexpr float kCoinR          = 0.08f;   // collision radius vs walls
 constexpr float kCoinWallBounce = 0.45f;   // per-axis bounce damping on wall
 constexpr int   kCoinScore      = 5;
-constexpr float kCoinSpinSpeed  = 14.0f;   // rad/s about the visible "axis"
+constexpr float kCoinSpinSpeed   = 14.0f;  // rad/s about the visible "axis"
+constexpr float kCoinSpinSettled = 6.0f;   // rad/s once it has come to rest
 // Sprite layout: 10 frames of the rotation cycle laid out in 5×2 cells of
 // the sheet, but the cells aren't on a clean even pitch — the artist left
 // padding around each frame. Hard-coded top-left coords from the source
@@ -397,10 +399,9 @@ struct Popup {
     bool  alive  = true;
 };
 
-// One "star" of a sparkle burst — both the gold death star and the white
-// bullet-vs-wall spark use this same struct. Per-particle life/size/color
-// keeps EmitDeathStars and EmitWallSparks driving the same update + draw
-// pipeline without forking into two particle systems.
+// One "star" of a sparkle burst. Currently driven only by EmitWallSparks
+// (white bullet-vs-wall sparks); the per-particle life / size / colour
+// fields keep the system flexible for future emitters.
 struct StarParticle {
     Vec2  pos{};
     Vec2  vel{};
@@ -551,7 +552,7 @@ public:
                          540.0f, 22.0f, Color(0.75f, 0.85f, 0.85f, 1.0f));
         DrawCenteredText(r, *m_ctx->font, "AUTO: auto-fire on lock   MOUSE: click to shoot",
                          574.0f, 22.0f, Color(1.00f, 0.85f, 0.30f, 1.0f));
-        DrawCenteredText(r, *m_ctx->font, "T aim mode   H shadows   R rebuild   Esc back",
+        DrawCenteredText(r, *m_ctx->font, "T aim mode   R rebuild   Esc back",
                          608.0f, 22.0f, Color(0.65f, 0.75f, 0.75f, 1.0f));
         r.End();
     }
@@ -587,6 +588,7 @@ public:
         m_facing     = {1.0f, 0.0f};
         m_moveDir    = {1.0f, 0.0f};
         m_playerKnockback = {0.0f, 0.0f};
+        m_hpRegenAccum = 0.0f;
         m_autoLocked = false;
         m_autoPulse  = 0.0f;
         m_modeFlash  = 0.0f;
@@ -600,6 +602,60 @@ public:
         EnsureShadowTexture();
         EnsureStarTexture();
         EnsureCoinSprite();
+        EnsurePieTexture();
+    }
+
+    // Bake the auto-aim cone sprite. Texture is square; the wedge points
+    // along +x in texture space, so DrawQuad's rotation parameter directly
+    // aligns with WorldDirToScreenAngle(m_moveDir) at render time. Per-pixel
+    // alpha encodes a radial gradient (bright apex → faded outer arc) with
+    // a soft angular smoothstep at the wedge edges to anti-alias the cone.
+    void EnsurePieTexture() {
+        if (m_pieTex || !m_ctx->device) return;
+        constexpr int kN = 256;
+        std::vector<uint8_t> px(size_t(kN) * kN * 4);
+        const float halfA = std::acos(kAutoAimConeCos);
+        const float edgeBand = 0.10f;   // rad; smoothstep half-width at edges
+        for (int y = 0; y < kN; ++y) {
+            for (int x = 0; x < kN; ++x) {
+                const float fx = (float(x) + 0.5f) / float(kN) * 2.0f - 1.0f;
+                const float fy = (float(y) + 0.5f) / float(kN) * 2.0f - 1.0f;
+                const float r2 = fx * fx + fy * fy;
+                float alpha = 0.0f;
+                if (r2 < 1.0f) {
+                    const float r       = std::sqrt(r2);
+                    const float theta   = std::atan2(fy, fx);
+                    const float absTh   = std::fabs(theta);
+                    if (absTh < halfA) {
+                        // Radial: 1.0 at apex → 0.30 at rim, then linear to 0
+                        // in the last ~5% so the outer edge is anti-aliased.
+                        float radial = 1.0f - r * 0.70f;
+                        if (r > 0.95f) radial *= (1.0f - r) / 0.05f;
+                        // Angular smoothstep over edgeBand at each side.
+                        const float edge   = halfA - absTh;
+                        const float t      = std::min(1.0f, edge / edgeBand);
+                        const float angle  = t * t * (3.0f - 2.0f * t);
+                        alpha = radial * angle;
+                    }
+                }
+                const uint8_t v = uint8_t(alpha * 255.0f + 0.5f);
+                const size_t idx = (size_t(y) * kN + x) * 4;
+                px[idx + 0] = 255;
+                px[idx + 1] = 255;
+                px[idx + 2] = 255;
+                px[idx + 3] = v;
+            }
+        }
+        TextureDesc td;
+        td.width  = kN;
+        td.height = kN;
+        td.format = TextureFormat::RGBA8;
+        td.filter = TextureFilter::Linear;
+        td.pixels = px.data();
+        m_pieTex = m_ctx->device->CreateTexture(td);
+        if (m_pieTex)
+            m_pieRegion = TextureRegion::FromPixels(
+                m_pieTex.get(), 0.0f, 0.0f, float(kN), float(kN));
     }
 
     // Load the coin sprite sheet once and cache TextureRegions for each of
@@ -675,27 +731,6 @@ public:
         if (m_starTex)
             m_starRegion = TextureRegion::FromPixels(
                 m_starTex.get(), 0.0f, 0.0f, float(kN), float(kN));
-    }
-
-    // Spawn 4 gold star particles erupting radially from `at`. Used on enemy
-    // death; we randomise the base angle a bit so consecutive kills don't
-    // all spit out an identical cross.
-    void EmitDeathStars(Vec2 at) {
-        std::uniform_real_distribution<float> jitter(0.0f, 1.5707963f);
-        const float base = jitter(m_rng);
-        for (int i = 0; i < 4; ++i) {
-            const float a = base + i * 1.5707963f;          // 90° apart
-            StarParticle p;
-            p.pos   = at;
-            p.vel   = { std::cos(a) * kStarSpeed,
-                        std::sin(a) * kStarSpeed };
-            p.angle = a;
-            p.spin  = (i & 1) ? -kStarSpin : kStarSpin;
-            p.life  = kStarLife;
-            p.size  = kStarPx;
-            p.color = Color(1.0f, 0.93f, 0.32f, 1.0f);
-            m_particles.push_back(p);
-        }
     }
 
     // 20% chance: one random item box; otherwise the regular coin shower.
@@ -856,6 +891,7 @@ public:
             m_paused = !m_paused;
             m_pausePulse = 0.0f;
             m_pauseMenuIdx = 0;   // always start on Resume
+            m_pauseLastMouse = Input::MousePosition();
         }
 
         m_shadowFlash = std::max(0.0f, m_shadowFlash - dt);
@@ -898,8 +934,15 @@ public:
                 m_pauseMenuIdx = (m_pauseMenuIdx - 1 + kPauseMenuCount) % kPauseMenuCount;
             if (Input::IsKeyPressed(Key::Down))
                 m_pauseMenuIdx = (m_pauseMenuIdx + 1) % kPauseMenuCount;
-            const int hovered = PauseMenuItemAtMouse(Input::MousePosition());
-            if (hovered >= 0) m_pauseMenuIdx = hovered;
+            // Hover only takes effect on the frame the mouse actually moves —
+            // otherwise a cursor parked on top of the menu would overwrite
+            // every keyboard-driven selection on the very next frame.
+            const Vec2 mp = Input::MousePosition();
+            const bool mouseMoved = (mp.x != m_pauseLastMouse.x) ||
+                                    (mp.y != m_pauseLastMouse.y);
+            m_pauseLastMouse = mp;
+            const int hovered = PauseMenuItemAtMouse(mp);
+            if (mouseMoved && hovered >= 0) m_pauseMenuIdx = hovered;
             const bool clicked = Input::IsMousePressed(MouseButton::Left) && hovered >= 0;
             const bool entered = Input::IsKeyPressed(Key::Enter) ||
                                  Input::IsKeyPressed(Key::Space);
@@ -917,7 +960,11 @@ public:
             m_ctx->wave  = 0;
             return;
         }
-        if (Input::IsKeyPressed(Key::H)) {
+        // Debug-only: F8 toggles the shadow pass. Not advertised in the
+        // title screen instructions — leaving it on is the intended look,
+        // but having a hidden disable keeps the rendering path testable
+        // without recompiling.
+        if (Input::IsKeyPressed(Key::F8)) {
             m_ctx->shadowsOn = !m_ctx->shadowsOn;
             m_shadowFlash = 0.8f;
             m_lastShadowSrc = {1e9f, 1e9f};   // force a fresh upload when re-enabled
@@ -1116,6 +1163,25 @@ private:
 
     // Scan all live enemies and return the closest one inside the auto-aim
     // cone (90° forward from m_moveDir), within range, and with LOS. Returns
+    // Closest live enemy that's within the light disc and in LOS. Used by
+    // the idle auto-turn: when standing still, the body slowly rotates to
+    // face whichever enemy is closest "in sight", independent of the cone.
+    const Enemy* FindNearestVisibleEnemy() const {
+        const Enemy* best = nullptr;
+        float bestD2 = m_lightRange * m_lightRange;
+        for (const Enemy& e : m_enemies) {
+            if (!e.alive) continue;
+            const float dx = e.pos.x - m_player.x;
+            const float dy = e.pos.y - m_player.y;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 >= bestD2) continue;
+            if (!HasLOS(m_player, e.pos)) continue;
+            bestD2 = d2;
+            best = &e;
+        }
+        return best;
+    }
+
     // null when nothing qualifies — the caller treats that as "no lock".
     const Enemy* FindAutoTarget() const {
         const Enemy* best = nullptr;
@@ -1171,6 +1237,43 @@ private:
             // pointing this way after the player stops, so a quick tap-stop-
             // shoot still fires "ahead" of the run.
             m_moveDir = input;
+        } else {
+            // Stationary. Two idle behaviours:
+            //   1) Regen HP at kPlayerRegenRate per second (banked fractional).
+            //   2) In Auto mode, slowly rotate m_moveDir toward the nearest
+            //      visible enemy so the auto-aim cone follows them without
+            //      the player having to nudge WASD.
+            if (m_ctx->playerHp < int(kPlayerHpMax)) {
+                m_hpRegenAccum += kPlayerRegenRate * dt;
+                while (m_hpRegenAccum >= 1.0f) {
+                    m_hpRegenAccum -= 1.0f;
+                    m_ctx->playerHp = std::min(int(kPlayerHpMax),
+                                               m_ctx->playerHp + 1);
+                }
+            } else {
+                m_hpRegenAccum = 0.0f;
+            }
+            if (m_ctx->aimMode == AimMode::Auto) {
+                if (const Enemy* tgt = FindNearestVisibleEnemy()) {
+                    const float dx  = tgt->pos.x - m_player.x;
+                    const float dy  = tgt->pos.y - m_player.y;
+                    const float len = std::sqrt(dx * dx + dy * dy);
+                    if (len > 0.001f) {
+                        constexpr float kTwoPi = 6.2831853f;
+                        const float desiredA = std::atan2(dy, dx);
+                        const float currentA = std::atan2(m_moveDir.y, m_moveDir.x);
+                        float delta = desiredA - currentA;
+                        // Wrap to [-π, π] so we always turn the short way.
+                        while (delta >  3.14159265f) delta -= kTwoPi;
+                        while (delta < -3.14159265f) delta += kTwoPi;
+                        const float maxStep = kPlayerTurnSpeed * dt;
+                        if (delta >  maxStep) delta =  maxStep;
+                        if (delta < -maxStep) delta = -maxStep;
+                        const float newA = currentA + delta;
+                        m_moveDir = { std::cos(newA), std::sin(newA) };
+                    }
+                }
+            }
         }
 
         const float step = kPlayerSpeed * dt;
@@ -1288,7 +1391,6 @@ private:
                             e.alive = false;
                             m_ctx->score += kScorePerKill;
                             ++m_ctx->kills;
-                            EmitDeathStars(e.pos);
                             EmitKillPopup(e.pos, m_ctx->kills);
                             EmitDrop(e.pos);
                             // Last-enemy fallback: if no item dropped during
@@ -1313,7 +1415,7 @@ private:
                 const float dy = m_player.y - b.pos.y;
                 const float rr = kPlayerR + kBulletR;
                 if (dx * dx + dy * dy < rr * rr && m_playerHurt <= 0.0f) {
-                    m_ctx->playerHp -= kEnemyBulletDmg;
+                    m_ctx->playerHp = std::max(0, m_ctx->playerHp - kEnemyBulletDmg);
                     m_playerHurt = kPlayerHurtIFrame;
                     const float vlen = std::sqrt(b.vel.x * b.vel.x +
                                                  b.vel.y * b.vel.y);
@@ -1474,7 +1576,6 @@ private:
                 else
                     c.pos.y = ny;
                 c.z    += c.vz * dt;
-                c.spin += kCoinSpinSpeed * dt;
                 if (c.z <= 0.0f) {
                     c.z = 0.0f;
                     if (-c.vz < kCoinSettleVz) {
@@ -1488,6 +1589,10 @@ private:
                     }
                 }
             }
+            // Spin runs every frame — fast while bouncing, slow once settled
+            // so the dropped coin keeps its glint without spinning at the
+            // mid-air speed.
+            c.spin += (c.settled ? kCoinSpinSettled : kCoinSpinSpeed) * dt;
             if (pickupEnabled) {
                 const float dx = c.pos.x - m_player.x;
                 const float dy = c.pos.y - m_player.y;
@@ -1835,22 +1940,24 @@ private:
     // In mouse mode, this draws nothing — the cursor IS the feedback.
     void DrawAutoAimOverlay(Renderer2D& r) {
         if (m_ctx->aimMode != AimMode::Auto) return;
+        // No gameplay UI on top of the dying screen — the lock state is
+        // frozen at death so the reticle would otherwise hang in the dark
+        // until the player restarts.
+        if (m_dead) return;
         const Vec2 pScreen = W2S(m_player, m_camOrigin);
 
-        // Cone: a thin trapezoid along m_moveDir. We project two rays at the
-        // cone half-angle into screen space and draw a low-alpha wedge by
-        // stacking three rotated quads of decreasing thickness. The screen-
-        // space direction has to bake in kYCompress or the wedge will not
-        // line up with where bullets actually go visually.
+        // Single textured pie. The sprite's wedge centre points along +x in
+        // texture space; rotating by the screen-space angle of m_moveDir
+        // aligns it with where bullets actually travel under Y compression.
+        // The quad's centre = the wedge apex (=player), so the visible cone
+        // reaches kRadius pixels from the player.
         const float ang = WorldDirToScreenAngle(m_moveDir);
-        for (int i = 0; i < 3; ++i) {
-            const float reach = 60.0f + i * 60.0f;
-            const float thick = 28.0f + i * 28.0f;
-            const float alpha = 0.10f - i * 0.025f;
-            const Vec2 mid{ pScreen.x + std::cos(ang) * (reach * 0.5f + 18.0f),
-                            pScreen.y + std::sin(ang) * (reach * 0.5f + 18.0f) - 14.0f };
-            r.DrawQuad(mid, {reach, thick}, ang,
-                       Color(1.0f, 0.95f, 0.30f, alpha));
+        constexpr float kRadius = 200.0f;
+        const Vec2 origin{ pScreen.x, pScreen.y - 14.0f };  // raise off feet
+        if (m_pieTex) {
+            r.DrawQuad(origin, {kRadius * 2.0f, kRadius * 2.0f}, ang,
+                       m_pieRegion,
+                       Color(1.0f, 0.95f, 0.30f, 0.05f));
         }
 
         // Reticle on the lock target. Two crossed thin quads + four short
@@ -2206,21 +2313,16 @@ private:
                    Color(0.0f, 0.0f, 0.0f, 0.50f));
         r.DrawText(*m_ctx->font, modeText, {26.0f, 60.0f}, modeColor, 20.0f);
 
-        // Shadow toggle pill, same shape as the AIM pill but one row down.
-        const bool shadOn = m_ctx->shadowsOn;
-        const Color shadBase = shadOn ? Color(0.55f, 0.85f, 0.45f, 1.0f)
-                                      : Color(0.65f, 0.65f, 0.65f, 1.0f);
-        const float sfade = (m_shadowFlash > 0.0f) ? (m_shadowFlash / 0.8f) : 0.0f;
-        const Color shadColor(
-            shadBase.r + (1.0f - shadBase.r) * sfade,
-            shadBase.g + (1.0f - shadBase.g) * sfade,
-            shadBase.b + (1.0f - shadBase.b) * sfade,
-            1.0f);
-        const char* shadText = shadOn ? "SHADOWS: ON   [H] off"
-                                      : "SHADOWS: OFF  [H] on";
-        r.DrawQuad({16.0f, 88.0f}, {230.0f, 26.0f},
-                   Color(0.0f, 0.0f, 0.0f, 0.50f));
-        r.DrawText(*m_ctx->font, shadText, {26.0f, 92.0f}, shadColor, 20.0f);
+        // Shadow toggle is debug-only (F8). Only show a HUD pill when
+        // shadows have been turned off, so the player isn't tempted to use
+        // it but a developer can see at a glance that they've flipped it.
+        if (!m_ctx->shadowsOn) {
+            r.DrawQuad({16.0f, 88.0f}, {200.0f, 26.0f},
+                       Color(0.0f, 0.0f, 0.0f, 0.50f));
+            r.DrawText(*m_ctx->font, "SHADOWS: OFF  (debug)",
+                       {26.0f, 92.0f},
+                       Color(0.65f, 0.65f, 0.65f, 1.0f), 20.0f);
+        }
 
         // Wave preamble — center prompt when between waves.
         if (!m_waveActive && m_enemies.empty()) {
@@ -2252,6 +2354,11 @@ private:
     Vec2    m_camOrigin{0.0f, 0.0f};
     float   m_playerHurt = 0.0f;
     float   m_fireCd     = 0.0f;
+    // HP regen accumulator. While the player is stationary (no WASD input
+    // this frame) it grows at kPlayerRegenRate per second; once it crosses
+    // 1.0 it pops an integer +HP and the surplus carries over. Reset to 0
+    // on death; the displayed HP value stays the integer count.
+    float   m_hpRegenAccum = 0.0f;
     // Auto-aim solve from this frame's UpdatePlayer. Cached so DrawHud and
     // the reticle render can use it without re-scanning the enemy list.
     bool    m_autoLocked = false;
@@ -2270,6 +2377,11 @@ private:
     // axis-aligned rotated rectangles produced.
     std::unique_ptr<RHITexture> m_starTex;
     TextureRegion               m_starRegion;
+    // Pre-baked pie/wedge sprite for the auto-aim cone overlay. Built once
+    // from kAutoAimConeCos so the bevel and radial fade are smooth and a
+    // single textured quad replaces the 24-ray fan that showed banding.
+    std::unique_ptr<RHITexture> m_pieTex;
+    TextureRegion               m_pieRegion;
     // Coin sprite sheet (5×2 frames). Loaded once per scene from
     // assets/coin.png; m_coinFrames[i] points at frame i in cell-row order.
     std::unique_ptr<RHITexture> m_coinTex;
@@ -2309,6 +2421,7 @@ private:
     bool    m_paused     = false;
     float   m_pausePulse = 0.0f;
     int     m_pauseMenuIdx = 0;     // 0..kPauseMenuCount-1, current selection
+    Vec2    m_pauseLastMouse{};     // last-frame mouse pos; hover only fires on move
 
     std::mt19937 m_rngArena{0};
     std::mt19937 m_rng{std::random_device{}()};
