@@ -435,16 +435,11 @@ struct Enemy {
 
 // ---------------------------------------------------------------------------
 // Aim modes.
-//   Auto  — only enemies that lie in the player's MOVEMENT direction (within
-//           a 90° forward cone, in line-of-sight, within kAutoAimRange) are
-//           lockable; closest such enemy is the target. Fire = bullet flies
-//           at that target. No target in the cone → click does nothing (no
-//           free shots in this mode, by design).
-//   Mouse — original behaviour: aim follows the cursor, click fires straight
-//           at the cursor.
-// Press T to toggle. Default is Auto so newcomers don't have to find the key.
+// Only enemies in the player's MOVEMENT direction (within a 90° forward
+// cone, in line-of-sight, within kAutoAimRange) are lockable; closest
+// such enemy is the target. Fire is automatic — a bullet leaves the gun
+// every cooldown tick whenever there's a lock. No target → no shot.
 // ---------------------------------------------------------------------------
-enum class AimMode : uint8_t { Auto, Mouse };
 
 constexpr float kAutoAimRange     = 10.0f;   // world tiles
 constexpr float kAutoAimConeCos   = 0.707f;  // ≈ cos(45°), so 90° full cone
@@ -484,7 +479,6 @@ struct GameContext {
     int   kills    = 0;
     int   playerHp = kPlayerHpMax;
     bool  newRun   = true;
-    AimMode aimMode = AimMode::Auto;
     bool    shadowsOn = true;
     std::function<std::unique_ptr<Scene>()> makeArena;
     std::function<std::unique_ptr<Scene>()> makeTitle;
@@ -553,12 +547,10 @@ public:
         const float blink = 0.6f + 0.4f * std::sin(m_pulse * 3.0f);
         DrawCenteredText(r, *m_ctx->font, "Press Enter to start",
                          480.0f, 32.0f, Color(1.0f, 1.0f, 1.0f, blink));
-        DrawCenteredText(r, *m_ctx->font, "WASD move",
+        DrawCenteredText(r, *m_ctx->font, "WASD move   Auto-fire on lock",
                          540.0f, 22.0f, Color(0.75f, 0.85f, 0.85f, 1.0f));
-        DrawCenteredText(r, *m_ctx->font, "AUTO: auto-fire on lock   MOUSE: click to shoot",
-                         574.0f, 22.0f, Color(1.00f, 0.85f, 0.30f, 1.0f));
-        DrawCenteredText(r, *m_ctx->font, "T aim mode   R rebuild   Esc back",
-                         608.0f, 22.0f, Color(0.65f, 0.75f, 0.75f, 1.0f));
+        DrawCenteredText(r, *m_ctx->font, "R rebuild   Esc back",
+                         580.0f, 22.0f, Color(0.65f, 0.75f, 0.75f, 1.0f));
         r.End();
     }
 private:
@@ -596,7 +588,6 @@ public:
         m_hpRegenAccum = 0.0f;
         m_autoLocked = false;
         m_autoPulse  = 0.0f;
-        m_modeFlash  = 0.0f;
         m_shadowFlash = 0.0f;
         m_lastShadowSrc = {1e9f, 1e9f};
         m_dead = false;
@@ -1261,14 +1252,6 @@ private:
         m_playerHurt = std::max(0.0f, m_playerHurt - dt);
         m_fireCd     = std::max(0.0f, m_fireCd - dt);
         m_autoPulse += dt;
-        m_modeFlash  = std::max(0.0f, m_modeFlash - dt);
-
-        // Aim-mode toggle (T). Persists across deaths via GameContext.
-        if (Input::IsKeyPressed(Key::T)) {
-            m_ctx->aimMode = (m_ctx->aimMode == AimMode::Auto)
-                                 ? AimMode::Mouse : AimMode::Auto;
-            m_modeFlash = 0.8f;
-        }
 
         // Movement.
         Vec2 input{0.0f, 0.0f};
@@ -1288,9 +1271,9 @@ private:
             m_animTime = 0.0f;
             // Stationary. Two idle behaviours:
             //   1) Regen HP at kPlayerRegenRate per second (banked fractional).
-            //   2) In Auto mode, slowly rotate m_moveDir toward the nearest
-            //      visible enemy so the auto-aim cone follows them without
-            //      the player having to nudge WASD.
+            //   2) Slowly rotate m_moveDir toward the nearest visible enemy
+            //      so the auto-aim cone follows them without the player
+            //      having to nudge WASD.
             if (m_ctx->playerHp < int(kPlayerHpMax)) {
                 m_hpRegenAccum += kPlayerRegenRate * dt;
                 while (m_hpRegenAccum >= 1.0f) {
@@ -1301,25 +1284,23 @@ private:
             } else {
                 m_hpRegenAccum = 0.0f;
             }
-            if (m_ctx->aimMode == AimMode::Auto) {
-                if (const Enemy* tgt = FindNearestVisibleEnemy()) {
-                    const float dx  = tgt->pos.x - m_player.x;
-                    const float dy  = tgt->pos.y - m_player.y;
-                    const float len = std::sqrt(dx * dx + dy * dy);
-                    if (len > 0.001f) {
-                        constexpr float kTwoPi = 6.2831853f;
-                        const float desiredA = std::atan2(dy, dx);
-                        const float currentA = std::atan2(m_moveDir.y, m_moveDir.x);
-                        float delta = desiredA - currentA;
-                        // Wrap to [-π, π] so we always turn the short way.
-                        while (delta >  3.14159265f) delta -= kTwoPi;
-                        while (delta < -3.14159265f) delta += kTwoPi;
-                        const float maxStep = kPlayerTurnSpeed * dt;
-                        if (delta >  maxStep) delta =  maxStep;
-                        if (delta < -maxStep) delta = -maxStep;
-                        const float newA = currentA + delta;
-                        m_moveDir = { std::cos(newA), std::sin(newA) };
-                    }
+            if (const Enemy* tgt = FindNearestVisibleEnemy()) {
+                const float dx  = tgt->pos.x - m_player.x;
+                const float dy  = tgt->pos.y - m_player.y;
+                const float len = std::sqrt(dx * dx + dy * dy);
+                if (len > 0.001f) {
+                    constexpr float kTwoPi = 6.2831853f;
+                    const float desiredA = std::atan2(dy, dx);
+                    const float currentA = std::atan2(m_moveDir.y, m_moveDir.x);
+                    float delta = desiredA - currentA;
+                    // Wrap to [-π, π] so we always turn the short way.
+                    while (delta >  3.14159265f) delta -= kTwoPi;
+                    while (delta < -3.14159265f) delta += kTwoPi;
+                    const float maxStep = kPlayerTurnSpeed * dt;
+                    if (delta >  maxStep) delta =  maxStep;
+                    if (delta < -maxStep) delta = -maxStep;
+                    const float newA = currentA + delta;
+                    m_moveDir = { std::cos(newA), std::sin(newA) };
                 }
             }
         }
@@ -1331,39 +1312,23 @@ private:
         if (!CircleBlockedByWalls(m_grid, nx, m_player.y, kPlayerR)) m_player.x = nx;
         if (!CircleBlockedByWalls(m_grid, m_player.x, ny, kPlayerR)) m_player.y = ny;
 
-        // Aim. Branches on the active mode; both modes write m_facing so the
-        // gun barrel + bullet spawn share a single code path below.
+        // Aim. Auto-aim picks the locked target's direction; with no lock,
+        // the gun points along m_moveDir so the sprite still reads.
         m_autoLocked = false;
-        if (m_ctx->aimMode == AimMode::Auto) {
-            const Enemy* tgt = FindAutoTarget();
-            if (tgt) {
-                const float dx = tgt->pos.x - m_player.x;
-                const float dy = tgt->pos.y - m_player.y;
-                const float len = std::sqrt(dx * dx + dy * dy);
-                m_facing = { dx / len, dy / len };
-                m_autoLocked    = true;
-                m_autoTargetPos = tgt->pos;
-            } else {
-                // No enemy in the cone — point the gun the way we're heading
-                // so the sprite reads naturally. We won't shoot in this state.
-                m_facing = m_moveDir;
-            }
+        if (const Enemy* tgt = FindAutoTarget()) {
+            const float dx = tgt->pos.x - m_player.x;
+            const float dy = tgt->pos.y - m_player.y;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            m_facing = { dx / len, dy / len };
+            m_autoLocked    = true;
+            m_autoTargetPos = tgt->pos;
         } else {
-            const Vec2 mouseScreen = Input::MousePosition();
-            const Vec2 mouseWorld  = S2W(mouseScreen, m_camOrigin);
-            Vec2 aim = { mouseWorld.x - m_player.x, mouseWorld.y - m_player.y };
-            const float alen = std::sqrt(aim.x * aim.x + aim.y * aim.y);
-            if (alen > 0.001f) m_facing = { aim.x / alen, aim.y / alen };
+            m_facing = m_moveDir;
         }
 
-        // Shoot. Mouse mode: hold left-click to fire toward the cursor (click
-        // is the only trigger). Auto mode: NO input required — the gun fires
-        // by itself whenever there's a lock, gated only by the fire cooldown.
-        // Without a lock there's no target, so auto-fire pauses.
-        const bool wantFire = (m_ctx->aimMode == AimMode::Auto)
-                                  ? m_autoLocked
-                                  : Input::IsMouseDown(MouseButton::Left);
-        if (wantFire && m_fireCd <= 0.0f) {
+        // Shoot: no input required, the gun auto-fires whenever there's a
+        // lock and the cooldown has elapsed.
+        if (m_autoLocked && m_fireCd <= 0.0f) {
             m_fireCd = kPlayerFireCd / m_playerRateMult;
             // Multi-shot: m_playerShotCount bullets fanned symmetrically
             // around m_facing with kMultiSpreadDeg between adjacent shots.
@@ -2104,9 +2069,7 @@ private:
     //     auto-aim is searching;
     //   * a pulsing reticle on the current lock target so the next bullet's
     //     destination is obvious.
-    // In mouse mode, this draws nothing — the cursor IS the feedback.
     void DrawAutoAimOverlay(Renderer2D& r) {
-        if (m_ctx->aimMode != AimMode::Auto) return;
         // No gameplay UI on top of the dying screen — the lock state is
         // frozen at death so the reticle would otherwise hang in the dark
         // until the player restarts.
@@ -2461,24 +2424,6 @@ private:
                    {kScreenW - sSize.x - 20.0f, 14.0f},
                    Color(1.0f, 1.0f, 1.0f, 1.0f), 24.0f);
 
-        // Aim mode pill — sits just under the top bar so the player always
-        // knows which mode is active. Flashes briefly after a T toggle.
-        const bool autoOn = (m_ctx->aimMode == AimMode::Auto);
-        const Color modeBase = autoOn ? Color(1.0f, 0.85f, 0.25f, 1.0f)
-                                      : Color(0.55f, 0.85f, 1.00f, 1.0f);
-        const float fade = (m_modeFlash > 0.0f) ? (m_modeFlash / 0.8f) : 0.0f;
-        const Color modeColor(
-            modeBase.r + (1.0f - modeBase.r) * fade,
-            modeBase.g + (1.0f - modeBase.g) * fade,
-            modeBase.b + (1.0f - modeBase.b) * fade,
-            1.0f);
-        const char* modeText = autoOn ? "AIM: AUTO   [T] mouse"
-                                      : "AIM: MOUSE  [T] auto";
-        r.DrawQuad({16.0f, 56.0f},
-                   {(autoOn ? 245.0f : 250.0f), 26.0f},
-                   Color(0.0f, 0.0f, 0.0f, 0.50f));
-        r.DrawText(*m_ctx->font, modeText, {26.0f, 60.0f}, modeColor, 20.0f);
-
         // Shadow toggle is debug-only (F8). Only show a HUD pill when
         // shadows have been turned off, so the player isn't tempted to use
         // it but a developer can see at a glance that they've flipped it.
@@ -2529,7 +2474,6 @@ private:
     bool    m_autoLocked = false;
     Vec2    m_autoTargetPos{0.0f, 0.0f};
     float   m_autoPulse = 0.0f;     // reticle blink
-    float   m_modeFlash = 0.0f;     // brief HUD highlight after a mode toggle
     // Ray-cast shadow texture (R = light multiplier in [0, 1]). Rebuilt by
     // UpdateShadows() any time the player moves a non-trivial amount or the
     // toggle flips on. Drives Renderer2D::SetFog during the world pass.
