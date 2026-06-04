@@ -87,6 +87,7 @@ constexpr int   kEnemyBulletDmg  = 10;
 constexpr float kEnemyR             = 0.34f;
 constexpr float kEnemySpeed         = 2.6f;
 constexpr int   kEnemyHpMax         = 50;
+constexpr int   kEnemyHpPerWave     = 5;    // added on top of base HP each wave
 constexpr float kEnemyFireCd        = 1.3f;
 constexpr float kEnemyShootRange    = 7.5f;
 constexpr float kEnemyRetreatRange  = 2.5f;
@@ -100,7 +101,6 @@ constexpr float kEnemyWanderCd      = 0.9f;
 // Enemies get a bigger nudge than the player so combat reads "I hit them" but
 // the player doesn't feel yanked around by every stray shot.
 constexpr float kEnemyKnockbackV  = 7.5f;   // tiles/s, initial
-constexpr float kPlayerKnockbackV = 4.5f;
 constexpr float kKnockbackDecay   = 18.0f;  // 1/s; smaller = longer slide
 
 // Sparkle aerodynamic drag — shared by every StarParticle (currently only
@@ -167,10 +167,12 @@ constexpr float kItemBoxPx       = 32.0f;  // box side on screen
 constexpr float kItemBoxRadius   = 4.0f;   // rounded-corner radius
 constexpr float kItemBorderPx    = 2.0f;   // gray frame thickness
 constexpr float kItemPowerMult   = 1.20f;  // multiplicative on m_playerDmgMult (each = +20%)
-constexpr float kItemSpeedMult   = 1.20f;  // multiplicative on m_playerRateMult (each = +20%)
+constexpr float kItemSpeedMult   = 1.10f;  // multiplicative on m_playerRateMult (each = +10%)
+constexpr int   kMultiMaxShots   = 8;      // hard cap on m_playerShotCount
+constexpr float kMultiSpreadDeg  = 5.0f;   // degrees between adjacent bullets
 constexpr float kItemHealFrac    = 0.20f;  // fraction of kPlayerHpMax restored
 
-enum class ItemKind : uint8_t { Power, Speed, Heal };
+enum class ItemKind : uint8_t { Power, Speed, Heal, Multi };
 
 // The visible shape of every item is identical — a gray-bordered black
 // rounded square — so the per-kind data is just the letter and the colour
@@ -186,12 +188,13 @@ inline ItemDef ItemDefOf(ItemKind k) {
         case ItemKind::Power: return { 'P', Color(1.00f, 0.45f, 0.95f, 1.0f) };
         case ItemKind::Speed: return { 'S', Color(0.40f, 0.85f, 1.00f, 1.0f) };
         case ItemKind::Heal:  return { 'H', Color(0.55f, 1.00f, 0.45f, 1.0f) };
+        case ItemKind::Multi: return { 'M', Color(1.00f, 0.65f, 0.20f, 1.0f) };
     }
     return { '?', Color::White() };
 }
 
 inline ItemKind RandomItemKind(std::mt19937& rng) {
-    std::uniform_int_distribution<int> d(0, 2);
+    std::uniform_int_distribution<int> d(0, 3);
     return ItemKind(d(rng));
 }
 
@@ -417,7 +420,8 @@ struct StarParticle {
 struct Enemy {
     Vec2 pos;
     Vec2 aim{1.0f, 0.0f};
-    int  hp = kEnemyHpMax;
+    int  hp    = kEnemyHpMax;
+    int  hpMax = kEnemyHpMax;     // per-enemy max so HP bar scales when waves toughen
     float fireCd = 0.0f;
     float hurtFlash = 0.0f;
     bool alive = true;
@@ -426,6 +430,7 @@ struct Enemy {
     Vec2 wander{0.0f, 0.0f};
     float wanderCd = 0.0f;
     Vec2 knockback{0.0f, 0.0f};   // residual hit impulse, decays in UpdateEnemies
+    float animTime = 0.0f;         // walk-cycle accumulator (reset when idle)
 };
 
 // ---------------------------------------------------------------------------
@@ -579,15 +584,15 @@ public:
         m_popups.clear();
         m_coins.clear();
         m_items.clear();
-        m_playerDmgMult  = 1.0f;
-        m_playerRateMult = 1.0f;
+        m_playerDmgMult   = 1.0f;
+        m_playerRateMult  = 1.0f;
+        m_playerShotCount = 1;
         m_waveTimer  = 0.0f;
         m_waveActive = false;
         m_itemThisWave = false;
         m_ctx->wave  = 0;
         m_facing     = {1.0f, 0.0f};
         m_moveDir    = {1.0f, 0.0f};
-        m_playerKnockback = {0.0f, 0.0f};
         m_hpRegenAccum = 0.0f;
         m_autoLocked = false;
         m_autoPulse  = 0.0f;
@@ -604,7 +609,27 @@ public:
         EnsureCoinSprite();
         EnsurePieTexture();
         EnsurePlayerSprite();
+        EnsureEnemySprite();
         m_animTime = 0.0f;
+    }
+
+    void EnsureEnemySprite() {
+        if (m_enemyTex || !m_ctx->device) return;
+        const std::string path =
+            std::string(NARAGAME_ASSETS_DIR) + "/enemy.png";
+        m_enemyTex = LoadTexture(*m_ctx->device, path, TextureFilter::Point);
+        if (!m_enemyTex) {
+            NARAGAME_WARN("brawl: enemy sprite '%s' missing", path.c_str());
+            return;
+        }
+        constexpr float kFW = 48.0f;
+        constexpr float kFH = 56.0f;
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                m_enemyFrames[row][col] = TextureRegion::FromPixels(
+                    m_enemyTex.get(), col * kFW, row * kFH, kFW, kFH);
+            }
+        }
     }
 
     // Atlas layout: 4 rows × 8 cols, rows = (N, NE, SE, S), cols = walk
@@ -801,15 +826,20 @@ public:
                 break;
             case ItemKind::Speed:
                 m_playerRateMult *= kItemSpeedMult;
-                std::snprintf(p.text, sizeof(p.text), "FIRE +20%%");
+                std::snprintf(p.text, sizeof(p.text), "FIRE +10%%");
                 break;
             case ItemKind::Heal: {
-                const int heal = int(kPlayerHpMax * kItemHealFrac);
-                m_ctx->playerHp = std::min(int(kPlayerHpMax),
-                                           m_ctx->playerHp + heal);
-                std::snprintf(p.text, sizeof(p.text), "HEAL +%d", heal);
+                const int target  = int(kPlayerHpMax * kItemHealFrac) + m_ctx->playerHp;
+                const int clamped = std::min(int(kPlayerHpMax), target);
+                const int actual  = clamped - m_ctx->playerHp;   // never above max
+                m_ctx->playerHp   = clamped;
+                std::snprintf(p.text, sizeof(p.text), "+%d", actual);
                 break;
             }
+            case ItemKind::Multi:
+                if (m_playerShotCount < kMultiMaxShots) m_playerShotCount += 1;
+                std::snprintf(p.text, sizeof(p.text), "MULTI x%d", m_playerShotCount);
+                break;
         }
         m_popups.push_back(p);
     }
@@ -1240,20 +1270,12 @@ private:
             m_modeFlash = 0.8f;
         }
 
-        // Movement. WASD is locked out while the player is being knocked
-        // back from a bullet hit — the impulse should feel like a yank, not
-        // something you can cancel by holding the opposite direction. The
-        // facing / auto-aim / shooting paths below keep working so the
-        // player can still aim and return fire mid-slide.
-        const bool kbActive = (m_playerKnockback.x * m_playerKnockback.x +
-                               m_playerKnockback.y * m_playerKnockback.y > 0.01f);
+        // Movement.
         Vec2 input{0.0f, 0.0f};
-        if (!kbActive) {
-            if (Input::IsKeyDown(Key::A) || Input::IsKeyDown(Key::Left))  input.x -= 1.0f;
-            if (Input::IsKeyDown(Key::D) || Input::IsKeyDown(Key::Right)) input.x += 1.0f;
-            if (Input::IsKeyDown(Key::W) || Input::IsKeyDown(Key::Up))    input.y -= 1.0f;
-            if (Input::IsKeyDown(Key::S) || Input::IsKeyDown(Key::Down))  input.y += 1.0f;
-        }
+        if (Input::IsKeyDown(Key::A) || Input::IsKeyDown(Key::Left))  input.x -= 1.0f;
+        if (Input::IsKeyDown(Key::D) || Input::IsKeyDown(Key::Right)) input.x += 1.0f;
+        if (Input::IsKeyDown(Key::W) || Input::IsKeyDown(Key::Up))    input.y -= 1.0f;
+        if (Input::IsKeyDown(Key::S) || Input::IsKeyDown(Key::Down))  input.y += 1.0f;
         const float ilen = std::sqrt(input.x * input.x + input.y * input.y);
         if (ilen > 0.001f) {
             input = { input.x / ilen, input.y / ilen };
@@ -1309,24 +1331,6 @@ private:
         if (!CircleBlockedByWalls(m_grid, nx, m_player.y, kPlayerR)) m_player.x = nx;
         if (!CircleBlockedByWalls(m_grid, m_player.x, ny, kPlayerR)) m_player.y = ny;
 
-        // Bullet-hit knockback: apply residual impulse with wall slide, then
-        // bleed it off exponentially so it fades within ~0.5s. The threshold
-        // prevents floating-point dust from carrying movement forever.
-        if (m_playerKnockback.x * m_playerKnockback.x +
-            m_playerKnockback.y * m_playerKnockback.y > 0.01f) {
-            const float kx = m_playerKnockback.x * dt;
-            const float ky = m_playerKnockback.y * dt;
-            if (!CircleBlockedByWalls(m_grid, m_player.x + kx, m_player.y, kPlayerR))
-                m_player.x += kx;
-            if (!CircleBlockedByWalls(m_grid, m_player.x, m_player.y + ky, kPlayerR))
-                m_player.y += ky;
-            const float decay = std::exp(-kKnockbackDecay * dt);
-            m_playerKnockback.x *= decay;
-            m_playerKnockback.y *= decay;
-        } else {
-            m_playerKnockback = {0.0f, 0.0f};
-        }
-
         // Aim. Branches on the active mode; both modes write m_facing so the
         // gun barrel + bullet spawn share a single code path below.
         m_autoLocked = false;
@@ -1361,15 +1365,28 @@ private:
                                   : Input::IsMouseDown(MouseButton::Left);
         if (wantFire && m_fireCd <= 0.0f) {
             m_fireCd = kPlayerFireCd / m_playerRateMult;
-            Bullet b;
-            // Spawn at gun tip rather than the player's center so the bullet
-            // doesn't appear out of the body sprite.
-            b.pos = { m_player.x + m_facing.x * 0.55f,
-                      m_player.y + m_facing.y * 0.55f };
-            b.vel = { m_facing.x * kPlayerBulletV,
-                      m_facing.y * kPlayerBulletV };
-            b.fromPlayer = true;
-            m_bullets.push_back(b);
+            // Multi-shot: m_playerShotCount bullets fanned symmetrically
+            // around m_facing with kMultiSpreadDeg between adjacent shots.
+            // For N shots the angle offset of shot i is
+            //   (i − (N−1)/2) · kMultiSpreadDeg   degrees.
+            const int   N        = std::max(1, m_playerShotCount);
+            const float spreadRd = kMultiSpreadDeg * 3.14159265f / 180.0f;
+            const float centre   = float(N - 1) * 0.5f;
+            for (int i = 0; i < N; ++i) {
+                const float a  = (float(i) - centre) * spreadRd;
+                const float ca = std::cos(a), sa = std::sin(a);
+                const float dx = m_facing.x * ca - m_facing.y * sa;
+                const float dy = m_facing.x * sa + m_facing.y * ca;
+                Bullet b;
+                // Spawn at gun tip rather than the player's center so the bullet
+                // doesn't appear out of the body sprite.
+                b.pos = { m_player.x + dx * 0.55f,
+                          m_player.y + dy * 0.55f };
+                b.vel = { dx * kPlayerBulletV,
+                          dy * kPlayerBulletV };
+                b.fromPlayer = true;
+                m_bullets.push_back(b);
+            }
         }
     }
 
@@ -1443,13 +1460,6 @@ private:
                 if (dx * dx + dy * dy < rr * rr && m_playerHurt <= 0.0f) {
                     m_ctx->playerHp = std::max(0, m_ctx->playerHp - kEnemyBulletDmg);
                     m_playerHurt = kPlayerHurtIFrame;
-                    const float vlen = std::sqrt(b.vel.x * b.vel.x +
-                                                 b.vel.y * b.vel.y);
-                    if (vlen > 0.001f) {
-                        const float s = kPlayerKnockbackV / vlen;
-                        m_playerKnockback.x = b.vel.x * s;
-                        m_playerKnockback.y = b.vel.y * s;
-                    }
                     b.alive = false;
                 }
             }
@@ -1497,6 +1507,8 @@ private:
             const float ny = e.pos.y + wantDir.y * step;
             if (!CircleBlockedByWalls(m_grid, nx, e.pos.y, kEnemyR)) e.pos.x = nx;
             if (!CircleBlockedByWalls(m_grid, e.pos.x, ny, kEnemyR)) e.pos.y = ny;
+            if (wantDir.x != 0.0f || wantDir.y != 0.0f) e.animTime += dt;
+            else                                       e.animTime  = 0.0f;
 
             // Bullet-hit knockback (same axis-separated slide + exp decay as
             // the player). Runs after the AI's own move so a heavy impulse
@@ -1624,6 +1636,15 @@ private:
                 const float dy = c.pos.y - m_player.y;
                 if (dx * dx + dy * dy < kCoinPickupR * kCoinPickupR) {
                     m_ctx->score += kCoinScore;
+                    // Small yellow "+N" popup so the player feels the score
+                    // tick without having to glance up at the HUD.
+                    Popup pp;
+                    pp.pos    = c.pos;
+                    std::snprintf(pp.text, sizeof(pp.text), "+%d", kCoinScore);
+                    pp.color  = Color(1.0f, 0.93f, 0.32f, 1.0f);
+                    pp.pxSize = 18.0f;
+                    pp.life   = 0.80f;
+                    m_popups.push_back(pp);
                     c.alive = false;
                 }
             }
@@ -1698,8 +1719,11 @@ private:
             if (dx * dx + dy * dy < 5.0f * 5.0f) continue;        // not on player
             if (CircleBlockedByWalls(m_grid, ex, ey, kEnemyR)) continue;
             Enemy e;
-            e.pos = { ex, ey };
-            e.hp = kEnemyHpMax;
+            e.pos   = { ex, ey };
+            // Per-wave HP scaling: +kEnemyHpPerWave on top of the base
+            // each wave past the first.
+            e.hpMax = kEnemyHpMax + (m_ctx->wave - 1) * kEnemyHpPerWave;
+            e.hp    = e.hpMax;
             m_enemies.push_back(e);
             ++placed;
         }
@@ -1962,35 +1986,117 @@ private:
         const Color tint(base.r * L, base.g * L, base.b * L, 1.0f);
         r.DrawQuad(pos, {kSpriteW, kSpriteH},
                    m_playerFrames[sp.row][frame], tint, sp.flipX);
+
+        // In-world HP bar above the player's head — thick rounded rect with
+        // a tier-coloured fill and a centred bold HP number (white text on
+        // black outline). Colour tier:
+        //   HP ≥ 80 → green
+        //   HP ≥ 20 → yellow
+        //   else    → red
+        const int   hp     = m_ctx->playerHp;
+        const float hpFrac = std::max(0.0f, float(hp) / float(kPlayerHpMax));
+        const Color fill   = (hp >= 80) ? Color(0.32f, 0.85f, 0.32f, 1.0f)
+                           : (hp >= 20) ? Color(0.95f, 0.85f, 0.25f, 1.0f)
+                                        : Color(0.95f, 0.30f, 0.30f, 1.0f);
+        constexpr float kBarW      = 50.0f;
+        constexpr float kBarH      = 14.0f;
+        constexpr float kBarRadius = 3.0f;
+        const float barX = feet.x - kBarW * 0.5f;
+        const float barY = feet.y - kSpriteH - kBarH - 2.0f;
+        auto barTint = [L](const Color& c) {
+            return Color(c.r * L, c.g * L, c.b * L, c.a);
+        };
+        // Bold black border underneath the bar — extends a couple of pixels
+        // out on every side so it reads as a frame around the whole capsule.
+        constexpr float kBarBorder = 2.0f;
+        DrawRoundRect(r,
+                      {barX - kBarBorder, barY - kBarBorder},
+                      {kBarW + kBarBorder * 2.0f, kBarH + kBarBorder * 2.0f},
+                      kBarRadius + kBarBorder,
+                      barTint(Color(0.0f, 0.0f, 0.0f, 0.95f)));
+        DrawRoundRect(r, {barX, barY}, {kBarW, kBarH}, kBarRadius,
+                      barTint(Color(0.12f, 0.06f, 0.06f, 0.95f)));
+        const float fillW = kBarW * hpFrac;
+        if (fillW > 0.5f) {
+            DrawRoundRect(r, {barX, barY}, {fillW, kBarH}, kBarRadius,
+                          barTint(fill));
+        }
+        // Bold HP number — fake-bold via 8-direction offset stroke,
+        // black outline + white centre so the digit reads on any fill
+        // colour.
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%d", hp);
+        constexpr float textPx = 12.0f;
+        const Vec2 ts = m_ctx->font->Measure(buf, textPx);
+        const float textX = feet.x - ts.x * 0.5f;
+        const float textY = barY + (kBarH - textPx) * 0.5f - 1.0f;
+        constexpr float kOff = 1.2f;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                r.DrawText(*m_ctx->font, buf,
+                           {textX + dx * kOff, textY + dy * kOff},
+                           barTint(Color(0.0f, 0.0f, 0.0f, 1.0f)), textPx);
+            }
+        }
+        r.DrawText(*m_ctx->font, buf, {textX, textY},
+                   barTint(Color(1.0f, 1.0f, 1.0f, 1.0f)), textPx);
     }
 
     void DrawEnemy(Renderer2D& r, const Enemy& e) {
         const Vec2 feet = W2S(e.pos, m_camOrigin);
         const float L = SampleShadowAt(e.pos);
-        auto tint = [L](const Color& c) {
-            return Color(c.r * L, c.g * L, c.b * L, c.a);
-        };
         DrawShadow(r, {feet.x, feet.y + 5.0f}, 16.0f);
-        const Color body = (e.hurtFlash > 0.0f) ? Color(1.0f, 1.0f, 1.0f, 1.0f) : kEnemyBody;
-        r.DrawQuad({feet.x - 13.0f, feet.y - 20.0f}, {26.0f, 17.0f}, tint(body));
-        r.DrawQuad({feet.x - 8.0f,  feet.y - 32.0f}, {16.0f, 14.0f}, tint(kEnemyHead));
-        const float ang = WorldDirToScreenAngle(e.aim);
-        const Vec2 gunMid{ feet.x + std::cos(ang) * 14.0f,
-                           feet.y + std::sin(ang) * 14.0f - 16.0f };
-        r.DrawQuad(gunMid, {14.0f, 4.0f}, ang, tint(kEnemyGun));
 
-        // HP bar above head — continuous fill scaled by hp/hpMax. Same tint
-        // so a hidden enemy doesn't give itself away in the dark.
+        if (m_enemyTex) {
+            // 8-direction → 3-row map. NE shares the N row, SE shares the
+            // S row; the west half mirrors via flipX.
+            static const struct DirSprite { int row; bool flipX; } kDirMap[8] = {
+                {0, false}, // N
+                {0, false}, // NE  (uses N)
+                {1, false}, // E
+                {2, false}, // SE  (uses S)
+                {2, false}, // S
+                {2, true},  // SW  (flip S)
+                {1, true},  // W   (flip E)
+                {0, true},  // NW  (flip N)
+            };
+            const float a   = std::atan2(e.aim.x, -e.aim.y);
+            const float aN  = (a < 0.0f) ? a + 6.2831853f : a;
+            const int   dir = int(std::round(aN / 6.2831853f * 8.0f)) & 7;
+            const DirSprite& sp = kDirMap[dir];
+            constexpr float kAnimFps = 10.0f;        // 4-frame loop in 0.4 s
+            const int frame = int(e.animTime * kAnimFps) & 3;
+            constexpr float kSpriteW = 48.0f;
+            constexpr float kSpriteH = 56.0f;
+            const Vec2 pos{ feet.x - kSpriteW * 0.5f,
+                            feet.y - kSpriteH + 4.0f };
+            // Hurt flash brightens by tinting > 1.0 (the framebuffer
+            // clamps each channel to 1.0, so the sprite washes out white).
+            const Color base = (e.hurtFlash > 0.0f)
+                                  ? Color(2.5f, 2.5f, 2.5f, 1.0f)
+                                  : Color(1.0f, 1.0f, 1.0f, 1.0f);
+            const Color tint(base.r * L, base.g * L, base.b * L, base.a);
+            r.DrawQuad(pos, {kSpriteW, kSpriteH},
+                       m_enemyFrames[sp.row][frame], tint, sp.flipX);
+        }
+
+        // HP bar above head — continuous fill scaled by hp/hpMax. Tinted by
+        // the shadow value so a hidden enemy doesn't give itself away in
+        // the dark.
         const float barW = 26.0f;
         const float barH = 3.0f;
         const float hpFrac = std::max(0.0f,
-            float(e.hp) / float(kEnemyHpMax));
-        r.DrawQuad({feet.x - barW * 0.5f, feet.y - 42.0f},
+            float(e.hp) / float(std::max(1, e.hpMax)));
+        auto tintC = [L](const Color& c) {
+            return Color(c.r * L, c.g * L, c.b * L, c.a);
+        };
+        r.DrawQuad({feet.x - barW * 0.5f, feet.y - 56.0f},
                    {barW, barH},
-                   tint(Color(0.20f, 0.10f, 0.10f, 0.85f)));
-        r.DrawQuad({feet.x - barW * 0.5f, feet.y - 42.0f},
+                   tintC(Color(0.20f, 0.10f, 0.10f, 0.85f)));
+        r.DrawQuad({feet.x - barW * 0.5f, feet.y - 56.0f},
                    {barW * hpFrac, barH},
-                   tint(Color(0.95f, 0.30f, 0.30f, 1.0f)));
+                   tintC(Color(0.95f, 0.30f, 0.30f, 1.0f)));
     }
 
     // In auto-aim mode, show the player what's happening:
@@ -2154,16 +2260,23 @@ private:
             r.DrawQuad({pos.x, pos.y + float(rad)},
                        {size.x, size.y - 2.0f * float(rad)}, c);
         }
-        // Top and bottom caps.
+        // Top and bottom caps. The top cap's row 0 sits at the very top edge
+        // (far from the arc centre), and the bottom cap's row 0 sits just
+        // below the body (close to the arc centre) — so the distance-from-
+        // centre used for the chord calculation has to be computed
+        // separately for the two caps.
         const float r2 = float(rad) * float(rad);
         for (int i = 0; i < rad; ++i) {
-            const float dy   = float(rad) - 0.5f - float(i);
-            const float chord = std::sqrt(std::max(0.0f, r2 - dy * dy));
-            const float cut  = float(rad) - chord;
-            r.DrawQuad({pos.x + cut, pos.y + float(i)},
-                       {size.x - 2.0f * cut, 1.0f}, c);
-            r.DrawQuad({pos.x + cut, pos.y + size.y - float(rad) + float(i)},
-                       {size.x - 2.0f * cut, 1.0f}, c);
+            const float dyTop = float(rad) - 0.5f - float(i);  // i=0 → top edge
+            const float dyBot = float(i) + 0.5f;               // i=0 → near body
+            const float chordTop = std::sqrt(std::max(0.0f, r2 - dyTop * dyTop));
+            const float chordBot = std::sqrt(std::max(0.0f, r2 - dyBot * dyBot));
+            const float cutTop = float(rad) - chordTop;
+            const float cutBot = float(rad) - chordBot;
+            r.DrawQuad({pos.x + cutTop, pos.y + float(i)},
+                       {size.x - 2.0f * cutTop, 1.0f}, c);
+            r.DrawQuad({pos.x + cutBot, pos.y + size.y - float(rad) + float(i)},
+                       {size.x - 2.0f * cutBot, 1.0f}, c);
         }
     }
 
@@ -2332,18 +2445,10 @@ private:
     }
 
     void DrawHud(Renderer2D& r) {
-        // Top bar.
+        // Top bar (player HP now lives above the player's head in DrawPlayer).
         r.DrawQuad({0, 0}, {kScreenW, 48.0f}, kHudBg);
-        // HP bar.
-        const float hpFrac = std::max(0.0f, float(m_ctx->playerHp) / float(kPlayerHpMax));
-        r.DrawQuad({16, 12}, {240.0f, 24.0f}, kHpBarBg);
-        r.DrawQuad({18, 14}, {236.0f * hpFrac, 20.0f}, kHpBarFill);
 
         char buf[64];
-        std::snprintf(buf, sizeof(buf), "HP %d / %d", m_ctx->playerHp, kPlayerHpMax);
-        r.DrawText(*m_ctx->font, buf, {270.0f, 14.0f},
-                   Color(1.0f, 1.0f, 1.0f, 1.0f), 22.0f);
-
         std::snprintf(buf, sizeof(buf), "WAVE %d", std::max(1, m_ctx->wave));
         const Vec2 wSize = m_ctx->font->Measure(buf, 26.0f);
         r.DrawText(*m_ctx->font, buf,
@@ -2411,7 +2516,6 @@ private:
     // auto-aim cone keeps pointing where they were heading. Initialised right
     // so the cone has *some* direction on the very first frame.
     Vec2    m_moveDir{1.0f, 0.0f};
-    Vec2    m_playerKnockback{0.0f, 0.0f};   // bullet-hit impulse, decays each frame
     Vec2    m_camOrigin{0.0f, 0.0f};
     float   m_playerHurt = 0.0f;
     float   m_fireCd     = 0.0f;
@@ -2454,6 +2558,10 @@ private:
     std::unique_ptr<RHITexture> m_playerTex;
     TextureRegion               m_playerFrames[4][8];
     float                       m_animTime = 0.0f;
+    // Enemy atlas: 3 directional rows × 4 walk frames at 48×56 each.
+    // Rows in order: N, E, S. NE uses N; SE uses S; W/SW/NW are flipped.
+    std::unique_ptr<RHITexture> m_enemyTex;
+    TextureRegion               m_enemyFrames[3][4];
     int     m_shadowW = 0, m_shadowH = 0;
     Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
     float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
@@ -2467,8 +2575,9 @@ private:
     // Damage multiplier is additive (1.5 → 2.0 → 2.5 over repeated Powers);
     // fire-rate multiplier is multiplicative (each Speed item doubles the
     // rate, so the cooldown becomes kPlayerFireCd / rateMult).
-    float                      m_playerDmgMult  = 1.0f;
-    float                      m_playerRateMult = 1.0f;
+    float                      m_playerDmgMult   = 1.0f;
+    float                      m_playerRateMult  = 1.0f;
+    int                        m_playerShotCount = 1;   // bullets per fire; +1 per Multi pickup, capped at kMultiMaxShots
     bool    m_waveActive = false;
     float   m_waveTimer  = 0.0f;
     // Latched true the first time an item drops in the current wave; if
