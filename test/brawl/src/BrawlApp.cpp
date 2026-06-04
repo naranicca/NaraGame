@@ -603,6 +603,30 @@ public:
         EnsureStarTexture();
         EnsureCoinSprite();
         EnsurePieTexture();
+        EnsurePlayerSprite();
+        m_animTime = 0.0f;
+    }
+
+    // Atlas layout: 4 rows × 8 cols, rows = (N, NE, SE, S), cols = walk
+    // frame index, each cell 60×80. Cached as TextureRegions for direct
+    // DrawQuad use.
+    void EnsurePlayerSprite() {
+        if (m_playerTex || !m_ctx->device) return;
+        const std::string path =
+            std::string(NARAGAME_ASSETS_DIR) + "/player.png";
+        m_playerTex = LoadTexture(*m_ctx->device, path, TextureFilter::Point);
+        if (!m_playerTex) {
+            NARAGAME_WARN("brawl: player sprite '%s' missing", path.c_str());
+            return;
+        }
+        constexpr float kFW = 60.0f;
+        constexpr float kFH = 80.0f;
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 8; ++col) {
+                m_playerFrames[row][col] = TextureRegion::FromPixels(
+                    m_playerTex.get(), col * kFW, row * kFH, kFW, kFH);
+            }
+        }
     }
 
     // Bake the auto-aim cone sprite. Texture is square; the wedge points
@@ -1237,7 +1261,9 @@ private:
             // pointing this way after the player stops, so a quick tap-stop-
             // shoot still fires "ahead" of the run.
             m_moveDir = input;
+            m_animTime += dt;
         } else {
+            m_animTime = 0.0f;
             // Stationary. Two idle behaviours:
             //   1) Regen HP at kPlayerRegenRate per second (banked fractional).
             //   2) In Auto mode, slowly rotate m_moveDir toward the nearest
@@ -1884,23 +1910,58 @@ private:
     void DrawPlayer(Renderer2D& r) {
         const Vec2 feet = W2S(m_player, m_camOrigin);
         const float L = SampleShadowAt(m_player);
-        auto tint = [L](const Color& c) {
-            return Color(c.r * L, c.g * L, c.b * L, c.a);
-        };
         DrawShadow(r, {feet.x, feet.y + 6.0f}, 18.0f);
 
-        // Body: 26x18 squat torso so the upper half (head) reads above shoulders.
-        const Color body = (m_playerHurt > 0.0f) ? kPlayerHurt : kPlayerBody;
-        r.DrawQuad({feet.x - 14.0f, feet.y - 22.0f}, {28.0f, 18.0f}, tint(body));
-        // Head.
-        r.DrawQuad({feet.x - 9.0f, feet.y - 36.0f}, {18.0f, 16.0f}, tint(kPlayerHead));
-        // Gun barrel: thin rotated quad pointing where the player aims, on
-        // top of the body. Use the screen-space angle so the barrel matches
-        // bullet travel under the Y compression.
-        const float ang = WorldDirToScreenAngle(m_facing);
-        const Vec2 gunMid{ feet.x + std::cos(ang) * 16.0f,
-                           feet.y + std::sin(ang) * 16.0f - 18.0f };
-        r.DrawQuad(gunMid, {18.0f, 5.0f}, ang, tint(kPlayerGun));
+        if (!m_playerTex) {
+            // Fallback colored quad if the atlas didn't load.
+            r.DrawQuad({feet.x - 14.0f, feet.y - 22.0f}, {28.0f, 18.0f},
+                       Color(L, L, L, 1.0f));
+            return;
+        }
+
+        // Map 8-direction index (0=N clockwise) to the four baked rows
+        // (N, NE, SE, S) plus a horizontal flip for the west half.
+        struct DirSprite { int row; bool flipX; };
+        static const DirSprite kDirMap[8] = {
+            {0, false}, // N
+            {1, false}, // NE
+            {2, false}, // E  (uses SE)
+            {2, false}, // SE
+            {3, false}, // S
+            {2, true},  // SW (flip SE)
+            {2, true},  // W  (flip SE — E was made identical to SE)
+            {1, true},  // NW (flip NE)
+        };
+        // Pure world-direction quantisation: 0 = N (world -y), increasing
+        // clockwise to E, S, W. No Y compression — the sprite cares about
+        // which way the character is facing in world terms, not how the
+        // tile is projected.
+        const float a   = std::atan2(m_facing.x, -m_facing.y);
+        const float aN  = (a < 0.0f) ? a + 6.2831853f : a;
+        const int   dir = int(std::round(aN / 6.2831853f * 8.0f)) & 7;
+        const DirSprite& sp = kDirMap[dir];
+
+        // Walk cycle: 16 fps loops over the 8-frame row while moving.
+        // m_animTime is reset to 0 when WASD is released, so the idle
+        // pose is always frame 0.
+        constexpr float kAnimFps = 16.0f;
+        const int frame = int(m_animTime * kAnimFps) & 7;
+
+        // Source frames are 60×80 px. Render at 48×64 on screen — 64 tall
+        // matches the request, 48 wide keeps the 60:80 aspect ratio.
+        constexpr float kSpriteW = 48.0f;
+        constexpr float kSpriteH = 64.0f;
+        // Anchor: bottom-centre of the sprite at the player's feet, with
+        // a small upward nudge so the character isn't standing on the
+        // floor-shadow line.
+        const Vec2 pos{ feet.x - kSpriteW * 0.5f,
+                        feet.y - kSpriteH + 4.0f };
+        const Color base = (m_playerHurt > 0.0f)
+                              ? Color(1.0f, 0.55f, 0.55f, 1.0f)
+                              : Color::White();
+        const Color tint(base.r * L, base.g * L, base.b * L, 1.0f);
+        r.DrawQuad(pos, {kSpriteW, kSpriteH},
+                   m_playerFrames[sp.row][frame], tint, sp.flipX);
     }
 
     void DrawEnemy(Renderer2D& r, const Enemy& e) {
@@ -2386,6 +2447,13 @@ private:
     // assets/coin.png; m_coinFrames[i] points at frame i in cell-row order.
     std::unique_ptr<RHITexture> m_coinTex;
     TextureRegion               m_coinFrames[kCoinFrameCount];
+    // Player atlas: 4 directional rows × 8 walk frames at 60×80 each.
+    // Rows in order: N (back), NE, SE, S (front). E uses SE; W/SW use SE
+    // mirrored; NW uses NE mirrored. Driven by m_facing → 8-direction
+    // index, animated by m_animTime while WASD is held.
+    std::unique_ptr<RHITexture> m_playerTex;
+    TextureRegion               m_playerFrames[4][8];
+    float                       m_animTime = 0.0f;
     int     m_shadowW = 0, m_shadowH = 0;
     Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
     float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
