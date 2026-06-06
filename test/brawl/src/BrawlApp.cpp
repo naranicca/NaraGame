@@ -710,7 +710,7 @@ public:
             m_ctx->kills    = 0;
             m_ctx->playerHp = kPlayerHpMax;
             m_ctx->newRun   = true;
-            Manager().Change(m_ctx->makeArena());
+            Manager().ChangeWith(m_ctx->makeArena(), 0.3f);
         }
         if (Input::IsKeyPressed(Key::Escape)) {
             Application::Get().Close();
@@ -1318,7 +1318,7 @@ public:
         //   - playing → pause (toggle on)
         if (Input::IsKeyPressed(Key::Escape)) {
             if (m_dead) {
-                Manager().Change(m_ctx->makeTitle());
+                Manager().ChangeWithFadeWhite(m_ctx->makeTitle(), 0.4f);
                 return;
             }
             m_paused = !m_paused;
@@ -1352,7 +1352,7 @@ public:
                 m_ctx->score    = 0;
                 m_ctx->wave     = 0;
                 m_ctx->kills    = 0;
-                Manager().Change(m_ctx->makeArena());
+                Manager().ChangeWithCrossfade(m_ctx->makeArena(), 0.5f);
             }
             return;
         }
@@ -2732,7 +2732,7 @@ private:
     void ActivatePauseMenu(int idx) {
         switch (idx) {
             case 0:  m_paused = false; break;                  // Resume
-            case 1:  Manager().Change(m_ctx->makeTitle()); break;  // Surrender
+            case 1:  Manager().ChangeWithPixelate(m_ctx->makeTitle(), 0.2f); break;  // Surrender
             case 2:  Application::Get().Close(); break;         // Exit
             default: break;
         }
@@ -3004,8 +3004,120 @@ protected:
     }
 
     void OnUpdate(float dt) override { m_scenes.Update(dt); }
-    void OnRender() override         { m_scenes.Render(); }
-    void OnStop() override           { m_scenes.Clear(); m_renderer.Shutdown(); }
+    void OnRender() override {
+        Renderer2D& r = *m_ctx.renderer;
+        const TransitionKind kind = m_scenes.IsTransitioning()
+                                        ? m_scenes.TransitionType()
+                                        : TransitionKind::None;
+        const bool rtKind = (kind == TransitionKind::Crossfade ||
+                             kind == TransitionKind::Pixelate);
+
+        if (rtKind && m_scenes.IsBeforeSwap()) {
+            // Phase-2 RT-based transitions: divert the outgoing scene's
+            // draws into m_transitionRT so we have a usable texture of its
+            // final frame waiting after the swap. We then blit the RT to
+            // the backbuffer so the player still sees the live scene.
+            EnsureTransitionRT();
+            if (kind == TransitionKind::Pixelate) EnsurePixelLowRT();
+            r.Begin(Renderer2D::ScreenCamera(kScreenW, kScreenH));
+            r.SetRenderTarget(m_transitionRT.get());
+            r.Clear(Color(0.0f, 0.0f, 0.0f, 1.0f));
+            r.End();
+            m_scenes.Render();
+            r.Begin(Renderer2D::ScreenCamera(kScreenW, kScreenH));
+            r.SetRenderTarget(nullptr);
+            r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                       m_transitionRT.get(), Color::White());
+            r.End();
+            return;
+        }
+
+        m_scenes.Render();
+
+        if (kind == TransitionKind::None) return;
+
+        // Overlay pass. Sits on top of whatever the scene submitted, in its
+        // own Begin/End batch.
+        r.Begin(Renderer2D::ScreenCamera(kScreenW, kScreenH));
+        switch (kind) {
+            case TransitionKind::Fade: {
+                Color c = m_scenes.TransitionColor();
+                c.a = m_scenes.FadeAlpha();
+                r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH}, c);
+                break;
+            }
+            case TransitionKind::Wipe: {
+                const Vec4 n = m_scenes.WipeOverlayRectNorm();
+                if (n.z > 0.0f && n.w > 0.0f) {
+                    r.DrawQuad({n.x * kScreenW, n.y * kScreenH},
+                               {n.z * kScreenW, n.w * kScreenH},
+                               m_scenes.TransitionColor());
+                }
+                break;
+            }
+            case TransitionKind::Crossfade: {
+                // Post-swap: alpha-blend the captured outgoing-scene RT
+                // over the new scene.
+                if (m_transitionRT) {
+                    const float p = m_scenes.TransitionProgress();
+                    const float fadeOut = std::max(0.0f, 1.0f - (p - 0.5f) * 2.0f);
+                    r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                               m_transitionRT.get(),
+                               Color(1.0f, 1.0f, 1.0f, fadeOut));
+                }
+                break;
+            }
+            case TransitionKind::Pixelate: {
+                // Post-swap: downsample the captured RT into the small
+                // nearest-filtered RT, then sample that small RT back onto
+                // the backbuffer. Hold the chunky old frame fully opaque
+                // for the first 70 % of the second half, then fade the
+                // last 30 %, so the player sees the mosaic clearly before
+                // it dissolves into the new scene.
+                if (m_transitionRT && m_pixelLowRT) {
+                    const float p     = m_scenes.TransitionProgress();
+                    const float t     = std::max(0.0f, (p - 0.5f) * 2.0f); // 0..1
+                    const float fadeOut = (t < 0.7f) ? 1.0f
+                                                     : std::max(0.0f, 1.0f - (t - 0.7f) / 0.3f);
+                    r.SetRenderTarget(m_pixelLowRT.get());
+                    r.DrawQuad({0.0f, 0.0f},
+                               {float(m_pixelLowRT->Width()),
+                                float(m_pixelLowRT->Height())},
+                               m_transitionRT.get(), Color::White());
+                    r.SetRenderTarget(nullptr);
+                    r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                               m_pixelLowRT.get(),
+                               Color(1.0f, 1.0f, 1.0f, fadeOut));
+                }
+                break;
+            }
+            case TransitionKind::None: break;
+        }
+        r.End();
+    }
+    void OnStop() override           { m_transitionRT.reset(); m_pixelLowRT.reset(); m_scenes.Clear(); m_renderer.Shutdown(); }
+
+    void EnsureTransitionRT() {
+        if (m_transitionRT || !m_ctx.device) return;
+        TextureDesc td;
+        td.width        = uint32_t(kScreenW);
+        td.height       = uint32_t(kScreenH);
+        td.format       = TextureFormat::RGBA8;
+        td.filter       = TextureFilter::Linear;
+        td.renderTarget = true;
+        m_transitionRT  = m_ctx.device->CreateTexture(td);
+    }
+
+    void EnsurePixelLowRT() {
+        if (m_pixelLowRT || !m_ctx.device) return;
+        TextureDesc td;
+        td.width        = uint32_t(kScreenW) / 16u;  // 80
+        td.height       = uint32_t(kScreenH) / 16u;  // 45 — chunky 16x16 blocks
+        td.format       = TextureFormat::RGBA8;
+        td.filter       = TextureFilter::Point;      // nearest-neighbour upscale
+        td.renderTarget = true;
+        m_pixelLowRT    = m_ctx.device->CreateTexture(td);
+    }
 
 private:
     static AppConfig MakeConfig() {
@@ -3021,6 +3133,15 @@ private:
     MSDFFont     m_font;
     SceneManager m_scenes;
     GameContext  m_ctx;
+    // Off-screen capture used by Crossfade / Pixelate transitions. Lazily
+    // created the first time an RT-based transition runs and kept around
+    // (one full-screen RGBA8 surface costs ~3.5 MB at 1280x720).
+    std::unique_ptr<RHITexture> m_transitionRT;
+    // Tiny nearest-filtered RT for the Pixelate transition. The large RT
+    // is drawn into this one as a downsample step; then it's sampled back
+    // onto the full-size backbuffer with a single quad, so the nearest
+    // filter blows each texel up into an ~8x8 chunky block.
+    std::unique_ptr<RHITexture> m_pixelLowRT;
 };
 
 Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {
