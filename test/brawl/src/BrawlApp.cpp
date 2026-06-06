@@ -171,7 +171,6 @@ constexpr float kItemBorderPx    = 2.0f;   // gray frame thickness
 constexpr float kItemPowerMult   = 1.20f;  // multiplicative on m_playerDmgMult (each = +20%)
 constexpr float kItemSpeedMult   = 1.10f;  // multiplicative on m_playerRateMult (each = +10%)
 constexpr int   kMultiMaxShots   = 8;      // hard cap on m_playerShotCount
-constexpr float kMultiRatePenalty= 0.90f;  // multiplicative on m_playerRateMult per Multi pickup (= -10%)
 constexpr float kMultiSpreadDeg  = 5.0f;   // degrees between adjacent bullets
 constexpr float kItemHealFrac    = 0.20f;  // fraction of kPlayerHpMax restored
 constexpr float kItemDefenseMult = 0.95f;  // multiplicative on m_playerDmgTaken per Defense pickup (= -5%)
@@ -208,7 +207,7 @@ inline ItemKind RandomItemKind(std::mt19937& rng) {
 constexpr int   kFirstWaveSize = 3;
 constexpr int   kWaveIncrement = 2;
 constexpr int   kMaxWaveSize   = 12;
-constexpr float kBetweenWaves  = 1.6f;
+constexpr float kBetweenWaves  = 5.0f;
 constexpr int   kScorePerKill  = 10;
 
 // ---------------------------------------------------------------------------
@@ -362,6 +361,7 @@ struct Bullet {
     Vec2 pos;
     Vec2 vel;        // world units / s
     float life = 0.0f;
+    float dmg  = 0.0f;  // base damage (pre-crit, pre-clamp); set per-shot at spawn
     bool fromPlayer = true;
     bool alive = true;
 };
@@ -405,6 +405,7 @@ struct Popup {
     float life   = 1.20f;
     float age    = 0.0f;
     bool  bold   = false;   // fake-bold: render text in a ring of offsets
+    bool  useBitmap = false; // route through the brawl bitmap font instead of MSDF
     bool  alive  = true;
 };
 
@@ -605,66 +606,183 @@ public:
         EnsureShadowTexture();
         EnsureStarTexture();
         EnsureCoinSprite();
-        EnsurePieTexture();
         EnsurePlayerSprite();
         EnsureEnemySprite();
-        EnsureDigitsSprite();
+        EnsureBitmapFont();
+        EnsureIndicatorTexture();
         m_animTime = 0.0f;
     }
 
-    void EnsureDigitsSprite() {
-        if (m_digitsTex || !m_ctx->device) return;
-        const std::string path =
-            std::string(NARAGAME_ASSETS_DIR) + "/digits.png";
-        m_digitsTex = LoadTexture(*m_ctx->device, path, TextureFilter::Linear);
-        if (!m_digitsTex) {
-            NARAGAME_WARN("brawl: digits sprite '%s' missing", path.c_str());
+    // Hand-painted ASCII bitmap font baked from assets/font.png. Six rows
+    // of glyphs (A-M, N-Z, 0-9, two punctuation rows, and \|~`). Each row
+    // is captured with its own baseline because the artist drew them on
+    // independent vertical positions; DrawBitmapText aligns each glyph
+    // (glyph_top = screenBaselineY + (atlasY - rowBaseline) * scale) so
+    // ascenders/descenders read correctly without per-row screen offsets.
+    void EnsureBitmapFont() {
+        if (m_bmpFontTex || !m_ctx->device) return;
+        const std::string path = std::string(NARAGAME_ASSETS_DIR) + "/font.png";
+        m_bmpFontTex = LoadTexture(*m_ctx->device, path, TextureFilter::Linear);
+        if (!m_bmpFontTex) {
+            NARAGAME_WARN("brawl: bitmap font '%s' missing", path.c_str());
             return;
         }
-        // Hand-laid bake output (x, w) per digit, all at y=4 with height 220.
-        static const float kXs[10] = {  2.0f, 77.0f,132.0f,198.0f,264.0f,
-                                       336.0f,404.0f,477.0f,542.0f,612.0f };
-        static const float kWs[10] = { 73.0f, 53.0f, 64.0f, 64.0f, 70.0f,
-                                       66.0f, 71.0f, 63.0f, 68.0f, 69.0f };
-        constexpr float kY = 2.0f;
-        constexpr float kH = 84.0f;
-        for (int i = 0; i < 10; ++i) {
-            m_digitFrames[i] = TextureRegion::FromPixels(
-                m_digitsTex.get(), kXs[i], kY, kWs[i], kH);
-            m_digitWidths[i] = kWs[i];
+        struct GlyphSeed { int ch; float x, y, w, h, baseline; };
+        static constexpr GlyphSeed kSeeds[] = {
+            // row 0 baseline 184 — A..M
+            { 'A',   36.0f,  61.0f, 102.0f, 124.0f, 184.0f },
+            { 'B',  155.0f,  59.0f,  93.0f, 125.0f, 184.0f },
+            { 'C',  267.0f,  60.0f,  90.0f, 124.0f, 184.0f },
+            { 'D',  377.0f,  59.0f,  94.0f, 125.0f, 184.0f },
+            { 'E',  495.0f,  60.0f,  80.0f, 122.0f, 184.0f },
+            { 'F',  604.0f,  60.0f,  80.0f, 122.0f, 184.0f },
+            { 'G',  706.0f,  59.0f,  97.0f, 125.0f, 184.0f },
+            { 'H',  826.0f,  62.0f,  91.0f, 120.0f, 184.0f },
+            { 'I',  956.0f,  63.0f,  46.0f, 119.0f, 184.0f },
+            { 'J', 1037.0f,  63.0f,  74.0f, 121.0f, 184.0f },
+            { 'K', 1144.0f,  60.0f,  97.0f, 125.0f, 184.0f },
+            { 'L', 1269.0f,  62.0f,  79.0f, 120.0f, 184.0f },
+            { 'M', 1371.0f,  63.0f, 116.0f, 120.0f, 184.0f },
+            // row 1 baseline 347 — N..Z (Q descender ignored)
+            { 'N',   46.0f, 225.0f,  92.0f, 122.0f, 347.0f },
+            { 'O',  154.0f, 224.0f,  97.0f, 124.0f, 347.0f },
+            { 'P',  271.0f, 223.0f,  86.0f, 122.0f, 347.0f },
+            { 'Q',  377.0f, 223.0f, 104.0f, 130.0f, 347.0f },
+            { 'R',  502.0f, 223.0f,  92.0f, 125.0f, 347.0f },
+            { 'S',  613.0f, 223.0f,  86.0f, 124.0f, 347.0f },
+            { 'T',  723.0f, 226.0f,  89.0f, 120.0f, 347.0f },
+            { 'U',  835.0f, 226.0f,  90.0f, 122.0f, 347.0f },
+            { 'V',  945.0f, 225.0f,  93.0f, 121.0f, 347.0f },
+            { 'W', 1050.0f, 226.0f, 115.0f, 120.0f, 347.0f },
+            { 'X', 1177.0f, 224.0f,  93.0f, 124.0f, 347.0f },
+            { 'Y', 1287.0f, 225.0f,  99.0f, 121.0f, 347.0f },
+            { 'Z', 1403.0f, 226.0f,  84.0f, 120.0f, 347.0f },
+            // row 2 baseline 513 — 0..9
+            { '0',  160.0f, 391.0f,  94.0f, 123.0f, 513.0f },
+            { '1',  289.0f, 392.0f,  70.0f, 120.0f, 513.0f },
+            { '2',  397.0f, 389.0f,  87.0f, 123.0f, 513.0f },
+            { '3',  524.0f, 389.0f,  87.0f, 124.0f, 513.0f },
+            { '4',  649.0f, 393.0f,  94.0f, 119.0f, 513.0f },
+            { '5',  779.0f, 391.0f,  86.0f, 122.0f, 513.0f },
+            { '6',  901.0f, 387.0f,  88.0f, 126.0f, 513.0f },
+            { '7', 1025.0f, 393.0f,  82.0f, 120.0f, 513.0f },
+            { '8', 1137.0f, 391.0f,  88.0f, 123.0f, 513.0f },
+            { '9', 1262.0f, 391.0f,  88.0f, 126.0f, 513.0f },
+            // row 3 baseline 687 — !@#$%^&*()-_=+
+            { '!',   54.0f, 559.0f,  46.0f, 124.0f, 687.0f },
+            { '@',  128.0f, 556.0f, 114.0f, 128.0f, 687.0f },
+            { '#',  264.0f, 563.0f,  97.0f, 114.0f, 687.0f },
+            { '$',  391.0f, 549.0f,  83.0f, 139.0f, 687.0f },
+            { '%',  500.0f, 561.0f, 105.0f, 119.0f, 687.0f },
+            { '^',  636.0f, 561.0f,  81.0f,  80.0f, 687.0f },
+            { '&',  744.0f, 559.0f,  97.0f, 123.0f, 687.0f },
+            { '*',  871.0f, 561.0f,  75.0f,  82.0f, 687.0f },
+            { '(',  976.0f, 552.0f,  63.0f, 135.0f, 687.0f },
+            { ')', 1069.0f, 552.0f,  62.0f, 136.0f, 687.0f },
+            { '-', 1166.0f, 597.0f,  56.0f,  43.0f, 687.0f },
+            { '_', 1246.0f, 637.0f,  65.0f,  42.0f, 687.0f },
+            { '=', 1334.0f, 584.0f,  63.0f,  70.0f, 687.0f },
+            { '+', 1424.0f, 576.0f,  72.0f,  85.0f, 687.0f },
+            // row 4 baseline 839 — []{};:'",.<>/?
+            { '[',   51.0f, 714.0f,  51.0f, 125.0f, 839.0f },
+            { ']',  162.0f, 714.0f,  52.0f, 125.0f, 839.0f },
+            { '{',  270.0f, 714.0f,  56.0f, 125.0f, 839.0f },
+            { '}',  386.0f, 714.0f,  56.0f, 125.0f, 839.0f },
+            { ';',  510.0f, 728.0f,  45.0f, 112.0f, 839.0f },
+            { ':',  625.0f, 728.0f,  44.0f,  98.0f, 839.0f },
+            { '\'', 745.0f, 715.0f,  43.0f,  67.0f, 839.0f },
+            { '"',  843.0f, 716.0f,  70.0f,  66.0f, 839.0f },
+            { ',',  945.0f, 783.0f,  44.0f,  66.0f, 839.0f },
+            { '.', 1032.0f, 783.0f,  43.0f,  52.0f, 839.0f },
+            { '<', 1116.0f, 733.0f,  67.0f,  91.0f, 839.0f },
+            { '>', 1217.0f, 733.0f,  67.0f,  92.0f, 839.0f },
+            { '/', 1320.0f, 717.0f,  66.0f, 118.0f, 839.0f },
+            { '?', 1411.0f, 717.0f,  79.0f, 121.0f, 839.0f },
+            // row 5 baseline 977 — \|~` only (currency / © / ® / ™ glyphs
+            // present in the atlas but not yet wired up — they need char codes
+            // outside ASCII or sentinel ids, which the lookup table doesn't yet
+            // support).
+            { '\\',  49.0f, 870.0f,  63.0f, 108.0f, 977.0f },
+            { '|',  162.0f, 869.0f,  39.0f, 110.0f, 977.0f },
+            { '~',  258.0f, 898.0f,  72.0f,  52.0f, 977.0f },
+            { '`',  374.0f, 868.0f,  45.0f,  50.0f, 977.0f },
+        };
+        // font.png is shipped at 50% of the seed coordinates (the source art
+        // was 1536x1024 but rendering at small sizes was a 5-6x downscale, so
+        // the atlas is pre-baked to 768x512 with HighQualityBicubic). Apply
+        // the same scale to every seed so the runtime sees the baked atlas.
+        constexpr float kAtlasScale = 0.5f;
+        for (const GlyphSeed& s : kSeeds) {
+            if (s.ch <= 0 || s.ch >= 128) continue;
+            BmpGlyphInfo& g = m_bmpGlyphs[s.ch];
+            g.frame        = TextureRegion::FromPixels(m_bmpFontTex.get(),
+                                                      s.x * kAtlasScale,
+                                                      s.y * kAtlasScale,
+                                                      s.w * kAtlasScale,
+                                                      s.h * kAtlasScale);
+            g.w            = s.w * kAtlasScale;
+            g.h            = s.h * kAtlasScale;
+            g.yTopFromBase = (s.y - s.baseline) * kAtlasScale;
         }
     }
 
-    // Render an integer using the digits atlas. The number is centred on
-    // (centreX, centreY); each glyph keeps its native aspect at the
-    // requested px height. kKerning < 1 packs the digits tighter than
-    // their native widths (cheap fake kerning — the purple outlines
-    // around the glyphs absorb the small overlap).
-    void DrawNumber(Renderer2D& r, int value, float centreX, float centreY,
-                    float pxHeight, const Color& tint) {
-        if (!m_digitsTex || value < 0) return;
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%d", value);
-        const int n = int(std::strlen(buf));
-        const float scale = pxHeight / 84.0f;
-        constexpr float kKerning = 0.78f;
-        // Pre-pass to compute total width with last glyph at full width.
-        float totalW = 0.0f;
-        for (int i = 0; i < n; ++i) {
-            const int d = buf[i] - '0';
-            if (d < 0 || d > 9) continue;
-            const float w = m_digitWidths[d] * scale;
-            totalW += (i == n - 1) ? w : w * kKerning;
+    // Render an ASCII string with the hand-painted bitmap font.
+    // (x, baselineY) anchors the *baseline* of capital glyphs (so 'A' bottom
+    // sits on baselineY); capPx is the desired on-screen height of a capital
+    // letter, used to derive a uniform scale across all glyphs. Unmapped or
+    // missing glyphs (e.g. lower-case in this font) are skipped silently.
+    void DrawBitmapText(Renderer2D& r, const char* text, float x,
+                        float baselineY, float capPx, const Color& color) {
+        if (!m_bmpFontTex || !text) return;
+        constexpr float kRefCapH = 62.0f;     // 'A' atlas height
+        const float scale    = capPx / kRefCapH;
+        const float spaceAdv = capPx * 0.40f;
+        constexpr float kKernPx = -8.0f;
+        float cursor = x;
+        for (const char* p = text; *p; ++p) {
+            const unsigned char c = (unsigned char)(*p);
+            if (c == ' ') { cursor += spaceAdv; continue; }
+            if (c >= 128) continue;
+            const BmpGlyphInfo& g = m_bmpGlyphs[c];
+            if (g.w <= 0.0f) continue;
+            const float gW   = g.w * scale;
+            const float gH   = g.h * scale;
+            const float topY = baselineY + g.yTopFromBase * scale;
+            r.DrawQuad({cursor, topY}, {gW, gH}, g.frame, color);
+            cursor += gW + kKernPx * scale;
         }
-        float x = centreX - totalW * 0.5f;
-        const float y = centreY - pxHeight * 0.5f;
-        for (int i = 0; i < n; ++i) {
-            const int d = buf[i] - '0';
-            if (d < 0 || d > 9) continue;
-            const float w = m_digitWidths[d] * scale;
-            r.DrawQuad({x, y}, {w, pxHeight}, m_digitFrames[d], tint);
-            x += w * kKerning;
+    }
+
+    // Centre a string horizontally; `topY` matches DrawCenteredText's y
+    // (i.e. top of capital glyphs, so callers can swap MSDF → bitmap
+    // without retuning vertical positions).
+    void DrawCenteredBitmapText(Renderer2D& r, const char* text, float topY,
+                                float capPx, const Color& color) {
+        const float sW = MeasureBitmapText(text, capPx);
+        DrawBitmapText(r, text, (kScreenW - sW) * 0.5f, topY + capPx,
+                       capPx, color);
+    }
+
+    // Total advance of an ASCII string at the given cap height. Used to
+    // right-align or centre text drawn with DrawBitmapText.
+    float MeasureBitmapText(const char* text, float capPx) const {
+        if (!text) return 0.0f;
+        constexpr float kRefCapH = 62.0f;
+        const float scale    = capPx / kRefCapH;
+        const float spaceAdv = capPx * 0.40f;
+        constexpr float kKernPx = -8.0f;
+        float total = 0.0f;
+        bool anyGlyph = false;
+        for (const char* p = text; *p; ++p) {
+            const unsigned char c = (unsigned char)(*p);
+            if (c == ' ') { total += spaceAdv; continue; }
+            if (c >= 128) continue;
+            const BmpGlyphInfo& g = m_bmpGlyphs[c];
+            if (g.w <= 0.0f) continue;
+            total += g.w * scale + kKernPx * scale;
+            anyGlyph = true;
         }
+        return anyGlyph ? total - kKernPx * scale : total;
     }
 
     void EnsureEnemySprite() {
@@ -706,59 +824,6 @@ public:
                     m_playerTex.get(), col * kFW, row * kFH, kFW, kFH);
             }
         }
-    }
-
-    // Bake the auto-aim cone sprite. Texture is square; the wedge points
-    // along +x in texture space, so DrawQuad's rotation parameter directly
-    // aligns with WorldDirToScreenAngle(m_moveDir) at render time. Per-pixel
-    // alpha encodes a radial gradient (bright apex → faded outer arc) with
-    // a soft angular smoothstep at the wedge edges to anti-alias the cone.
-    void EnsurePieTexture() {
-        if (m_pieTex || !m_ctx->device) return;
-        constexpr int kN = 256;
-        std::vector<uint8_t> px(size_t(kN) * kN * 4);
-        const float halfA = std::acos(kAutoAimConeCos);
-        const float edgeBand = 0.10f;   // rad; smoothstep half-width at edges
-        for (int y = 0; y < kN; ++y) {
-            for (int x = 0; x < kN; ++x) {
-                const float fx = (float(x) + 0.5f) / float(kN) * 2.0f - 1.0f;
-                const float fy = (float(y) + 0.5f) / float(kN) * 2.0f - 1.0f;
-                const float r2 = fx * fx + fy * fy;
-                float alpha = 0.0f;
-                if (r2 < 1.0f) {
-                    const float r       = std::sqrt(r2);
-                    const float theta   = std::atan2(fy, fx);
-                    const float absTh   = std::fabs(theta);
-                    if (absTh < halfA) {
-                        // Radial: 1.0 at apex → 0.30 at rim, then linear to 0
-                        // in the last ~5% so the outer edge is anti-aliased.
-                        float radial = 1.0f - r * 0.70f;
-                        if (r > 0.95f) radial *= (1.0f - r) / 0.05f;
-                        // Angular smoothstep over edgeBand at each side.
-                        const float edge   = halfA - absTh;
-                        const float t      = std::min(1.0f, edge / edgeBand);
-                        const float angle  = t * t * (3.0f - 2.0f * t);
-                        alpha = radial * angle;
-                    }
-                }
-                const uint8_t v = uint8_t(alpha * 255.0f + 0.5f);
-                const size_t idx = (size_t(y) * kN + x) * 4;
-                px[idx + 0] = 255;
-                px[idx + 1] = 255;
-                px[idx + 2] = 255;
-                px[idx + 3] = v;
-            }
-        }
-        TextureDesc td;
-        td.width  = kN;
-        td.height = kN;
-        td.format = TextureFormat::RGBA8;
-        td.filter = TextureFilter::Linear;
-        td.pixels = px.data();
-        m_pieTex = m_ctx->device->CreateTexture(td);
-        if (m_pieTex)
-            m_pieRegion = TextureRegion::FromPixels(
-                m_pieTex.get(), 0.0f, 0.0f, float(kN), float(kN));
     }
 
     // Load the coin sprite sheet once and cache TextureRegions for each of
@@ -891,14 +956,15 @@ public:
                 const int actual  = clamped - m_ctx->playerHp;   // never above max
                 m_ctx->playerHp   = clamped;
                 std::snprintf(p.text, sizeof(p.text), "+%d", actual);
+                p.useBitmap = true;
                 break;
             }
             case ItemKind::Multi:
                 if (m_playerShotCount < kMultiMaxShots) {
                     m_playerShotCount += 1;
-                    m_playerRateMult *= kMultiRatePenalty;
                 }
-                std::snprintf(p.text, sizeof(p.text), "MULTI x%d", m_playerShotCount);
+                EmitItemSparkle(it.pos, def.color);
+                showPopup = false;
                 break;
             case ItemKind::Defense:
                 m_playerDmgTaken = std::max(kItemDefenseFloor,
@@ -939,6 +1005,7 @@ public:
         p.pxSize = kPopupPx * 1.45f;
         p.life   = kPopupLife;
         p.bold   = true;
+        p.useBitmap = true;
         m_popups.push_back(p);
     }
 
@@ -1004,6 +1071,42 @@ public:
     // Allocate (or reallocate, if subdiv ever changes) the shadow texture
     // sized to the current arena. Called once on scene entry; UpdateShadows
     // only ever re-uploads pixels via UpdatePixels(), never recreates.
+    // Procedural green ring sprite worn under the player's feet. 128x128
+    // RGBA8, alpha smoothstepped at r ~ 0.85 (outer band) so the ring reads
+    // crisp at any draw size. White RGB so the runtime tint controls hue.
+    void EnsureIndicatorTexture() {
+        if (m_indicatorTex || !m_ctx->device) return;
+        constexpr int kN = 128;
+        std::vector<uint8_t> px(size_t(kN) * kN * 4);
+        for (int y = 0; y < kN; ++y) {
+            for (int x = 0; x < kN; ++x) {
+                const float fx = (float(x) + 0.5f) / float(kN) * 2.0f - 1.0f;
+                const float fy = (float(y) + 0.5f) / float(kN) * 2.0f - 1.0f;
+                const float rr = std::sqrt(fx * fx + fy * fy);
+                const float dist = std::fabs(rr - 0.82f);
+                float t = 1.0f - dist / 0.12f;
+                if (t < 0.0f) t = 0.0f;
+                if (t > 1.0f) t = 1.0f;
+                const float a = t * t * (3.0f - 2.0f * t);
+                const size_t idx = (size_t(y) * kN + x) * 4;
+                px[idx + 0] = 255;
+                px[idx + 1] = 255;
+                px[idx + 2] = 255;
+                px[idx + 3] = uint8_t(a * 230.0f + 0.5f);
+            }
+        }
+        TextureDesc td;
+        td.width  = kN;
+        td.height = kN;
+        td.format = TextureFormat::RGBA8;
+        td.filter = TextureFilter::Linear;
+        td.pixels = px.data();
+        m_indicatorTex = m_ctx->device->CreateTexture(td);
+        if (m_indicatorTex)
+            m_indicatorRegion = TextureRegion::FromPixels(
+                m_indicatorTex.get(), 0.0f, 0.0f, float(kN), float(kN));
+    }
+
     void EnsureShadowTexture() {
         m_shadowW = kArenaW * kShadowSubdiv;
         m_shadowH = kArenaH * kShadowSubdiv;
@@ -1326,6 +1429,10 @@ private:
     const Enemy* FindAutoTarget() const {
         const Enemy* best = nullptr;
         float bestD2 = kAutoAimRange * kAutoAimRange;
+        // While moving, drop the forward-cone restriction so the player can
+        // fire at enemies on their flanks or rear (running-and-gunning). The
+        // fire-rate penalty in UpdatePlayer balances the wider lock window.
+        const bool ignoreCone = m_playerMoving;
         for (const Enemy& e : m_enemies) {
             if (!e.alive) continue;
             const float dx = e.pos.x - m_player.x;
@@ -1333,8 +1440,10 @@ private:
             const float d2 = dx * dx + dy * dy;
             if (d2 > bestD2 || d2 < 1e-6f) continue;
             const float len = std::sqrt(d2);
-            const float dot = (dx * m_moveDir.x + dy * m_moveDir.y) / len;
-            if (dot < kAutoAimConeCos) continue;
+            if (!ignoreCone) {
+                const float dot = (dx * m_moveDir.x + dy * m_moveDir.y) / len;
+                if (dot < kAutoAimConeCos) continue;
+            }
             if (!HasLOS(m_player, e.pos)) continue;
             bestD2 = d2;
             best = &e;
@@ -1355,7 +1464,8 @@ private:
         if (Input::IsKeyDown(Key::W) || Input::IsKeyDown(Key::Up))    input.y -= 1.0f;
         if (Input::IsKeyDown(Key::S) || Input::IsKeyDown(Key::Down))  input.y += 1.0f;
         const float ilen = std::sqrt(input.x * input.x + input.y * input.y);
-        if (ilen > 0.001f) {
+        m_playerMoving = ilen > 0.001f;
+        if (m_playerMoving) {
             input = { input.x / ilen, input.y / ilen };
             // Latch the latest movement direction. The auto-aim cone keeps
             // pointing this way after the player stops, so a quick tap-stop-
@@ -1424,7 +1534,9 @@ private:
         // Shoot: no input required, the gun auto-fires whenever there's a
         // lock and the cooldown has elapsed.
         if (m_autoLocked && m_fireCd <= 0.0f) {
-            m_fireCd = kPlayerFireCd / m_playerRateMult;
+            // Moving halves the effective fire rate (cooldown doubles).
+            const float moveMult = m_playerMoving ? 2.0f : 1.0f;
+            m_fireCd = kPlayerFireCd * moveMult / m_playerRateMult;
             // Multi-shot: m_playerShotCount bullets fanned symmetrically
             // around m_facing with kMultiSpreadDeg between adjacent shots.
             // For N shots the angle offset of shot i is
@@ -1432,6 +1544,10 @@ private:
             const int   N        = std::max(1, m_playerShotCount);
             const float spreadRd = kMultiSpreadDeg * 3.14159265f / 180.0f;
             const float centre   = float(N - 1) * 0.5f;
+            // Split the per-fire damage budget across N pellets so a Multi
+            // pickup widens coverage without increasing total DPS.
+            const float perBulletDmg =
+                float(kPlayerBulletDmg) * m_playerDmgMult / float(N);
             for (int i = 0; i < N; ++i) {
                 const float a  = (float(i) - centre) * spreadRd;
                 const float ca = std::cos(a), sa = std::sin(a);
@@ -1444,6 +1560,7 @@ private:
                           m_player.y + dy * 0.55f };
                 b.vel = { dx * kPlayerBulletV,
                           dy * kPlayerBulletV };
+                b.dmg = perBulletDmg;
                 b.fromPlayer = true;
                 m_bullets.push_back(b);
             }
@@ -1475,7 +1592,7 @@ private:
                     if (dx * dx + dy * dy < rr * rr) {
                         std::uniform_real_distribution<float> roll(0.0f, 1.0f);
                         const bool isCrit = roll(m_rng) < kCritChance;
-                        const int baseDmg = int(kPlayerBulletDmg * m_playerDmgMult + 0.5f);
+                        const int baseDmg = std::max(1, int(b.dmg + 0.5f));
                         const int  dmg = isCrit ? baseDmg * kCritMult : baseDmg;
                         e.hp -= dmg;
                         e.hurtFlash = kEnemyHurtFlash;
@@ -2001,6 +2118,18 @@ private:
         const Vec2 feet = W2S(m_player, m_camOrigin);
         const float L = SampleShadowAt(m_player);
         DrawShadow(r, {feet.x, feet.y + 6.0f}, 18.0f);
+        // Green friend-indicator ring under the player's feet. Y-compressed
+        // by ~0.55 to mimic the world's tilt; modulated by SampleShadowAt
+        // so the ring dims in shadow alongside the rest of the body.
+        if (m_indicatorTex) {
+            constexpr float kRingHalfW = 26.0f;
+            constexpr float kRingHalfH = 14.0f;
+            const float gy = feet.y + 4.0f;
+            r.DrawQuad({feet.x - kRingHalfW, gy - kRingHalfH},
+                       {kRingHalfW * 2.0f, kRingHalfH * 2.0f},
+                       m_indicatorRegion,
+                       Color(0.30f * L, 1.00f * L, 0.35f * L, 0.90f));
+        }
 
         if (!m_playerTex) {
             // Fallback colored quad if the atlas didn't load.
@@ -2087,10 +2216,19 @@ private:
             DrawRoundRect(r, {barX, barY}, {fillW, kBarH}, kBarRadius,
                           barTint(fill));
         }
-        // Sprite-glyph HP number — centred horizontally on the bar but
-        // pulled up so the top of the digit pokes above the frame.
-        DrawNumber(r, hp, feet.x, barY, 16.0f,
-                   barTint(Color(1.0f, 1.0f, 1.0f, 1.0f)));
+        // Bitmap-font HP number — centred horizontally on the bar, baseline
+        // sat at barY + cap/2 so the glyph straddles the bar frame symmetrically.
+        {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%d", std::max(0, hp));
+            constexpr float kHpCap = 14.0f;
+            const float sW = MeasureBitmapText(buf, kHpCap);
+            DrawBitmapText(r, buf,
+                           feet.x - sW * 0.5f,
+                           barY + kHpCap * 0.5f,
+                           kHpCap,
+                           barTint(Color(1.0f, 1.0f, 1.0f, 1.0f)));
+        }
     }
 
     void DrawEnemy(Renderer2D& r, const Enemy& e) {
@@ -2159,21 +2297,6 @@ private:
         // frozen at death so the reticle would otherwise hang in the dark
         // until the player restarts.
         if (m_dead) return;
-        const Vec2 pScreen = W2S(m_player, m_camOrigin);
-
-        // Single textured pie. The sprite's wedge centre points along +x in
-        // texture space; rotating by the screen-space angle of m_moveDir
-        // aligns it with where bullets actually travel under Y compression.
-        // The quad's centre = the wedge apex (=player), so the visible cone
-        // reaches kRadius pixels from the player.
-        const float ang = WorldDirToScreenAngle(m_moveDir);
-        constexpr float kRadius = 200.0f;
-        const Vec2 origin{ pScreen.x, pScreen.y - 14.0f };  // raise off feet
-        if (m_pieTex) {
-            r.DrawQuad(origin, {kRadius * 2.0f, kRadius * 2.0f}, ang,
-                       m_pieRegion,
-                       Color(1.0f, 0.95f, 0.30f, 0.05f));
-        }
 
         // Reticle on the lock target. Two crossed thin quads + four short
         // corner ticks. Pulse the alpha so the lock reads as "active".
@@ -2212,10 +2335,32 @@ private:
             if (!p.alive) continue;
             const Vec2 sp = W2S(p.pos, m_camOrigin);
             const float t = 1.0f - (p.age / p.life);
+            const Color body(p.color.r, p.color.g, p.color.b, t);
+
+            if (p.useBitmap) {
+                const float sW    = MeasureBitmapText(p.text, p.pxSize);
+                const float bx    = sp.x - sW * 0.5f;
+                const float baseY = sp.y - 32.0f + p.pxSize;
+                DrawBitmapText(r, p.text, bx + 2.0f, baseY + 2.0f, p.pxSize,
+                               Color(0.0f, 0.0f, 0.0f, t * 0.65f));
+                if (p.bold) {
+                    constexpr float kOff = 1.5f;
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            if (dx == 0 && dy == 0) continue;
+                            DrawBitmapText(r, p.text,
+                                           bx + dx * kOff,
+                                           baseY + dy * kOff,
+                                           p.pxSize, body);
+                        }
+                }
+                DrawBitmapText(r, p.text, bx, baseY, p.pxSize, body);
+                continue;
+            }
+
             const Vec2 ts = m_ctx->font->Measure(p.text, p.pxSize);
             const float bx = sp.x - ts.x * 0.5f;
             const float by = sp.y - 32.0f;
-            const Color body(p.color.r, p.color.g, p.color.b, t);
             // Soft shadow for legibility on either floor or sparkle.
             r.DrawText(*m_ctx->font, p.text,
                        {bx + 2.0f, by + 2.0f},
@@ -2399,7 +2544,7 @@ private:
         "Resume", "Surrender", "Exit",
     };
     static constexpr int   kPauseMenuCount = 3;
-    static constexpr float kPauseMenuTopY  = 280.0f;   // y of first item centre
+    static constexpr float kPauseMenuTopY  = 350.0f;   // y of first item centre
     static constexpr float kPauseMenuStep  = 70.0f;    // vertical pitch
     static constexpr float kPauseHitHalf   = 30.0f;    // mouse hit ½-height
 
@@ -2444,9 +2589,8 @@ private:
     void DrawPauseOverlay(Renderer2D& r) {
         r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
                    Color(0.0f, 0.0f, 0.0f, 0.45f));
-        DrawCenteredText(r, *m_ctx->font, "PAUSED",
-                         140.0f, 76.0f,
-                         Color(1.0f, 1.0f, 1.0f, 1.0f));
+        DrawCenteredBitmapText(r, "PAUSED", 210.0f, 76.0f,
+                               Color(1.0f, 1.0f, 1.0f, 1.0f));
         for (int i = 0; i < kPauseMenuCount; ++i) {
             const float yC = kPauseMenuTopY + i * kPauseMenuStep;
             const bool sel = (i == m_pauseMenuIdx);
@@ -2473,9 +2617,8 @@ private:
     void DrawDeathOverlay(Renderer2D& r) {
         r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
                    Color(0.0f, 0.0f, 0.0f, 0.55f));
-        DrawCenteredText(r, *m_ctx->font, "GAME OVER",
-                         kScreenH * 0.30f, 96.0f,
-                         Color(0.95f, 0.30f, 0.30f, 1.0f));
+        DrawCenteredBitmapText(r, "GAME OVER", kScreenH * 0.30f, 96.0f,
+                               Color(0.95f, 0.30f, 0.30f, 1.0f));
         char buf[64];
         std::snprintf(buf, sizeof(buf), "WAVE %d   SCORE %d",
                       m_ctx->wave, m_ctx->score);
@@ -2494,16 +2637,22 @@ private:
 
         char buf[64];
         std::snprintf(buf, sizeof(buf), "WAVE %d", std::max(1, m_ctx->wave));
-        const Vec2 wSize = m_ctx->font->Measure(buf, 26.0f);
-        r.DrawText(*m_ctx->font, buf,
-                   {(kScreenW - wSize.x) * 0.5f, 12.0f},
-                   Color(1.0f, 0.95f, 0.40f, 1.0f), 26.0f);
+        {
+            constexpr float kWaveCap = 24.0f;
+            DrawCenteredBitmapText(r, buf, 12.0f, kWaveCap,
+                                   Color(1.0f, 0.95f, 0.40f, 1.0f));
+        }
 
         std::snprintf(buf, sizeof(buf), "SCORE %d", m_ctx->score);
-        const Vec2 sSize = m_ctx->font->Measure(buf, 24.0f);
-        r.DrawText(*m_ctx->font, buf,
-                   {kScreenW - sSize.x - 20.0f, 14.0f},
-                   Color(1.0f, 1.0f, 1.0f, 1.0f), 24.0f);
+        {
+            constexpr float kScoreCap = 22.0f;
+            const float sW = MeasureBitmapText(buf, kScoreCap);
+            DrawBitmapText(r, buf,
+                           kScreenW - sW - 20.0f,
+                           14.0f + kScoreCap,
+                           kScoreCap,
+                           Color(1.0f, 1.0f, 1.0f, 1.0f));
+        }
 
         // Shadow toggle is debug-only (F8). Only show a HUD pill when
         // shadows have been turned off, so the player isn't tempted to use
@@ -2516,16 +2665,30 @@ private:
                        Color(0.65f, 0.65f, 0.65f, 1.0f), 20.0f);
         }
 
-        // Wave preamble — center prompt when between waves.
+        // Wave preamble — yellow banner + big red 5..1 countdown centred on
+        // the screen during the kBetweenWaves window.
         if (!m_waveActive && m_enemies.empty()) {
-            const float t = m_waveTimer / kBetweenWaves;
-            const float fade = Clamp01(1.0f - std::fabs(t - 0.5f) * 2.0f);
             char prompt[64];
             std::snprintf(prompt, sizeof(prompt), "WAVE %d INCOMING",
                           std::max(1, m_ctx->wave + 1));
-            DrawCenteredText(r, *m_ctx->font, prompt,
-                             kScreenH * 0.40f, 48.0f,
-                             Color(1.0f, 0.95f, 0.30f, 0.30f + 0.70f * fade));
+            DrawCenteredBitmapText(r, prompt, kScreenH * 0.22f, 56.0f,
+                                   Color(1.0f, 0.95f, 0.30f, 1.0f));
+
+            const float remain = kBetweenWaves - m_waveTimer;
+            const int seconds  = std::max(1,
+                                          std::min(int(kBetweenWaves),
+                                                   int(std::ceil(remain))));
+            char num[8];
+            std::snprintf(num, sizeof(num), "%d", seconds);
+            // Per-second pulse: digit starts ~25% larger at the top of each
+            // second and shrinks back to base by the next tick.
+            const float tFrac = remain - std::floor(remain);
+            const float pulse = 1.0f + 0.25f * tFrac;
+            constexpr float kBaseCap = 220.0f;
+            const float capPx = kBaseCap * pulse;
+            const float topY  = (kScreenH - capPx) * 0.5f;
+            DrawCenteredBitmapText(r, num, topY, capPx,
+                                   Color(1.0f, 0.25f, 0.25f, 1.0f));
         }
     }
 
@@ -2555,6 +2718,7 @@ private:
     bool    m_autoLocked = false;
     Vec2    m_autoTargetPos{0.0f, 0.0f};
     float   m_autoPulse = 0.0f;     // reticle blink
+    bool    m_playerMoving = false; // set each frame in UpdatePlayer; flips off the auto-aim cone restriction and doubles fire cooldown when true
     // Ray-cast shadow texture (R = light multiplier in [0, 1]). Rebuilt by
     // UpdateShadows() any time the player moves a non-trivial amount or the
     // toggle flips on. Drives Renderer2D::SetFog during the world pass.
@@ -2567,11 +2731,9 @@ private:
     // axis-aligned rotated rectangles produced.
     std::unique_ptr<RHITexture> m_starTex;
     TextureRegion               m_starRegion;
-    // Pre-baked pie/wedge sprite for the auto-aim cone overlay. Built once
-    // from kAutoAimConeCos so the bevel and radial fade are smooth and a
-    // single textured quad replaces the 24-ray fan that showed banding.
-    std::unique_ptr<RHITexture> m_pieTex;
-    TextureRegion               m_pieRegion;
+    // Green ring drawn under the player's feet as a friend marker.
+    std::unique_ptr<RHITexture> m_indicatorTex;
+    TextureRegion               m_indicatorRegion;
     // Coin sprite sheet (5×2 frames). Loaded once per scene from
     // assets/coin.png; m_coinFrames[i] points at frame i in cell-row order.
     std::unique_ptr<RHITexture> m_coinTex;
@@ -2587,12 +2749,18 @@ private:
     // Rows in order: N, E, S. NE uses N; SE uses S; W/SW/NW are flipped.
     std::unique_ptr<RHITexture> m_enemyTex;
     TextureRegion               m_enemyFrames[3][4];
-    // Number-glyph atlas: 10 digits (0..9) packed proportionally with
-    // bottom-aligned baseline. Source heights ~220 px, native widths per
-    // digit cached so DrawNumber can lay them out without per-cell math.
-    std::unique_ptr<RHITexture> m_digitsTex;
-    TextureRegion               m_digitFrames[10];
-    float                       m_digitWidths[10] = {};
+    // Hand-painted ASCII bitmap font. Indexed by ASCII code; unmapped slots
+    // have w == 0 and are skipped at draw time. yTopFromBase is the glyph's
+    // top relative to its row baseline, scaled at draw time so capitals,
+    // descenders, and floating glyphs (^, *, -) all land correctly.
+    struct BmpGlyphInfo {
+        TextureRegion frame;
+        float w = 0.0f;
+        float h = 0.0f;
+        float yTopFromBase = 0.0f;
+    };
+    std::unique_ptr<RHITexture> m_bmpFontTex;
+    BmpGlyphInfo                m_bmpGlyphs[128];
     int     m_shadowW = 0, m_shadowH = 0;
     Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
     float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
