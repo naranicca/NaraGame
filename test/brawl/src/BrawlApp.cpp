@@ -9,7 +9,7 @@
 // Controls:
 //   Title:     Enter start, Esc quit
 //   Arena:     WASD move, mouse aim, Left-click shoot (hold to auto-fire),
-//              R rebuild arena, Esc back to title
+//              Esc back to title
 //   Game over: Enter restart, Esc title
 
 #include <NaraGame/assets/MSDFFontLoader.h>
@@ -510,6 +510,168 @@ void DrawScreenLine(Renderer2D& r, Vec2 a, Vec2 b, float thickness, const Color&
     r.DrawQuad(mid, {len, thickness}, std::atan2(dy, dx), c);
 }
 
+// ---------------------------------------------------------------------------
+// Hand-painted ASCII bitmap font shared by every scene in this game. The
+// glyph table + Load/Draw/Measure helpers used to live inside ArenaScene as
+// members; pulled to file scope so TitleScene can use the same font without
+// duplicating the seed table.
+// ---------------------------------------------------------------------------
+struct BmpGlyphInfo {
+    TextureRegion frame;
+    float w = 0.0f;
+    float h = 0.0f;
+    float yTopFromBase = 0.0f;   // glyph top relative to its row baseline
+};
+
+struct BmpFont {
+    std::unique_ptr<RHITexture> tex;
+    BmpGlyphInfo glyphs[128]{};
+};
+
+void LoadBmpFont(RHIDevice& device, const std::string& path, BmpFont& font) {
+    font.tex = LoadTexture(device, path, TextureFilter::Linear);
+    if (!font.tex) return;
+    struct GlyphSeed { int ch; float x, y, w, h, baseline; };
+    static constexpr GlyphSeed kSeeds[] = {
+        // row 0 baseline 184 — A..M
+        { 'A',   36.0f,  61.0f, 102.0f, 124.0f, 184.0f },
+        { 'B',  155.0f,  59.0f,  93.0f, 125.0f, 184.0f },
+        { 'C',  267.0f,  60.0f,  90.0f, 124.0f, 184.0f },
+        { 'D',  377.0f,  59.0f,  94.0f, 125.0f, 184.0f },
+        { 'E',  495.0f,  60.0f,  80.0f, 122.0f, 184.0f },
+        { 'F',  604.0f,  60.0f,  80.0f, 122.0f, 184.0f },
+        { 'G',  706.0f,  59.0f,  97.0f, 125.0f, 184.0f },
+        { 'H',  826.0f,  62.0f,  91.0f, 120.0f, 184.0f },
+        { 'I',  956.0f,  63.0f,  46.0f, 119.0f, 184.0f },
+        { 'J', 1037.0f,  63.0f,  74.0f, 121.0f, 184.0f },
+        { 'K', 1144.0f,  60.0f,  97.0f, 125.0f, 184.0f },
+        { 'L', 1269.0f,  62.0f,  79.0f, 120.0f, 184.0f },
+        { 'M', 1371.0f,  63.0f, 116.0f, 120.0f, 184.0f },
+        // row 1 baseline 347 — N..Z
+        { 'N',   46.0f, 225.0f,  92.0f, 122.0f, 347.0f },
+        { 'O',  154.0f, 224.0f,  97.0f, 124.0f, 347.0f },
+        { 'P',  271.0f, 223.0f,  86.0f, 122.0f, 347.0f },
+        { 'Q',  377.0f, 223.0f, 104.0f, 130.0f, 347.0f },
+        { 'R',  502.0f, 223.0f,  92.0f, 125.0f, 347.0f },
+        { 'S',  613.0f, 223.0f,  86.0f, 124.0f, 347.0f },
+        { 'T',  723.0f, 226.0f,  89.0f, 120.0f, 347.0f },
+        { 'U',  835.0f, 226.0f,  90.0f, 122.0f, 347.0f },
+        { 'V',  945.0f, 225.0f,  93.0f, 121.0f, 347.0f },
+        { 'W', 1050.0f, 226.0f, 115.0f, 120.0f, 347.0f },
+        { 'X', 1177.0f, 224.0f,  93.0f, 124.0f, 347.0f },
+        { 'Y', 1287.0f, 225.0f,  99.0f, 121.0f, 347.0f },
+        { 'Z', 1403.0f, 226.0f,  84.0f, 120.0f, 347.0f },
+        // row 2 baseline 513 — 0..9
+        { '0',  160.0f, 391.0f,  94.0f, 123.0f, 513.0f },
+        { '1',  289.0f, 392.0f,  70.0f, 120.0f, 513.0f },
+        { '2',  397.0f, 389.0f,  87.0f, 123.0f, 513.0f },
+        { '3',  524.0f, 389.0f,  87.0f, 124.0f, 513.0f },
+        { '4',  649.0f, 393.0f,  94.0f, 119.0f, 513.0f },
+        { '5',  779.0f, 391.0f,  86.0f, 122.0f, 513.0f },
+        { '6',  901.0f, 387.0f,  88.0f, 126.0f, 513.0f },
+        { '7', 1025.0f, 393.0f,  82.0f, 120.0f, 513.0f },
+        { '8', 1137.0f, 391.0f,  88.0f, 123.0f, 513.0f },
+        { '9', 1262.0f, 391.0f,  88.0f, 126.0f, 513.0f },
+        // row 3 baseline 687 — !@#$%^&*()-_=+
+        { '!',   54.0f, 559.0f,  46.0f, 124.0f, 687.0f },
+        { '@',  128.0f, 556.0f, 114.0f, 128.0f, 687.0f },
+        { '#',  264.0f, 563.0f,  97.0f, 114.0f, 687.0f },
+        { '$',  391.0f, 549.0f,  83.0f, 139.0f, 687.0f },
+        { '%',  500.0f, 561.0f, 105.0f, 119.0f, 687.0f },
+        { '^',  636.0f, 561.0f,  81.0f,  80.0f, 687.0f },
+        { '&',  744.0f, 559.0f,  97.0f, 123.0f, 687.0f },
+        { '*',  871.0f, 561.0f,  75.0f,  82.0f, 687.0f },
+        { '(',  976.0f, 552.0f,  63.0f, 135.0f, 687.0f },
+        { ')', 1069.0f, 552.0f,  62.0f, 136.0f, 687.0f },
+        { '-', 1166.0f, 597.0f,  56.0f,  43.0f, 687.0f },
+        { '_', 1246.0f, 637.0f,  65.0f,  42.0f, 687.0f },
+        { '=', 1334.0f, 584.0f,  63.0f,  70.0f, 687.0f },
+        { '+', 1424.0f, 576.0f,  72.0f,  85.0f, 687.0f },
+        // row 4 baseline 839 — []{};:'",.<>/?
+        { '[',   51.0f, 714.0f,  51.0f, 125.0f, 839.0f },
+        { ']',  162.0f, 714.0f,  52.0f, 125.0f, 839.0f },
+        { '{',  270.0f, 714.0f,  56.0f, 125.0f, 839.0f },
+        { '}',  386.0f, 714.0f,  56.0f, 125.0f, 839.0f },
+        { ';',  510.0f, 728.0f,  45.0f, 112.0f, 839.0f },
+        { ':',  625.0f, 728.0f,  44.0f,  98.0f, 839.0f },
+        { '\'', 745.0f, 715.0f,  43.0f,  67.0f, 839.0f },
+        { '"',  843.0f, 716.0f,  70.0f,  66.0f, 839.0f },
+        { ',',  945.0f, 783.0f,  44.0f,  66.0f, 839.0f },
+        { '.', 1032.0f, 783.0f,  43.0f,  52.0f, 839.0f },
+        { '<', 1116.0f, 733.0f,  67.0f,  91.0f, 839.0f },
+        { '>', 1217.0f, 733.0f,  67.0f,  92.0f, 839.0f },
+        { '/', 1320.0f, 717.0f,  66.0f, 118.0f, 839.0f },
+        { '?', 1411.0f, 717.0f,  79.0f, 121.0f, 839.0f },
+        // row 5 baseline 977 — \|~`
+        { '\\',  49.0f, 870.0f,  63.0f, 108.0f, 977.0f },
+        { '|',  162.0f, 869.0f,  39.0f, 110.0f, 977.0f },
+        { '~',  258.0f, 898.0f,  72.0f,  52.0f, 977.0f },
+        { '`',  374.0f, 868.0f,  45.0f,  50.0f, 977.0f },
+    };
+    constexpr float kAtlasScale = 0.5f;
+    for (const GlyphSeed& s : kSeeds) {
+        if (s.ch <= 0 || s.ch >= 128) continue;
+        BmpGlyphInfo& g = font.glyphs[s.ch];
+        g.frame        = TextureRegion::FromPixels(font.tex.get(),
+                                                  s.x * kAtlasScale,
+                                                  s.y * kAtlasScale,
+                                                  s.w * kAtlasScale,
+                                                  s.h * kAtlasScale);
+        g.w            = s.w * kAtlasScale;
+        g.h            = s.h * kAtlasScale;
+        g.yTopFromBase = (s.y - s.baseline) * kAtlasScale;
+    }
+}
+
+void DrawBmpText(Renderer2D& r, const BmpFont& font, const char* text,
+                 float x, float baselineY, float capPx, const Color& color) {
+    if (!font.tex || !text) return;
+    constexpr float kRefCapH = 62.0f;
+    const float scale    = capPx / kRefCapH;
+    const float spaceAdv = capPx * 0.40f;
+    constexpr float kKernPx = -8.0f;
+    float cursor = x;
+    for (const char* p = text; *p; ++p) {
+        const unsigned char c = (unsigned char)(*p);
+        if (c == ' ') { cursor += spaceAdv; continue; }
+        if (c >= 128) continue;
+        const BmpGlyphInfo& g = font.glyphs[c];
+        if (g.w <= 0.0f) continue;
+        const float gW   = g.w * scale;
+        const float gH   = g.h * scale;
+        const float topY = baselineY + g.yTopFromBase * scale;
+        r.DrawQuad({cursor, topY}, {gW, gH}, g.frame, color);
+        cursor += gW + kKernPx * scale;
+    }
+}
+
+float MeasureBmpText(const BmpFont& font, const char* text, float capPx) {
+    if (!text) return 0.0f;
+    constexpr float kRefCapH = 62.0f;
+    const float scale    = capPx / kRefCapH;
+    const float spaceAdv = capPx * 0.40f;
+    constexpr float kKernPx = -8.0f;
+    float total = 0.0f;
+    bool anyGlyph = false;
+    for (const char* p = text; *p; ++p) {
+        const unsigned char c = (unsigned char)(*p);
+        if (c == ' ') { total += spaceAdv; continue; }
+        if (c >= 128) continue;
+        const BmpGlyphInfo& g = font.glyphs[c];
+        if (g.w <= 0.0f) continue;
+        total += g.w * scale + kKernPx * scale;
+        anyGlyph = true;
+    }
+    return anyGlyph ? total - kKernPx * scale : total;
+}
+
+void DrawCenteredBmpText(Renderer2D& r, const BmpFont& font, const char* text,
+                         float topY, float capPx, const Color& color) {
+    const float sW = MeasureBmpText(font, text, capPx);
+    DrawBmpText(r, font, text, (kScreenW - sW) * 0.5f, topY + capPx,
+                capPx, color);
+}
+
 // Soft elliptical-looking shadow under each entity. Just two stacked rects.
 void DrawShadow(Renderer2D& r, Vec2 screenFeet, float radiusPx) {
     r.DrawQuad({screenFeet.x - radiusPx, screenFeet.y - radiusPx * 0.30f},
@@ -525,7 +687,21 @@ void DrawShadow(Renderer2D& r, Vec2 screenFeet, float radiusPx) {
 class TitleScene : public Scene {
 public:
     explicit TitleScene(GameContext* ctx) : m_ctx(ctx) {}
-    void OnEnter() override { m_pulse = 0.0f; }
+    void OnEnter() override {
+        m_pulse = 0.0f;
+        if (!m_titleTex && m_ctx->device) {
+            const std::string path =
+                std::string(NARAGAME_ASSETS_DIR) + "/title.png";
+            m_titleTex = LoadTexture(*m_ctx->device, path, TextureFilter::Linear);
+            if (!m_titleTex)
+                NARAGAME_WARN("brawl: title image '%s' missing", path.c_str());
+        }
+        if (!m_bmpFont.tex && m_ctx->device) {
+            LoadBmpFont(*m_ctx->device,
+                        std::string(NARAGAME_ASSETS_DIR) + "/font.png",
+                        m_bmpFont);
+        }
+    }
     void OnUpdate(float dt) override {
         m_pulse += dt;
         if (Input::IsKeyPressed(Key::Enter) || Input::IsKeyPressed(Key::Space)) {
@@ -543,26 +719,30 @@ public:
     void OnRender() override {
         Renderer2D& r = *m_ctx->renderer;
         r.Begin(Renderer2D::ScreenCamera(kScreenW, kScreenH));
-        // Sky gradient — three horizontal bands.
-        r.DrawQuad({0, 0},                 {kScreenW, kScreenH * 0.50f}, Color(0.12f, 0.14f, 0.22f, 1.0f));
-        r.DrawQuad({0, kScreenH * 0.50f},  {kScreenW, kScreenH * 0.30f}, Color(0.18f, 0.32f, 0.28f, 1.0f));
-        r.DrawQuad({0, kScreenH * 0.80f},  {kScreenW, kScreenH * 0.20f}, Color(0.10f, 0.20f, 0.18f, 1.0f));
-
-        DrawCenteredText(r, *m_ctx->font, "BRAWL",   200.0f, 132.0f, Color(1.0f, 0.95f, 0.25f, 1.0f));
-        DrawCenteredText(r, *m_ctx->font, "SHOOTER", 320.0f,  56.0f, Color(0.95f, 0.95f, 0.95f, 1.0f));
+        if (m_titleTex) {
+            r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                       m_titleTex.get(), Color::White());
+        } else {
+            // Fallback if the title art failed to load.
+            r.DrawQuad({0, 0}, {kScreenW, kScreenH * 0.50f},
+                       Color(0.12f, 0.14f, 0.22f, 1.0f));
+            r.DrawQuad({0, kScreenH * 0.50f}, {kScreenW, kScreenH * 0.30f},
+                       Color(0.18f, 0.32f, 0.28f, 1.0f));
+            r.DrawQuad({0, kScreenH * 0.80f}, {kScreenW, kScreenH * 0.20f},
+                       Color(0.10f, 0.20f, 0.18f, 1.0f));
+        }
 
         const float blink = 0.6f + 0.4f * std::sin(m_pulse * 3.0f);
-        DrawCenteredText(r, *m_ctx->font, "Press Enter to start",
-                         480.0f, 32.0f, Color(1.0f, 1.0f, 1.0f, blink));
-        DrawCenteredText(r, *m_ctx->font, "WASD move   Auto-fire on lock",
-                         540.0f, 22.0f, Color(0.75f, 0.85f, 0.85f, 1.0f));
-        DrawCenteredText(r, *m_ctx->font, "R rebuild   Esc back",
-                         580.0f, 22.0f, Color(0.65f, 0.75f, 0.75f, 1.0f));
+        DrawCenteredBmpText(r, m_bmpFont, "PRESS ENTER TO START",
+                            580.0f, 36.0f,
+                            Color(1.0f, 1.0f, 1.0f, blink));
         r.End();
     }
 private:
     GameContext* m_ctx = nullptr;
     float m_pulse = 0.0f;
+    std::unique_ptr<RHITexture> m_titleTex;
+    BmpFont m_bmpFont;
 };
 
 // ---------------------------------------------------------------------------
@@ -613,20 +793,29 @@ public:
         m_animTime = 0.0f;
     }
 
-    // Hand-painted ASCII bitmap font baked from assets/font.png. Six rows
-    // of glyphs (A-M, N-Z, 0-9, two punctuation rows, and \|~`). Each row
-    // is captured with its own baseline because the artist drew them on
-    // independent vertical positions; DrawBitmapText aligns each glyph
-    // (glyph_top = screenBaselineY + (atlasY - rowBaseline) * scale) so
-    // ascenders/descenders read correctly without per-row screen offsets.
     void EnsureBitmapFont() {
-        if (m_bmpFontTex || !m_ctx->device) return;
+        if (m_bmpFont.tex || !m_ctx->device) return;
         const std::string path = std::string(NARAGAME_ASSETS_DIR) + "/font.png";
-        m_bmpFontTex = LoadTexture(*m_ctx->device, path, TextureFilter::Linear);
-        if (!m_bmpFontTex) {
+        LoadBmpFont(*m_ctx->device, path, m_bmpFont);
+        if (!m_bmpFont.tex)
             NARAGAME_WARN("brawl: bitmap font '%s' missing", path.c_str());
-            return;
-        }
+    }
+
+    void DrawBitmapText(Renderer2D& r, const char* text, float x,
+                        float baselineY, float capPx, const Color& color) {
+        DrawBmpText(r, m_bmpFont, text, x, baselineY, capPx, color);
+    }
+
+    float MeasureBitmapText(const char* text, float capPx) const {
+        return MeasureBmpText(m_bmpFont, text, capPx);
+    }
+
+    void DrawCenteredBitmapText(Renderer2D& r, const char* text, float topY,
+                                float capPx, const Color& color) {
+        DrawCenteredBmpText(r, m_bmpFont, text, topY, capPx, color);
+    }
+
+#if 0   // old in-class implementation, retained as a graveyard reference.
         struct GlyphSeed { int ch; float x, y, w, h, baseline; };
         static constexpr GlyphSeed kSeeds[] = {
             // row 0 baseline 184 — A..M
@@ -784,6 +973,7 @@ public:
         }
         return anyGlyph ? total - kKernPx * scale : total;
     }
+#endif
 
     void EnsureEnemySprite() {
         if (m_enemyTex || !m_ctx->device) return;
@@ -1193,16 +1383,6 @@ public:
             return;
         }
 
-        // Gameplay-only inputs.
-        if (Input::IsKeyPressed(Key::R)) {
-            Rebuild();
-            m_bullets.clear();
-            m_enemies.clear();
-            m_waveTimer  = 0.0f;
-            m_waveActive = false;
-            m_ctx->wave  = 0;
-            return;
-        }
         // Debug-only: F8 toggles the shadow pass. Not advertised in the
         // title screen instructions — leaving it on is the intended look,
         // but having a hidden disable keeps the rendering path testable
@@ -2684,7 +2864,7 @@ private:
             // second and shrinks back to base by the next tick.
             const float tFrac = remain - std::floor(remain);
             const float pulse = 1.0f + 0.25f * tFrac;
-            constexpr float kBaseCap = 220.0f;
+            constexpr float kBaseCap = 176.0f;
             const float capPx = kBaseCap * pulse;
             const float topY  = (kScreenH - capPx) * 0.5f;
             DrawCenteredBitmapText(r, num, topY, capPx,
@@ -2749,18 +2929,10 @@ private:
     // Rows in order: N, E, S. NE uses N; SE uses S; W/SW/NW are flipped.
     std::unique_ptr<RHITexture> m_enemyTex;
     TextureRegion               m_enemyFrames[3][4];
-    // Hand-painted ASCII bitmap font. Indexed by ASCII code; unmapped slots
-    // have w == 0 and are skipped at draw time. yTopFromBase is the glyph's
-    // top relative to its row baseline, scaled at draw time so capitals,
-    // descenders, and floating glyphs (^, *, -) all land correctly.
-    struct BmpGlyphInfo {
-        TextureRegion frame;
-        float w = 0.0f;
-        float h = 0.0f;
-        float yTopFromBase = 0.0f;
-    };
-    std::unique_ptr<RHITexture> m_bmpFontTex;
-    BmpGlyphInfo                m_bmpGlyphs[128];
+    // Shared bitmap font instance. Loaded via LoadBmpFont; rendered through
+    // the file-scope DrawBmpText / MeasureBmpText / DrawCenteredBmpText
+    // helpers (or their member-wrapper shorthand).
+    BmpFont m_bmpFont;
     int     m_shadowW = 0, m_shadowH = 0;
     Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
     float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
