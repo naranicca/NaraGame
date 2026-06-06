@@ -89,6 +89,8 @@ constexpr float kEnemySpeed         = 2.6f;
 constexpr int   kEnemyHpMax         = 50;
 constexpr int   kEnemyHpPerWave     = 5;    // added on top of base HP each wave
 constexpr float kEnemyFireCd        = 1.3f;
+constexpr float kEnemyFireWaveScale = 0.95f;  // each wave shrinks cd by 5%
+constexpr float kEnemyFireMinCd     = 0.2f;   // floor: 5 shots/s per enemy
 constexpr float kEnemyShootRange    = 7.5f;
 constexpr float kEnemyRetreatRange  = 2.5f;
 constexpr float kEnemyHurtFlash     = 0.10f;
@@ -147,8 +149,8 @@ constexpr float kCoinSpinSettled = 6.0f;   // rad/s once it has come to rest
 constexpr int   kCoinFrameCount = 10;
 constexpr float kCoinFrameW     = 67.0f;
 constexpr float kCoinFrameH     = 67.0f;
-constexpr float kCoinSpriteW    = 22.0f;
-constexpr float kCoinSpriteH    = 22.0f;
+constexpr float kCoinSpriteW    = 32.0f;
+constexpr float kCoinSpriteH    = 32.0f;
 
 // Coin lifetime: 10 s of solid idling, then 5 s blinking, then gone. Counted
 // from spawn, so a coin spends roughly the first second still bouncing —
@@ -163,16 +165,19 @@ constexpr float kCoinBlinkRate = 4.0f;     // Hz; square-wave on/off
 // to ArenaScene::ApplyItemPickup. Box geometry + life / physics / pickup
 // detection all flow through ItemKind dispatch.
 constexpr float kItemDropChance  = 0.20f;
-constexpr float kItemBoxPx       = 32.0f;  // box side on screen
+constexpr float kItemBoxPx       = 40.0f;  // box side on screen
 constexpr float kItemBoxRadius   = 4.0f;   // rounded-corner radius
 constexpr float kItemBorderPx    = 2.0f;   // gray frame thickness
 constexpr float kItemPowerMult   = 1.20f;  // multiplicative on m_playerDmgMult (each = +20%)
 constexpr float kItemSpeedMult   = 1.10f;  // multiplicative on m_playerRateMult (each = +10%)
 constexpr int   kMultiMaxShots   = 8;      // hard cap on m_playerShotCount
+constexpr float kMultiRatePenalty= 0.90f;  // multiplicative on m_playerRateMult per Multi pickup (= -10%)
 constexpr float kMultiSpreadDeg  = 5.0f;   // degrees between adjacent bullets
 constexpr float kItemHealFrac    = 0.20f;  // fraction of kPlayerHpMax restored
+constexpr float kItemDefenseMult = 0.95f;  // multiplicative on m_playerDmgTaken per Defense pickup (= -5%)
+constexpr float kItemDefenseFloor= 0.50f;  // m_playerDmgTaken 은 50% 미만으로 안 내려감
 
-enum class ItemKind : uint8_t { Power, Speed, Heal, Multi };
+enum class ItemKind : uint8_t { Power, Speed, Heal, Multi, Defense };
 
 // The visible shape of every item is identical — a gray-bordered black
 // rounded square — so the per-kind data is just the letter and the colour
@@ -189,12 +194,13 @@ inline ItemDef ItemDefOf(ItemKind k) {
         case ItemKind::Speed: return { 'S', Color(0.40f, 0.85f, 1.00f, 1.0f) };
         case ItemKind::Heal:  return { 'H', Color(0.55f, 1.00f, 0.45f, 1.0f) };
         case ItemKind::Multi: return { 'M', Color(1.00f, 0.65f, 0.20f, 1.0f) };
+        case ItemKind::Defense: return { 'D', Color(0.45f, 0.60f, 1.00f, 1.0f) };
     }
     return { '?', Color::White() };
 }
 
 inline ItemKind RandomItemKind(std::mt19937& rng) {
-    std::uniform_int_distribution<int> d(0, 3);
+    std::uniform_int_distribution<int> d(0, 4);
     return ItemKind(d(rng));
 }
 
@@ -579,6 +585,7 @@ public:
         m_playerDmgMult   = 1.0f;
         m_playerRateMult  = 1.0f;
         m_playerShotCount = 1;
+        m_playerDmgTaken  = 1.0f;
         m_waveTimer  = 0.0f;
         m_waveActive = false;
         m_itemThisWave = false;
@@ -601,7 +608,63 @@ public:
         EnsurePieTexture();
         EnsurePlayerSprite();
         EnsureEnemySprite();
+        EnsureDigitsSprite();
         m_animTime = 0.0f;
+    }
+
+    void EnsureDigitsSprite() {
+        if (m_digitsTex || !m_ctx->device) return;
+        const std::string path =
+            std::string(NARAGAME_ASSETS_DIR) + "/digits.png";
+        m_digitsTex = LoadTexture(*m_ctx->device, path, TextureFilter::Linear);
+        if (!m_digitsTex) {
+            NARAGAME_WARN("brawl: digits sprite '%s' missing", path.c_str());
+            return;
+        }
+        // Hand-laid bake output (x, w) per digit, all at y=4 with height 220.
+        static const float kXs[10] = {  2.0f, 77.0f,132.0f,198.0f,264.0f,
+                                       336.0f,404.0f,477.0f,542.0f,612.0f };
+        static const float kWs[10] = { 73.0f, 53.0f, 64.0f, 64.0f, 70.0f,
+                                       66.0f, 71.0f, 63.0f, 68.0f, 69.0f };
+        constexpr float kY = 2.0f;
+        constexpr float kH = 84.0f;
+        for (int i = 0; i < 10; ++i) {
+            m_digitFrames[i] = TextureRegion::FromPixels(
+                m_digitsTex.get(), kXs[i], kY, kWs[i], kH);
+            m_digitWidths[i] = kWs[i];
+        }
+    }
+
+    // Render an integer using the digits atlas. The number is centred on
+    // (centreX, centreY); each glyph keeps its native aspect at the
+    // requested px height. kKerning < 1 packs the digits tighter than
+    // their native widths (cheap fake kerning — the purple outlines
+    // around the glyphs absorb the small overlap).
+    void DrawNumber(Renderer2D& r, int value, float centreX, float centreY,
+                    float pxHeight, const Color& tint) {
+        if (!m_digitsTex || value < 0) return;
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%d", value);
+        const int n = int(std::strlen(buf));
+        const float scale = pxHeight / 84.0f;
+        constexpr float kKerning = 0.78f;
+        // Pre-pass to compute total width with last glyph at full width.
+        float totalW = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            const int d = buf[i] - '0';
+            if (d < 0 || d > 9) continue;
+            const float w = m_digitWidths[d] * scale;
+            totalW += (i == n - 1) ? w : w * kKerning;
+        }
+        float x = centreX - totalW * 0.5f;
+        const float y = centreY - pxHeight * 0.5f;
+        for (int i = 0; i < n; ++i) {
+            const int d = buf[i] - '0';
+            if (d < 0 || d > 9) continue;
+            const float w = m_digitWidths[d] * scale;
+            r.DrawQuad({x, y}, {w, pxHeight}, m_digitFrames[d], tint);
+            x += w * kKerning;
+        }
     }
 
     void EnsureEnemySprite() {
@@ -810,14 +873,17 @@ public:
         p.pxSize = kPopupPx * 1.1f;
         p.life   = kPopupLife;
         p.bold   = true;
+        bool showPopup = true;
         switch (it.kind) {
             case ItemKind::Power:
                 m_playerDmgMult *= kItemPowerMult;
-                std::snprintf(p.text, sizeof(p.text), "POWER +20%%");
+                EmitItemSparkle(it.pos, def.color);
+                showPopup = false;
                 break;
             case ItemKind::Speed:
                 m_playerRateMult *= kItemSpeedMult;
-                std::snprintf(p.text, sizeof(p.text), "FIRE +10%%");
+                EmitItemSparkle(it.pos, def.color);
+                showPopup = false;
                 break;
             case ItemKind::Heal: {
                 const int target  = int(kPlayerHpMax * kItemHealFrac) + m_ctx->playerHp;
@@ -828,11 +894,20 @@ public:
                 break;
             }
             case ItemKind::Multi:
-                if (m_playerShotCount < kMultiMaxShots) m_playerShotCount += 1;
+                if (m_playerShotCount < kMultiMaxShots) {
+                    m_playerShotCount += 1;
+                    m_playerRateMult *= kMultiRatePenalty;
+                }
                 std::snprintf(p.text, sizeof(p.text), "MULTI x%d", m_playerShotCount);
                 break;
+            case ItemKind::Defense:
+                m_playerDmgTaken = std::max(kItemDefenseFloor,
+                                            m_playerDmgTaken * kItemDefenseMult);
+                EmitItemSparkle(it.pos, def.color);
+                showPopup = false;
+                break;
         }
-        m_popups.push_back(p);
+        if (showPopup) m_popups.push_back(p);
     }
 
     // Spawn 2-4 coins erupting from `at`, each with a random radial speed
@@ -855,20 +930,7 @@ public:
         }
     }
 
-    // KILL count popup — yellow, normal size, drifts up from the kill spot.
-    void EmitKillPopup(Vec2 at, int number) {
-        Popup p;
-        p.pos = at;
-        std::snprintf(p.text, sizeof(p.text), "KILL %d", number);
-        p.color  = Color(1.0f, 0.93f, 0.32f, 1.0f);
-        p.pxSize = kPopupPx;
-        p.life   = kPopupLife;
-        m_popups.push_back(p);
-    }
-
-    // CRIT! popup — red-orange, bigger, spawned slightly higher than the
-    // KILL popup (world Y offset −0.4 tile ≈ 14 screen px) so when a crit
-    // also kills the two read as a stacked pair instead of overlapping.
+    // CRIT! popup — red-orange, bigger, spawned slightly above the kill spot.
     void EmitCritPopup(Vec2 at) {
         Popup p;
         p.pos    = { at.x, at.y - 0.4f };
@@ -876,6 +938,39 @@ public:
         p.color  = Color(1.00f, 0.42f, 0.22f, 1.0f);
         p.pxSize = kPopupPx * 1.45f;
         p.life   = kPopupLife;
+        p.bold   = true;
+        m_popups.push_back(p);
+    }
+
+    // Item-pickup sparkle — 12 coloured stars fanning out in all directions.
+    // Used in place of a text popup when the gain is non-numeric (P / S / D).
+    void EmitItemSparkle(Vec2 at, const Color& color) {
+        std::uniform_real_distribution<float> spd(2.6f, 4.6f);
+        std::uniform_real_distribution<float> rot(-3.14159f, 3.14159f);
+        std::uniform_real_distribution<float> life(0.45f, 0.75f);
+        constexpr int kCount = 12;
+        for (int i = 0; i < kCount; ++i) {
+            const float a = (float(i) + 0.5f) * (6.28318f / float(kCount));
+            const float s = spd(m_rng);
+            StarParticle p;
+            p.pos   = at;
+            p.vel   = { std::cos(a) * s, std::sin(a) * s };
+            p.angle = rot(m_rng);
+            p.spin  = (i & 1) ? -18.0f : 18.0f;
+            p.life  = life(m_rng);
+            p.size  = 16.0f;
+            p.color = color;
+            m_particles.push_back(p);
+        }
+    }
+
+    void EmitDamagePopup(Vec2 at, int dmg) {
+        Popup p;
+        p.pos    = { at.x, at.y - 0.2f };
+        std::snprintf(p.text, sizeof(p.text), "-%d", dmg);
+        p.color  = Color(1.00f, 0.25f, 0.25f, 1.0f);
+        p.pxSize = kPopupPx * 0.85f;
+        p.life   = kPopupLife * 0.7f;
         p.bold   = true;
         m_popups.push_back(p);
     }
@@ -1384,6 +1479,7 @@ private:
                         const int  dmg = isCrit ? baseDmg * kCritMult : baseDmg;
                         e.hp -= dmg;
                         e.hurtFlash = kEnemyHurtFlash;
+                        EmitDamagePopup(e.pos, dmg);
                         // Knockback along the bullet's normalised flight dir.
                         const float vlen = std::sqrt(b.vel.x * b.vel.x +
                                                      b.vel.y * b.vel.y);
@@ -1399,7 +1495,6 @@ private:
                             e.alive = false;
                             m_ctx->score += kScorePerKill;
                             ++m_ctx->kills;
-                            EmitKillPopup(e.pos, m_ctx->kills);
                             EmitDrop(e.pos);
                             // Last-enemy fallback: if no item dropped during
                             // this wave's RNG rolls, force one now so every
@@ -1423,7 +1518,9 @@ private:
                 const float dy = m_player.y - b.pos.y;
                 const float rr = kPlayerR + kBulletR;
                 if (dx * dx + dy * dy < rr * rr && m_playerHurt <= 0.0f) {
-                    m_ctx->playerHp = std::max(0, m_ctx->playerHp - kEnemyBulletDmg);
+                    const int dmg = std::max(1,
+                        int(kEnemyBulletDmg * m_playerDmgTaken + 0.5f));
+                    m_ctx->playerHp = std::max(0, m_ctx->playerHp - dmg);
                     m_playerHurt = kPlayerHurtIFrame;
                     b.alive = false;
                 }
@@ -1495,7 +1592,11 @@ private:
 
             // Shoot if within range and a rough LOS (no wall on the segment).
             if (dist < kEnemyShootRange && e.fireCd <= 0.0f && HasLOS(e.pos, m_player)) {
-                e.fireCd = kEnemyFireCd;
+                // Per-wave 5% shorter cooldown, floored at kEnemyFireMinCd.
+                const float scaled = kEnemyFireCd *
+                    std::pow(kEnemyFireWaveScale,
+                             float(std::max(0, m_ctx->wave - 1)));
+                e.fireCd = std::max(kEnemyFireMinCd, scaled);
                 Bullet b;
                 b.pos = { e.pos.x + e.aim.x * 0.55f, e.pos.y + e.aim.y * 0.55f };
                 b.vel = { e.aim.x * kEnemyBulletV,   e.aim.y * kEnemyBulletV   };
@@ -1986,26 +2087,10 @@ private:
             DrawRoundRect(r, {barX, barY}, {fillW, kBarH}, kBarRadius,
                           barTint(fill));
         }
-        // Bold HP number — fake-bold via 8-direction offset stroke,
-        // black outline + white centre so the digit reads on any fill
-        // colour.
-        char buf[8];
-        std::snprintf(buf, sizeof(buf), "%d", hp);
-        constexpr float textPx = 12.0f;
-        const Vec2 ts = m_ctx->font->Measure(buf, textPx);
-        const float textX = feet.x - ts.x * 0.5f;
-        const float textY = barY + (kBarH - textPx) * 0.5f - 1.0f;
-        constexpr float kOff = 1.2f;
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                if (dx == 0 && dy == 0) continue;
-                r.DrawText(*m_ctx->font, buf,
-                           {textX + dx * kOff, textY + dy * kOff},
-                           barTint(Color(0.0f, 0.0f, 0.0f, 1.0f)), textPx);
-            }
-        }
-        r.DrawText(*m_ctx->font, buf, {textX, textY},
-                   barTint(Color(1.0f, 1.0f, 1.0f, 1.0f)), textPx);
+        // Sprite-glyph HP number — centred horizontally on the bar but
+        // pulled up so the top of the digit pokes above the frame.
+        DrawNumber(r, hp, feet.x, barY, 16.0f,
+                   barTint(Color(1.0f, 1.0f, 1.0f, 1.0f)));
     }
 
     void DrawEnemy(Renderer2D& r, const Enemy& e) {
@@ -2379,10 +2464,6 @@ private:
             r.DrawText(*m_ctx->font, kPauseMenuLabels[i],
                        {textX, textY}, col, px);
         }
-        DrawCenteredText(r, *m_ctx->font,
-                         "Arrow keys / Mouse to select   Enter / Click to confirm",
-                         kScreenH * 0.85f, 20.0f,
-                         Color(0.80f, 0.80f, 0.80f, 0.85f));
     }
 
     // Game-over overlay drawn on top of the frozen play screen. Dim layer
@@ -2506,6 +2587,12 @@ private:
     // Rows in order: N, E, S. NE uses N; SE uses S; W/SW/NW are flipped.
     std::unique_ptr<RHITexture> m_enemyTex;
     TextureRegion               m_enemyFrames[3][4];
+    // Number-glyph atlas: 10 digits (0..9) packed proportionally with
+    // bottom-aligned baseline. Source heights ~220 px, native widths per
+    // digit cached so DrawNumber can lay them out without per-cell math.
+    std::unique_ptr<RHITexture> m_digitsTex;
+    TextureRegion               m_digitFrames[10];
+    float                       m_digitWidths[10] = {};
     int     m_shadowW = 0, m_shadowH = 0;
     Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
     float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
@@ -2522,6 +2609,7 @@ private:
     float                      m_playerDmgMult   = 1.0f;
     float                      m_playerRateMult  = 1.0f;
     int                        m_playerShotCount = 1;   // bullets per fire; +1 per Multi pickup, capped at kMultiMaxShots
+    float                      m_playerDmgTaken  = 1.0f; // multiplicative on enemy bullet damage; -5% per Defense pickup, floor 0.5
     bool    m_waveActive = false;
     float   m_waveTimer  = 0.0f;
     // Latched true the first time an item drops in the current wave; if
