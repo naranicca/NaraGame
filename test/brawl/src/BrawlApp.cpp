@@ -285,8 +285,47 @@ struct Grid {
 // Plant a handful of small wall clusters (2x2, bars, L, T) into the open arena.
 // Spawn area is forcibly cleared at the end so the player never spawns inside
 // a cluster the rejection sampler placed without seeing the spawn.
-void BuildArena(Grid& g, uint32_t seed, Vec2& spawn) {
+//
+// `collision`/`colW`/`colH` come from a .ntmap's optional `collision` section
+// (codes: 0=Floor, 1=Wall, 2=Water). When they match the arena's size, the
+// authored layout is used verbatim and the procedural cluster pass is
+// skipped entirely; otherwise we fall back to the random walls + ponds.
+// In both paths we still force a Wall border and a clear 3x3 spawn so the
+// game can't deadlock no matter what the .ntmap says.
+void BuildArena(Grid& g, uint32_t seed, Vec2& spawn,
+                const std::vector<uint8_t>* collision = nullptr,
+                int colW = 0, int colH = 0) {
     g.Resize(kArenaW, kArenaH, Tile::Floor);
+
+    if (collision && colW == kArenaW && colH == kArenaH &&
+        collision->size() == size_t(kArenaW) * size_t(kArenaH)) {
+        for (int y = 0; y < kArenaH; ++y) {
+            for (int x = 0; x < kArenaW; ++x) {
+                const uint8_t c = (*collision)[size_t(y) * kArenaW + x];
+                const Tile t = (c == 1) ? Tile::Wall
+                             : (c == 2) ? Tile::Water
+                                        : Tile::Floor;
+                g.Set(x, y, t);
+            }
+        }
+        // Safety: border + spawn area, same as the procedural path below.
+        for (int x = 0; x < kArenaW; ++x) {
+            g.Set(x, 0, Tile::Wall);
+            g.Set(x, kArenaH - 1, Tile::Wall);
+        }
+        for (int y = 0; y < kArenaH; ++y) {
+            g.Set(0, y, Tile::Wall);
+            g.Set(kArenaW - 1, y, Tile::Wall);
+        }
+        spawn = {kArenaW * 0.5f, kArenaH * 0.5f};
+        const int px = int(spawn.x);
+        const int py = int(spawn.y);
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+                g.Set(px + dx, py + dy, Tile::Floor);
+        return;
+    }
+
     for (int x = 0; x < kArenaW; ++x) {
         g.Set(x, 0, Tile::Wall);
         g.Set(x, kArenaH - 1, Tile::Wall);
@@ -823,6 +862,9 @@ public:
 
     void OnEnter() override {
         m_rngArena.seed(std::random_device{}());
+        // Load the .ntmap bg first so Rebuild() can read its collision
+        // section (when present) instead of regenerating procedurally.
+        EnsureBackgroundMap();
         Rebuild();
         m_playerHurt = 0.0f;
         m_fireCd     = 0.0f;
@@ -859,7 +901,6 @@ public:
         EnsureEnemySprite();
         EnsureBitmapFont();
         EnsureIndicatorTexture();
-        EnsureBackgroundMap();
         m_animTime = 0.0f;
     }
 
@@ -1528,7 +1569,17 @@ public:
 private:
     // ----- Setup -----
     void Rebuild() {
-        BuildArena(m_grid, m_rngArena(), m_playerSpawn);
+        // If the .ntmap bg supplies a collision section, honour it -- the
+        // map author placed walls/water deliberately. Falls back to random
+        // procedural placement when the section is missing or wrong-sized.
+        const std::vector<uint8_t>* col = nullptr;
+        int colW = 0, colH = 0;
+        if (m_bgAsset.valid && !m_bgAsset.collision.empty()) {
+            col  = &m_bgAsset.collision;
+            colW = m_bgAsset.map.Width();
+            colH = m_bgAsset.map.Height();
+        }
+        BuildArena(m_grid, m_rngArena(), m_playerSpawn, col, colW, colH);
         m_player = m_playerSpawn;
     }
 
