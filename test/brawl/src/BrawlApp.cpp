@@ -1622,6 +1622,17 @@ private:
             colH = m_bgAsset.map.Height();
         }
         BuildArena(m_grid, m_rngArena(), m_playerSpawn, col, colW, colH);
+        // A 'P' object marker on the bg overrides the centre spawn. The
+        // marker lives at the cell's top-left in tile coords; +0.5 puts
+        // the player in the middle of the cell to match arena convention.
+        if (m_bgAsset.valid) {
+            for (const auto& mk : m_bgAsset.objects) {
+                if (mk.symbol == 'P') {
+                    m_playerSpawn = { float(mk.x) + 0.5f, float(mk.y) + 0.5f };
+                    break;
+                }
+            }
+        }
         m_player = m_playerSpawn;
     }
 
