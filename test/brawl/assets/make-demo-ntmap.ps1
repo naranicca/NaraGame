@@ -116,25 +116,11 @@ for ($y = 0; $y -lt $mapH; $y++) {
     }
     [void]$out.AppendLine(($line -join ' '))
 }
-# --- collision section ---
-# 0 = Floor, 1 = Wall, 2 = Water (Collision::* codes). The border is always
-# forced to Wall by BuildArena regardless, so we leave it 0 here and let the
-# game safety pass handle it. Adds: a 4x2 wall block left-of-centre, a 2x2
-# pond at upper-right, and a small L-wall at lower-left so the layout
-# difference vs the procedural version is unmistakable in screenshots.
-[void]$out.AppendLine("collision")
-for ($y = 0; $y -lt $mapH; $y++) {
-    $line = New-Object System.Collections.Generic.List[string]
-    for ($x = 0; $x -lt $mapW; $x++) {
-        $c = 0
-        if ($x -ge 6  -and $x -le 9  -and $y -ge 8  -and $y -le 9)  { $c = 1 }
-        if ($x -ge 18 -and $x -le 19 -and $y -ge 4  -and $y -le 5)  { $c = 2 }
-        if ($x -ge 4  -and $x -le 4  -and $y -ge 13 -and $y -le 14) { $c = 1 }
-        if ($x -ge 4  -and $x -le 5  -and $y -eq 14)                { $c = 1 }
-        $line.Add($c.ToString())
-    }
-    [void]$out.AppendLine(($line -join ' '))
-}
+# NOTE: no `collision` section. Leaving the section out makes BuildArena
+# fall back to its procedural wall/water cluster pass, so each run gets a
+# fresh layout. To pin a specific layout, paint Wall/Water cells in the
+# editor (L key) and Ctrl+S -- the saved .ntmap will include collision and
+# the game will honour it.
 
 $ntmap = "C:\Users\naran\source\repos\NaraGame\test\brawl\assets\arena-bg.ntmap"
 [System.IO.File]::WriteAllText($ntmap, $out.ToString(),
