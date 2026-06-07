@@ -38,8 +38,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 using namespace NaraGame;
 
@@ -302,6 +305,11 @@ protected:
 
         // ----- Global shortcuts -----
         if (Input::IsKeyPressed(Key::G)) m_grid = !m_grid;
+        if (Input::IsKeyPressed(Key::L)) {
+            m_mode = (m_mode == EditLayer::Tile) ? EditLayer::Collision
+                                                 : EditLayer::Tile;
+            if (m_mode == EditLayer::Collision) EnsureCollisionGrid();
+        }
         if (ctrl && Input::IsKeyPressed(Key::S) && m_map.Width() > 0) {
             SaveCurrent();
         }
@@ -358,10 +366,14 @@ protected:
             m_paletteScroll = std::max(0.0f,
                 m_paletteScroll - wheel * float(m_tileH) * 2.0f);
         }
-        if (m_inPalette && Input::IsMousePressed(MouseButton::Left) &&
-            m_currentTilesetPath.size()) {
-            const int picked = PaletteHit(mouse, paletteOrigin, paletteSize);
-            if (picked >= 0) m_selectedTile = picked;
+        if (m_inPalette && Input::IsMousePressed(MouseButton::Left)) {
+            if (m_mode == EditLayer::Tile && m_currentTilesetPath.size()) {
+                const int picked = PaletteHit(mouse, paletteOrigin, paletteSize);
+                if (picked >= 0) m_selectedTile = picked;
+            } else if (m_mode == EditLayer::Collision) {
+                const int picked = CollisionPaletteHit(mouse, paletteOrigin);
+                if (picked >= 0) m_selectedCol = picked;
+            }
         }
 
         // ----- Canvas paint / erase -----
@@ -374,15 +386,44 @@ protected:
             const bool inMap = tx >= 0 && ty >= 0 &&
                                tx < m_map.Width() && ty < m_map.Height();
             if (inMap) {
+                // Mode-dependent values:
+                //   Tile     → LMB paints m_selectedTile, RMB clears (-1)
+                //   Collision→ LMB paints m_selectedCol, RMB clears (0 = Floor)
+                const int leftVal  = (m_mode == EditLayer::Tile)
+                                         ? m_selectedTile : m_selectedCol;
+                const int rightVal = (m_mode == EditLayer::Tile) ? -1 : 0;
                 if (Input::IsMouseDown(MouseButton::Left)) {
-                    m_map.SetTile(tx, ty, m_selectedTile);
+                    PaintCell(tx, ty, leftVal);
                 } else if (Input::IsMouseDown(MouseButton::Right)) {
-                    m_map.SetTile(tx, ty, -1);
+                    PaintCell(tx, ty, rightVal);
                 }
             }
         } else {
             m_hoverTx = -1;
             m_hoverTy = -1;
+        }
+        // Mouse fully up → finalise the current stroke. Doing this after the
+        // paint pass means a single click that flips one cell still becomes a
+        // 1-edit stroke pushed onto the undo stack.
+        if (m_currentStroke &&
+            !Input::IsMouseDown(MouseButton::Left) &&
+            !Input::IsMouseDown(MouseButton::Right)) {
+            EndStroke();
+        }
+
+        // ----- Undo / Redo -----
+        // Ctrl+Z undo. Ctrl+Y or Ctrl+Shift+Z redo (Photoshop+Windows
+        // conventions). Edits made mid-drag belong to a stroke that hasn't
+        // landed on the stack yet, so finalise it first so undo grabs the
+        // most recent finished operation.
+        if (ctrl && Input::IsKeyPressed(Key::Z)) {
+            if (m_currentStroke) EndStroke();
+            const bool shift = Input::IsKeyDown(Key::LeftShift);
+            if (shift) Redo(); else Undo();
+        }
+        if (ctrl && Input::IsKeyPressed(Key::Y)) {
+            if (m_currentStroke) EndStroke();
+            Redo();
         }
     }
 
@@ -424,6 +465,111 @@ private:
                  (w.y - m_camera.y) * m_zoom + canvasOrigin.y };
     }
 
+    // ----- Undo / Redo -----
+    //
+    // Edit granularity = one mouse-drag = one Stroke. A Stroke holds the
+    // before/after value for every cell it changed plus which layer the
+    // edit landed on (0 = tile id, 1 = collision code). One stroke can
+    // freely mix both layers, but in practice a drag never switches modes
+    // mid-way -- this just keeps the undo stack honest if it ever does.
+    enum class EditLayer : int { Tile = 0, Collision = 1 };
+    struct StrokeEdit { EditLayer layer; int x, y, oldId, newId; };
+    struct Stroke     { std::vector<StrokeEdit> edits; };
+    static constexpr size_t kUndoLimit = 200;
+
+    // Paint to the currently active layer. Routes to either the visual
+    // Tilemap or the parallel collision grid based on m_mode.
+    void PaintCell(int x, int y, int newId) {
+        if (m_map.Width() <= 0) return;
+        if (m_mode == EditLayer::Tile) {
+            const int oldId = m_map.GetTile(x, y);
+            if (oldId == newId) return;
+            RecordEdit(EditLayer::Tile, x, y, oldId, newId);
+            m_map.SetTile(x, y, newId);
+        } else {
+            EnsureCollisionGrid();
+            const size_t idx = size_t(y) * m_map.Width() + size_t(x);
+            const int oldId = int(m_collision[idx]);
+            if (oldId == newId) return;
+            RecordEdit(EditLayer::Collision, x, y, oldId, newId);
+            m_collision[idx] = uint8_t(newId);
+        }
+        m_dirty = true;
+    }
+
+    void RecordEdit(EditLayer layer, int x, int y, int oldId, int newId) {
+        BeginStroke();
+        const uint64_t key = (uint64_t(int(layer)) << 62) |
+                             (uint64_t(uint32_t(y)) << 32) | uint32_t(x);
+        if (m_currentTouched.insert(key).second) {
+            m_currentStroke->edits.push_back({layer, x, y, oldId, newId});
+        }
+    }
+
+    void EnsureCollisionGrid() {
+        const size_t need = size_t(m_map.Width()) * size_t(m_map.Height());
+        if (m_collision.size() != need) m_collision.assign(need, 0);
+    }
+
+    void BeginStroke() {
+        if (m_currentStroke) return;
+        m_currentStroke = std::make_unique<Stroke>();
+        m_currentTouched.clear();
+    }
+
+    void EndStroke() {
+        if (!m_currentStroke) return;
+        if (!m_currentStroke->edits.empty()) {
+            m_undoStack.push_back(std::move(*m_currentStroke));
+            if (m_undoStack.size() > kUndoLimit) m_undoStack.pop_front();
+            m_redoStack.clear();          // any new edit kills the redo trail
+        }
+        m_currentStroke.reset();
+        m_currentTouched.clear();
+    }
+
+    void ApplyEdit(const StrokeEdit& e, bool undo) {
+        const int v = undo ? e.oldId : e.newId;
+        if (e.layer == EditLayer::Tile) {
+            m_map.SetTile(e.x, e.y, v);
+        } else {
+            EnsureCollisionGrid();
+            m_collision[size_t(e.y) * m_map.Width() + size_t(e.x)] = uint8_t(v);
+        }
+    }
+
+    void Undo() {
+        if (m_undoStack.empty()) return;
+        Stroke s = std::move(m_undoStack.back());
+        m_undoStack.pop_back();
+        // Apply in reverse so overlapping edits inside one stroke wind back
+        // to the original baseline rather than to an intermediate state.
+        for (auto it = s.edits.rbegin(); it != s.edits.rend(); ++it) {
+            ApplyEdit(*it, /*undo=*/true);
+        }
+        m_redoStack.push_back(std::move(s));
+        m_dirty = true;
+    }
+
+    void Redo() {
+        if (m_redoStack.empty()) return;
+        Stroke s = std::move(m_redoStack.back());
+        m_redoStack.pop_back();
+        for (auto& e : s.edits) {
+            ApplyEdit(e, /*undo=*/false);
+        }
+        m_undoStack.push_back(std::move(s));
+        m_dirty = true;
+    }
+
+    void ClearHistory() {
+        m_undoStack.clear();
+        m_redoStack.clear();
+        m_currentStroke.reset();
+        m_currentTouched.clear();
+        m_dirty = false;
+    }
+
     void OpenPath(const std::string& path) {
         TilemapAsset asset;
         if (EndsWith(path, ".tmx")) {
@@ -437,6 +583,7 @@ private:
         }
         m_tilesetTex = std::move(asset.texture);
         m_map        = std::move(asset.map);
+        m_collision  = std::move(asset.collision);   // empty if none in file
         // The Tilemap stored a SpriteSheet pointing at the asset's texture
         // before we moved it. Rebind so it points at our owned copy.
         m_tileW = asset.tileWidth;
@@ -450,6 +597,7 @@ private:
         m_zoom      = 1.0f;
         m_paletteScroll = 0.0f;
         m_selectedTile  = 0;
+        ClearHistory();
         NARAGAME_INFO("editor: opened '%s' (%dx%d, tile %dx%d)",
                       path.c_str(), m_map.Width(), m_map.Height(),
                       m_tileW, m_tileH);
@@ -470,11 +618,13 @@ private:
         m_map = Tilemap(mapW, mapH, float(tileW), float(tileH));
         m_map.SetTileset(m_sheet);
         m_map.Fill(-1);
+        m_collision.clear();
         m_currentTilesetPath = tilesetPath;
         m_camera = {0.0f, 0.0f};
         m_zoom   = 1.0f;
         m_paletteScroll = 0.0f;
         m_selectedTile  = 0;
+        ClearHistory();
         NARAGAME_INFO("editor: new map %dx%d, tile %dx%d, tileset '%s'",
                       mapW, mapH, tileW, tileH, tilesetPath.c_str());
     }
@@ -490,10 +640,17 @@ private:
         std::string out = m_filePath;
         if (EndsWith(out, ".tmx")) out = ReplaceExt(out, ".ntmap");
         if (!EndsWith(out, ".ntmap")) out += ".ntmap";
+        // Only round-trip collision when it has the right shape. An empty
+        // grid means "no collision data" and SaveNtmap will skip the section.
+        const size_t need = size_t(m_map.Width()) * size_t(m_map.Height());
+        const std::vector<uint8_t> emptyCol;
         const bool ok = SaveNtmap(out, m_map, m_currentTilesetPath,
-                                  m_tileW, m_tileH, 0, 0);
+                                  m_tileW, m_tileH, 0, 0,
+                                  m_collision.size() == need ? m_collision
+                                                             : emptyCol);
         if (ok) {
             m_filePath = out;
+            m_dirty = false;
             NARAGAME_INFO("editor: saved '%s'", out.c_str());
         }
     }
@@ -576,6 +733,26 @@ private:
             }
         }
 
+        // Collision overlay. Visible in BOTH modes so authors can always see
+        // what they've marked as solid -- collision-mode just makes the
+        // overlay the primary thing they're editing.
+        if (!m_collision.empty()) {
+            const Color cWall (0.95f, 0.30f, 0.30f, 0.42f);
+            const Color cWater(0.25f, 0.55f, 0.95f, 0.42f);
+            for (int ty = 0; ty < m_map.Height(); ++ty) {
+                for (int tx = 0; tx < m_map.Width(); ++tx) {
+                    const uint8_t c = m_collision[size_t(ty) * m_map.Width()
+                                                  + size_t(tx)];
+                    if (c == 0) continue;
+                    const Vec2 p = WorldToScreen(
+                        {float(tx * m_tileW), float(ty * m_tileH)}, origin);
+                    r.DrawQuad(p, {float(m_tileW) * m_zoom,
+                                    float(m_tileH) * m_zoom},
+                               c == 1 ? cWall : cWater);
+                }
+            }
+        }
+
         // Grid overlay.
         if (m_grid) {
             const float lineT = 1.0f;
@@ -611,6 +788,11 @@ private:
         const Vec2 size  {kPaletteW, kScreenH - kToolbarH - kStatusH};
         r.DrawQuad(origin, size, kPaneBg);
 
+        if (m_mode == EditLayer::Collision) {
+            DrawCollisionPalette(r, origin);
+            return;
+        }
+
         if (!m_tilesetTex || m_sheet.Count() <= 0) {
             DrawMicroText(r, "no tileset.",
                           {origin.x + 12.0f, origin.y + 12.0f},
@@ -639,6 +821,51 @@ private:
         }
     }
 
+    // Three big swatches for the collision modes. Same hit math as
+    // CollisionPaletteHit so layout edits stay in lockstep.
+    void DrawCollisionPalette(Renderer2D& r, Vec2 origin) {
+        DrawMicroText(r, "collision layer", {origin.x + 12.0f, origin.y + 8.0f},
+                      14.0f, kStatusText);
+        struct Item { const char* label; Color color; };
+        const Item items[3] = {
+            { "floor", Color(0.50f, 0.55f, 0.60f, 0.50f) },
+            { "wall",  Color(0.95f, 0.30f, 0.30f, 0.65f) },
+            { "water", Color(0.25f, 0.55f, 0.95f, 0.65f) },
+        };
+        constexpr float pad   = 12.0f;
+        constexpr float cellH = 56.0f;
+        constexpr float gap   = 8.0f;
+        for (int i = 0; i < 3; ++i) {
+            const float py = origin.y + 32.0f + i * (cellH + gap);
+            const Vec2 p{origin.x + pad, py};
+            const Vec2 sz{kPaletteW - pad * 2.0f, cellH};
+            r.DrawQuad(p, sz, items[i].color);
+            DrawRectOutline(r, p, sz, 1.0f, Color(0.0f, 0.0f, 0.0f, 0.6f));
+            DrawMicroText(r, items[i].label,
+                          {p.x + 10.0f, p.y + cellH * 0.5f - 8.0f},
+                          18.0f, kStatusText);
+            if (i == m_selectedCol) {
+                DrawRectOutline(r, {p.x - 2.0f, p.y - 2.0f},
+                                {sz.x + 4.0f, sz.y + 4.0f}, 2.0f, kSelectHi);
+            }
+        }
+    }
+
+    int CollisionPaletteHit(Vec2 mouse, Vec2 origin) const {
+        constexpr float pad   = 12.0f;
+        constexpr float cellH = 56.0f;
+        constexpr float gap   = 8.0f;
+        for (int i = 0; i < 3; ++i) {
+            const float py = origin.y + 32.0f + i * (cellH + gap);
+            const float px = origin.x + pad;
+            if (mouse.x >= px && mouse.x < px + (kPaletteW - pad * 2.0f) &&
+                mouse.y >= py && mouse.y < py + cellH) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     void DrawToolbar(Renderer2D& r) {
         r.DrawQuad({0.0f, 0.0f}, {kScreenW, kToolbarH}, kToolbarBg);
 
@@ -657,14 +884,21 @@ private:
 
         char buf[256];
         const int hx = m_hoverTx, hy = m_hoverTy;
+        const char* modeName = (m_mode == EditLayer::Tile) ? "TILE"
+                                                           : "COLLISION";
+        const int   selVal   = (m_mode == EditLayer::Tile) ? m_selectedTile
+                                                           : m_selectedCol;
         std::snprintf(buf, sizeof(buf),
                       "MAP: %dx%d   TILE: %dx%d   ZOOM: %.0f%%   "
-                      "SEL: %d   HOVER: %d,%d   "
+                      "MODE: %s   SEL: %d   HOVER: %d,%d   "
+                      "UNDO: %zu/%zu   %s   "
                       "LMB paint  RMB erase  MMB pan  WHEEL zoom  G grid  "
-                      "CTRL+S save  CTRL+N new  CTRL+O reload",
+                      "L mode  CTRL+Z undo  CTRL+Y redo  CTRL+S save  "
+                      "CTRL+N new  CTRL+O reload",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
-                      m_zoom * 100.0f, m_selectedTile,
-                      hx, hy);
+                      m_zoom * 100.0f, modeName, selVal,
+                      hx, hy, m_undoStack.size(), m_redoStack.size(),
+                      m_dirty ? "MODIFIED" : "SAVED");
         DrawMicroText(r, buf, {12.0f, y + 8.0f}, 12.0f, kStatusText);
     }
 
@@ -693,6 +927,25 @@ private:
     int   m_hoverTy = -1;
     bool  m_inCanvas = false;
     bool  m_inPalette = false;
+
+    // Undo / redo: completed strokes pushed onto m_undoStack; Undo() moves
+    // them to m_redoStack. m_currentStroke is the active drag still
+    // accumulating edits; m_currentTouched dedups cells within a stroke so
+    // re-painting the same cell mid-drag doesn't overwrite the oldId
+    // baseline. m_dirty marks "unsaved changes since last save/load".
+    std::deque<Stroke>          m_undoStack;
+    std::deque<Stroke>          m_redoStack;
+    std::unique_ptr<Stroke>     m_currentStroke;
+    std::unordered_set<uint64_t> m_currentTouched;
+    bool m_dirty = false;
+
+    // Collision layer. Parallel uint8_t grid alongside the visual Tilemap;
+    // 0=Floor, 1=Wall, 2=Water (matching the engine's Collision::* codes).
+    // Empty until the user enters Collision mode or a .ntmap with a
+    // `collision` section is loaded.
+    std::vector<uint8_t> m_collision;
+    EditLayer            m_mode        = EditLayer::Tile;
+    int                  m_selectedCol = 1; // default Wall when entering mode
 };
 
 Application* NaraGame::CreateApplication(int argc, char** argv) {

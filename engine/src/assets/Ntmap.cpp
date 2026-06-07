@@ -44,11 +44,14 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
     std::string tilesetRel;
     int cellW = 0, cellH = 0, margin = 0, spacing = 0;
     int mapW = 0, mapH = 0;
-    std::vector<int> tiles;
-    bool sawHeader = false;
+    std::vector<int>     tiles;
+    std::vector<uint8_t> collision;
+    bool sawHeader  = false;
     bool sawTileset = false;
-    bool sawSize = false;
-    bool inLayer = false;
+    bool sawSize    = false;
+    // section tracks which body block subsequent integer lines belong to.
+    // 0 = none, 1 = layer (tile ids), 2 = collision (uint8 codes).
+    int section = 0;
 
     std::string line;
     int lineNo = 0;
@@ -57,11 +60,19 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
         if (line.empty()) continue;
         if (line[0] == '#') continue;
         std::istringstream ls(line);
-        if (inLayer) {
+        // A line starting with a number/minus belongs to the active section;
+        // any other leading token is a new directive and ends the section.
+        const char first = line[0];
+        const bool isData = (first == '-' || (first >= '0' && first <= '9'));
+        if (section != 0 && isData) {
             int v;
-            while (ls >> v) tiles.push_back(v);
+            while (ls >> v) {
+                if (section == 1) tiles.push_back(v);
+                else if (section == 2) collision.push_back(uint8_t(v));
+            }
             continue;
         }
+        section = 0;
         std::string tok;
         if (!(ls >> tok)) continue;
         if (tok == "ntmap") {
@@ -82,7 +93,9 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             ls >> mapW >> mapH;
             sawSize = true;
         } else if (tok == "layer") {
-            inLayer = true;
+            section = 1;
+        } else if (tok == "collision") {
+            section = 2;
         }
     }
 
@@ -117,6 +130,17 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             asset.map.SetTile(x, y, tiles[size_t(y) * mapW + x]);
         }
     }
+    // Optional collision: only attached if the file provided exactly the
+    // right number of codes. A short / oversized section is treated as an
+    // authoring mistake and dropped (the game then falls back to whatever
+    // it does with no collision data).
+    if (collision.size() == expected) {
+        asset.collision = std::move(collision);
+    } else if (!collision.empty()) {
+        NARAGAME_WARN("LoadNtmap: '%s' collision size %zu != %zu, ignored",
+                      path.c_str(), collision.size(), expected);
+    }
+
     asset.tilesetPath = tilesetRel;
     asset.tileWidth   = cellW;
     asset.tileHeight  = cellH;
@@ -126,7 +150,8 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
 
 bool SaveNtmap(const std::string& path, const Tilemap& map,
                const std::string& tilesetPath, int tileWidth, int tileHeight,
-               int margin, int spacing) {
+               int margin, int spacing,
+               const std::vector<uint8_t>& collision) {
     std::ofstream out(path, std::ios::binary);
     if (!out.is_open()) {
         NARAGAME_ERROR("SaveNtmap: cannot open '%s' for write", path.c_str());
@@ -143,6 +168,20 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
             out << map.GetTile(x, y);
         }
         out << '\n';
+    }
+    // Only emit the collision section when the caller supplied one whose
+    // dimensions match the map (otherwise a partial grid would round-trip
+    // and silently corrupt the map).
+    const size_t expected = size_t(map.Width()) * size_t(map.Height());
+    if (collision.size() == expected) {
+        out << "collision\n";
+        for (int y = 0; y < map.Height(); ++y) {
+            for (int x = 0; x < map.Width(); ++x) {
+                if (x) out << ' ';
+                out << int(collision[size_t(y) * map.Width() + x]);
+            }
+            out << '\n';
+        }
     }
     return out.good();
 }
