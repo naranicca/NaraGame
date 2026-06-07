@@ -305,10 +305,34 @@ protected:
 
         // ----- Global shortcuts -----
         if (Input::IsKeyPressed(Key::G)) m_grid = !m_grid;
-        if (Input::IsKeyPressed(Key::L)) {
+        if (Input::IsKeyPressed(Key::L) || Input::IsKeyPressed(Key::Tab)) {
             m_mode = (m_mode == EditLayer::Tile) ? EditLayer::Collision
                                                  : EditLayer::Tile;
             if (m_mode == EditLayer::Collision) EnsureCollisionGrid();
+        }
+        // Home: recentre the canvas. Pretty much always the right "I got lost"
+        // shortcut -- camera back to map origin, zoom back to 1:1.
+        if (Input::IsKeyPressed(Key::Home)) {
+            m_camera = {0.0f, 0.0f};
+            m_zoom   = 1.0f;
+        }
+        // 1..9 jump-select the first nine palette entries in Tile mode (a
+        // cheap power-user shortcut so you don't keep round-tripping to the
+        // palette for the same handful of tiles). In Collision mode the
+        // same digits pick Floor/Wall/Water.
+        if (m_map.Width() > 0) {
+            const Key digits[9] = {
+                Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
+                Key::Num6, Key::Num7, Key::Num8, Key::Num9,
+            };
+            for (int i = 0; i < 9; ++i) {
+                if (!Input::IsKeyPressed(digits[i])) continue;
+                if (m_mode == EditLayer::Tile) {
+                    if (i < m_sheet.Count()) m_selectedTile = i;
+                } else if (i < 3) {
+                    m_selectedCol = i;
+                }
+            }
         }
         if (ctrl && Input::IsKeyPressed(Key::S) && m_map.Width() > 0) {
             SaveCurrent();
@@ -376,7 +400,7 @@ protected:
             }
         }
 
-        // ----- Canvas paint / erase -----
+        // ----- Canvas paint / erase / fill / rect -----
         if (m_inCanvas && m_map.Width() > 0 && !m_panning) {
             const Vec2 world = ScreenToWorld(mouse, canvasOrigin, m_zoom);
             const int tx = int(std::floor(world.x / float(m_tileW)));
@@ -385,13 +409,60 @@ protected:
             m_hoverTy = ty;
             const bool inMap = tx >= 0 && ty >= 0 &&
                                tx < m_map.Width() && ty < m_map.Height();
-            if (inMap) {
-                // Mode-dependent values:
-                //   Tile     → LMB paints m_selectedTile, RMB clears (-1)
-                //   Collision→ LMB paints m_selectedCol, RMB clears (0 = Floor)
-                const int leftVal  = (m_mode == EditLayer::Tile)
-                                         ? m_selectedTile : m_selectedCol;
-                const int rightVal = (m_mode == EditLayer::Tile) ? -1 : 0;
+            // Mode-dependent values:
+            //   Tile     → LMB paints m_selectedTile, RMB clears (-1)
+            //   Collision→ LMB paints m_selectedCol,  RMB clears (0 = Floor)
+            const int leftVal  = (m_mode == EditLayer::Tile)
+                                     ? m_selectedTile : m_selectedCol;
+            const int rightVal = (m_mode == EditLayer::Tile) ? -1 : 0;
+            const bool shift = Input::IsKeyDown(Key::LeftShift);
+
+            // Fill bucket — F at any time fills the contiguous region of the
+            // cell under the cursor. Same-value fills are no-ops; Undo treats
+            // the whole sweep as one stroke.
+            if (inMap && Input::IsKeyPressed(Key::F)) {
+                FloodFill(tx, ty, leftVal);
+                EndStroke();
+            }
+
+            // Rectangle: shift + LMB/RMB press latches the anchor; release
+            // commits. Shift can be let go mid-drag (we already latched).
+            if (inMap && shift &&
+                Input::IsMousePressed(MouseButton::Left)) {
+                m_rectActive = true;
+                m_rectAnchorX = tx;
+                m_rectAnchorY = ty;
+                m_rectLastButton = 0;
+            } else if (inMap && shift &&
+                       Input::IsMousePressed(MouseButton::Right)) {
+                m_rectActive = true;
+                m_rectAnchorX = tx;
+                m_rectAnchorY = ty;
+                m_rectLastButton = 1;
+            }
+
+            if (m_rectActive) {
+                const bool stillDownL = Input::IsMouseDown(MouseButton::Left);
+                const bool stillDownR = Input::IsMouseDown(MouseButton::Right);
+                const bool stillDown = (m_rectLastButton == 0)
+                                           ? stillDownL : stillDownR;
+                if (!stillDown) {
+                    // Commit. Clamp to map bounds; we may have dragged off
+                    // the edge while looking for a corner.
+                    const int ex = std::clamp(tx, 0, m_map.Width()  - 1);
+                    const int ey = std::clamp(ty, 0, m_map.Height() - 1);
+                    const int x0 = std::min(m_rectAnchorX, ex);
+                    const int x1 = std::max(m_rectAnchorX, ex);
+                    const int y0 = std::min(m_rectAnchorY, ey);
+                    const int y1 = std::max(m_rectAnchorY, ey);
+                    const int v  = (m_rectLastButton == 0) ? leftVal : rightVal;
+                    for (int yy = y0; yy <= y1; ++yy)
+                        for (int xx = x0; xx <= x1; ++xx)
+                            PaintCell(xx, yy, v);
+                    EndStroke();
+                    m_rectActive = false;
+                }
+            } else if (inMap) {
                 if (Input::IsMouseDown(MouseButton::Left)) {
                     PaintCell(tx, ty, leftVal);
                 } else if (Input::IsMouseDown(MouseButton::Right)) {
@@ -568,6 +639,58 @@ private:
         m_currentStroke.reset();
         m_currentTouched.clear();
         m_dirty = false;
+    }
+
+    // Paint-bucket fill. 4-connected BFS over the active layer; only cells
+    // whose current value matches the seed's get repainted. Wrapping all
+    // PaintCell calls in one BeginStroke / EndStroke pair lets Undo collapse
+    // an entire fill into one step.
+    void FloodFill(int sx, int sy, int newId) {
+        if (m_map.Width() <= 0) return;
+        if (sx < 0 || sy < 0 || sx >= m_map.Width() || sy >= m_map.Height())
+            return;
+        // Read seed from the active layer; bail if no change would happen.
+        int seedId = 0;
+        if (m_mode == EditLayer::Tile) {
+            seedId = m_map.GetTile(sx, sy);
+        } else {
+            EnsureCollisionGrid();
+            seedId = int(m_collision[size_t(sy) * m_map.Width() + size_t(sx)]);
+        }
+        if (seedId == newId) return;
+
+        const int W = m_map.Width(), H = m_map.Height();
+        std::vector<uint8_t> visited(size_t(W) * size_t(H), 0);
+        std::vector<std::pair<int,int>> stack;
+        stack.reserve(64);
+        stack.emplace_back(sx, sy);
+        visited[size_t(sy) * W + size_t(sx)] = 1;
+        BeginStroke();
+        while (!stack.empty()) {
+            const auto [x, y] = stack.back();
+            stack.pop_back();
+            // Re-check the value in case an earlier edit in this same fill
+            // already changed it (shouldn't happen with the visited guard,
+            // but keeps the invariant honest if PaintCell is ever extended).
+            int cur = 0;
+            if (m_mode == EditLayer::Tile)
+                cur = m_map.GetTile(x, y);
+            else
+                cur = int(m_collision[size_t(y) * W + size_t(x)]);
+            if (cur != seedId) continue;
+            PaintCell(x, y, newId);
+            const int dx[4] = { 1, -1, 0, 0 };
+            const int dy[4] = { 0, 0, 1, -1 };
+            for (int k = 0; k < 4; ++k) {
+                const int nx = x + dx[k];
+                const int ny = y + dy[k];
+                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+                const size_t i = size_t(ny) * W + size_t(nx);
+                if (visited[i]) continue;
+                visited[i] = 1;
+                stack.emplace_back(nx, ny);
+            }
+        }
     }
 
     void OpenPath(const std::string& path) {
@@ -778,6 +901,24 @@ private:
                             2.0f, kHoverHi);
         }
 
+        // Rectangle marquee preview while shift-dragging. Drawn last so it
+        // sits on top of grid + hover; commit happens on mouse release.
+        if (m_rectActive && m_hoverTx >= 0 && m_hoverTy >= 0) {
+            const int ex = std::clamp(m_hoverTx, 0, m_map.Width()  - 1);
+            const int ey = std::clamp(m_hoverTy, 0, m_map.Height() - 1);
+            const int x0 = std::min(m_rectAnchorX, ex);
+            const int x1 = std::max(m_rectAnchorX, ex);
+            const int y0 = std::min(m_rectAnchorY, ey);
+            const int y1 = std::max(m_rectAnchorY, ey);
+            const Vec2 a = WorldToScreen(
+                {float(x0 * m_tileW), float(y0 * m_tileH)}, origin);
+            const Vec2 b = WorldToScreen(
+                {float((x1 + 1) * m_tileW), float((y1 + 1) * m_tileH)}, origin);
+            const Vec2 sz{b.x - a.x, b.y - a.y};
+            r.DrawQuad(a, sz, Color(1.0f, 0.86f, 0.20f, 0.20f));
+            DrawRectOutline(r, a, sz, 2.0f, kSelectHi);
+        }
+
         // Clip — visually mark the canvas border so it's clear where the
         // panel ends regardless of camera offset.
         DrawRectOutline(r, origin, size, 2.0f, kCanvasOut);
@@ -892,8 +1033,10 @@ private:
                       "MAP: %dx%d   TILE: %dx%d   ZOOM: %.0f%%   "
                       "MODE: %s   SEL: %d   HOVER: %d,%d   "
                       "UNDO: %zu/%zu   %s   "
-                      "LMB paint  RMB erase  MMB pan  WHEEL zoom  G grid  "
-                      "L mode  CTRL+Z undo  CTRL+Y redo  CTRL+S save  "
+                      "LMB paint  RMB erase  SHIFT+drag rect  F fill  "
+                      "MMB pan  WHEEL zoom  HOME reset view  "
+                      "1-9 quick select  G grid  TAB/L mode  "
+                      "CTRL+Z undo  CTRL+Y redo  CTRL+S save  "
                       "CTRL+N new  CTRL+O reload",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
                       m_zoom * 100.0f, modeName, selVal,
@@ -946,6 +1089,15 @@ private:
     std::vector<uint8_t> m_collision;
     EditLayer            m_mode        = EditLayer::Tile;
     int                  m_selectedCol = 1; // default Wall when entering mode
+
+    // Rectangle paint state. Latched when the user pressed LMB while holding
+    // shift; cleared when LMB is released. While latched the per-cell paint
+    // loop is bypassed and the canvas draws a marquee instead -- the
+    // rectangle is only committed on release, as one stroke for undo.
+    bool m_rectActive  = false;
+    int  m_rectAnchorX = 0;
+    int  m_rectAnchorY = 0;
+    int  m_rectLastButton = 0;  // 0 = LMB, 1 = RMB; remembered across the drag
 };
 
 Application* NaraGame::CreateApplication(int argc, char** argv) {
