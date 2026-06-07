@@ -44,6 +44,12 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(_WIN32)
+#  include <windows.h>
+#  include <commdlg.h>
+#  pragma comment(lib, "comdlg32.lib")
+#endif
+
 using namespace NaraGame;
 
 namespace {
@@ -224,6 +230,59 @@ struct EditorArgs {
     int mapH = kDefaultMapH;
 };
 
+// ---------------------------------------------------------------------------
+// Native file dialogs. Returns "" on cancel or platforms that don't have a
+// backend yet. `filter` follows the Win32 `\0` double-terminated convention
+// (e.g. L"PNG\0*.png\0\0"); we don't try to be portable past that.
+// ---------------------------------------------------------------------------
+std::string WideToUtf8(const wchar_t* w) {
+    if (!w || !*w) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0,
+                                      nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string out(size_t(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+std::string OpenFileDialog(const wchar_t* filter, const wchar_t* title) {
+#if defined(_WIN32)
+    wchar_t buf[MAX_PATH] = {0};
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile   = buf;
+    ofn.nMaxFile    = MAX_PATH;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrTitle  = title;
+    ofn.Flags       = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return {};
+    return WideToUtf8(buf);
+#else
+    (void)filter; (void)title;
+    return {};
+#endif
+}
+
+std::string SaveFileDialog(const wchar_t* filter, const wchar_t* title,
+                           const wchar_t* defExt) {
+#if defined(_WIN32)
+    wchar_t buf[MAX_PATH] = {0};
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile   = buf;
+    ofn.nMaxFile    = MAX_PATH;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrTitle  = title;
+    ofn.lpstrDefExt = defExt;
+    ofn.Flags       = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&ofn)) return {};
+    return WideToUtf8(buf);
+#else
+    (void)filter; (void)title; (void)defExt;
+    return {};
+#endif
+}
+
 EditorArgs ParseArgs(int argc, char** argv) {
     EditorArgs a;
     for (int i = 1; i < argc; ++i) {
@@ -335,19 +394,38 @@ protected:
             }
         }
         if (ctrl && Input::IsKeyPressed(Key::S) && m_map.Width() > 0) {
-            SaveCurrent();
+            // First save → pop a Save As dialog so the user can pick where
+            // the .ntmap lands. After that Ctrl+S writes back to the same
+            // path silently.
+            if (m_filePath.empty()) {
+                const std::string p = SaveFileDialog(
+                    L"NaraGame tilemap (*.ntmap)\0*.ntmap\0All files\0*.*\0",
+                    L"Save tilemap as", L"ntmap");
+                if (!p.empty()) m_filePath = p;
+            }
+            if (!m_filePath.empty()) SaveCurrent();
         }
-        if (ctrl && Input::IsKeyPressed(Key::O) && !m_args.mapPath.empty()) {
-            OpenPath(m_args.mapPath);
+        if (ctrl && Input::IsKeyPressed(Key::O)) {
+            const std::string p = OpenFileDialog(
+                L"Tilemap (*.ntmap; *.tmx)\0*.ntmap;*.tmx\0"
+                L"All files\0*.*\0",
+                L"Open tilemap");
+            if (!p.empty()) OpenPath(p);
         }
         if (ctrl && Input::IsKeyPressed(Key::N)) {
-            // Re-use current tileset if any; otherwise the CLI tileset.
-            const std::string tsPath = m_currentTilesetPath.empty()
-                ? m_args.tilesetPath : m_currentTilesetPath;
-            if (!tsPath.empty()) {
-                StartNewMapWithTileset(tsPath, m_tileW, m_tileH,
+            // Pop a PNG picker for the tileset. The result starts a blank
+            // map sized kDefaultMapW x kDefaultMapH at the existing tile
+            // size (or kDefaultTileSz when nothing was loaded yet); the
+            // user can resize with Ctrl+arrow afterwards.
+            const std::string png = OpenFileDialog(
+                L"PNG image (*.png)\0*.png\0All files\0*.*\0",
+                L"Pick tileset PNG for new map");
+            if (!png.empty()) {
+                const int tw = m_tileW > 0 ? m_tileW : kDefaultTileSz;
+                const int th = m_tileH > 0 ? m_tileH : kDefaultTileSz;
+                StartNewMapWithTileset(png, tw, th,
                                        kDefaultMapW, kDefaultMapH);
-                m_filePath = ReplaceExt(tsPath, ".ntmap");
+                m_filePath = ReplaceExt(png, ".ntmap");
             }
         }
 
@@ -427,57 +505,73 @@ protected:
                                      ? m_selectedTile : m_selectedCol;
             const int rightVal = (m_mode == EditLayer::Tile) ? -1 : 0;
             const bool shift = Input::IsKeyDown(Key::LeftShift);
+            const bool alt   = Input::IsKeyDown(Key::LeftAlt);
 
-            // Fill bucket — F at any time fills the contiguous region of the
-            // cell under the cursor. Same-value fills are no-ops; Undo treats
-            // the whole sweep as one stroke.
-            if (inMap && Input::IsKeyPressed(Key::F)) {
-                FloodFill(tx, ty, leftVal);
-                EndStroke();
-            }
-
-            // Rectangle: shift + LMB/RMB press latches the anchor; release
-            // commits. Shift can be let go mid-drag (we already latched).
-            if (inMap && shift &&
-                Input::IsMousePressed(MouseButton::Left)) {
-                m_rectActive = true;
-                m_rectAnchorX = tx;
-                m_rectAnchorY = ty;
-                m_rectLastButton = 0;
-            } else if (inMap && shift &&
-                       Input::IsMousePressed(MouseButton::Right)) {
-                m_rectActive = true;
-                m_rectAnchorX = tx;
-                m_rectAnchorY = ty;
-                m_rectLastButton = 1;
-            }
-
-            if (m_rectActive) {
-                const bool stillDownL = Input::IsMouseDown(MouseButton::Left);
-                const bool stillDownR = Input::IsMouseDown(MouseButton::Right);
-                const bool stillDown = (m_rectLastButton == 0)
-                                           ? stillDownL : stillDownR;
-                if (!stillDown) {
-                    // Commit. Clamp to map bounds; we may have dragged off
-                    // the edge while looking for a corner.
-                    const int ex = std::clamp(tx, 0, m_map.Width()  - 1);
-                    const int ey = std::clamp(ty, 0, m_map.Height() - 1);
-                    const int x0 = std::min(m_rectAnchorX, ex);
-                    const int x1 = std::max(m_rectAnchorX, ex);
-                    const int y0 = std::min(m_rectAnchorY, ey);
-                    const int y1 = std::max(m_rectAnchorY, ey);
-                    const int v  = (m_rectLastButton == 0) ? leftVal : rightVal;
-                    for (int yy = y0; yy <= y1; ++yy)
-                        for (int xx = x0; xx <= x1; ++xx)
-                            PaintCell(xx, yy, v);
-                    EndStroke();
-                    m_rectActive = false;
+            // Eyedropper (Alt + LMB). Picks the hover cell's value into the
+            // active selection so the user can re-paint with it. While Alt
+            // is held we suppress fill / rect / paint entirely -- a missed
+            // pick shouldn't splat the previous selection over the source.
+            if (alt) {
+                if (inMap && Input::IsMousePressed(MouseButton::Left)) {
+                    if (m_mode == EditLayer::Tile) {
+                        const int id = m_map.GetTile(tx, ty);
+                        if (id >= 0) m_selectedTile = id;
+                    } else if (!m_collision.empty()) {
+                        m_selectedCol = int(
+                            m_collision[size_t(ty) * m_map.Width()
+                                        + size_t(tx)]);
+                    }
                 }
-            } else if (inMap) {
-                if (Input::IsMouseDown(MouseButton::Left)) {
-                    PaintCell(tx, ty, leftVal);
-                } else if (Input::IsMouseDown(MouseButton::Right)) {
-                    PaintCell(tx, ty, rightVal);
+            } else {
+                // Fill bucket — F at any time fills the contiguous region
+                // of the cell under the cursor. Same-value fills are
+                // no-ops; Undo treats the whole sweep as one stroke.
+                if (inMap && Input::IsKeyPressed(Key::F)) {
+                    FloodFill(tx, ty, leftVal);
+                    EndStroke();
+                }
+
+                // Rectangle: shift + LMB/RMB press latches the anchor;
+                // release commits. Shift can be let go mid-drag (latched).
+                if (inMap && shift &&
+                    Input::IsMousePressed(MouseButton::Left)) {
+                    m_rectActive = true;
+                    m_rectAnchorX = tx;
+                    m_rectAnchorY = ty;
+                    m_rectLastButton = 0;
+                } else if (inMap && shift &&
+                           Input::IsMousePressed(MouseButton::Right)) {
+                    m_rectActive = true;
+                    m_rectAnchorX = tx;
+                    m_rectAnchorY = ty;
+                    m_rectLastButton = 1;
+                }
+
+                if (m_rectActive) {
+                    const bool stillDownL = Input::IsMouseDown(MouseButton::Left);
+                    const bool stillDownR = Input::IsMouseDown(MouseButton::Right);
+                    const bool stillDown = (m_rectLastButton == 0)
+                                               ? stillDownL : stillDownR;
+                    if (!stillDown) {
+                        const int ex = std::clamp(tx, 0, m_map.Width()  - 1);
+                        const int ey = std::clamp(ty, 0, m_map.Height() - 1);
+                        const int x0 = std::min(m_rectAnchorX, ex);
+                        const int x1 = std::max(m_rectAnchorX, ex);
+                        const int y0 = std::min(m_rectAnchorY, ey);
+                        const int y1 = std::max(m_rectAnchorY, ey);
+                        const int v  = (m_rectLastButton == 0) ? leftVal : rightVal;
+                        for (int yy = y0; yy <= y1; ++yy)
+                            for (int xx = x0; xx <= x1; ++xx)
+                                PaintCell(xx, yy, v);
+                        EndStroke();
+                        m_rectActive = false;
+                    }
+                } else if (inMap) {
+                    if (Input::IsMouseDown(MouseButton::Left)) {
+                        PaintCell(tx, ty, leftVal);
+                    } else if (Input::IsMouseDown(MouseButton::Right)) {
+                        PaintCell(tx, ty, rightVal);
+                    }
                 }
             }
         } else {
@@ -1161,12 +1255,13 @@ private:
                       "MAP: %dx%d   TILE: %dx%d   ZOOM: %.0f%%   "
                       "MODE: %s   SEL: %d   HOVER: %d,%d   "
                       "UNDO: %zu/%zu   %s   "
-                      "LMB paint  RMB erase  SHIFT+drag rect  F fill  "
+                      "LMB paint  RMB erase  ALT+click pick  "
+                      "SHIFT+drag rect  F fill  "
                       "MMB pan  WHEEL zoom  HOME reset view  "
                       "1-9 quick select  G grid  TAB/L mode  "
                       "CTRL+ARROW grow  CTRL+SHIFT+ARROW shrink  "
                       "CTRL+Z undo  CTRL+Y redo  CTRL+S save  "
-                      "CTRL+N new  CTRL+O reload",
+                      "CTRL+N new  CTRL+O open",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
                       m_zoom * 100.0f, modeName, selVal,
                       hx, hy, m_undoStack.size(), m_redoStack.size(),
