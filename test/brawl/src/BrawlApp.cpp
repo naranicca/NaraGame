@@ -12,6 +12,7 @@
 //              Esc back to title
 //   Game over: Enter restart, Esc title
 
+#include <NaraGame/assets/AssetWatcher.h>
 #include <NaraGame/assets/MSDFFontLoader.h>
 #include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/assets/TilemapLoader.h>
@@ -905,14 +906,45 @@ public:
     }
 
     // Try to load a .ntmap background once. Silently no-ops if the file is
-    // missing (the procedural checker floor stays as the fallback).
+    // missing (the procedural checker floor stays as the fallback). Starts
+    // a recursive watch on the assets directory so an editor save lands
+    // back in the game without a restart -- the actual reload runs on the
+    // next Poll() call to keep all GPU work on the main thread.
     void EnsureBackgroundMap() {
         if (m_bgAsset.valid || !m_ctx->device) return;
-        const std::string path = std::string(NARAGAME_ASSETS_DIR) + "/arena-bg.ntmap";
+        const std::string assetsDir = std::string(NARAGAME_ASSETS_DIR);
+        const std::string path = assetsDir + "/arena-bg.ntmap";
         m_bgAsset = LoadNtmap(*m_ctx->device, path, TextureFilter::Point);
         if (!m_bgAsset.valid) {
             NARAGAME_INFO("brawl: no '%s' (using procedural floor)", path.c_str());
         }
+        m_bgWatcher.Watch(assetsDir,
+            [this](const std::string& rel) {
+                // arena-bg.ntmap and bg-tileset.png both rebuild the bg.
+                if (rel == "arena-bg.ntmap" || rel == "bg-tileset.png") {
+                    m_bgReloadPending = true;
+                }
+            });
+    }
+
+    // Drop the cached bg and reload from disk. Re-runs Rebuild() so any new
+    // collision section in the saved .ntmap takes effect immediately;
+    // teleports the player back to spawn so they can't get stuck inside a
+    // freshly painted wall.
+    void ReloadBackgroundMap() {
+        if (!m_ctx->device) return;
+        const std::string path = std::string(NARAGAME_ASSETS_DIR)
+                                 + "/arena-bg.ntmap";
+        TilemapAsset fresh = LoadNtmap(*m_ctx->device, path,
+                                       TextureFilter::Point);
+        if (!fresh.valid) {
+            NARAGAME_WARN("brawl: bg reload skipped (load failed for '%s')",
+                          path.c_str());
+            return;
+        }
+        m_bgAsset = std::move(fresh);
+        Rebuild();
+        NARAGAME_INFO("brawl: bg reloaded");
     }
 
     void EnsureBitmapFont() {
@@ -1434,6 +1466,16 @@ public:
     }
 
     void OnUpdate(float dt) override {
+        // Drain the bg watcher first. The callback only flips a flag, so
+        // the actual reload runs here on the main thread where it's safe
+        // to touch the device and rebuild the grid. Polling per frame is
+        // cheap when nothing changed.
+        m_bgWatcher.Poll();
+        if (m_bgReloadPending) {
+            m_bgReloadPending = false;
+            ReloadBackgroundMap();
+        }
+
         // Esc means different things in different states:
         //   - dead    → quit to title (matches the death overlay's hint)
         //   - paused  → resume (toggle off)
@@ -3110,6 +3152,11 @@ private:
     // y-compressed projection). Loaded on enter; valid=false silently falls
     // back to the procedural checker floor.
     TilemapAsset m_bgAsset;
+    // Watches the assets/ dir so saves from the in-engine editor land back
+    // in-game without a restart. arena-bg.ntmap and bg-tileset.png both
+    // trigger a reload through the same EnsureBackgroundMap path.
+    AssetWatcher m_bgWatcher;
+    bool         m_bgReloadPending = false;
     int     m_shadowW = 0, m_shadowH = 0;
     Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
     float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
