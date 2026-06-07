@@ -351,12 +351,23 @@ protected:
             }
         }
 
-        // ----- Camera pan -----
-        const float panSpeed = 400.0f / std::max(0.5f, m_zoom);
-        if (Input::IsKeyDown(Key::Left))  m_camera.x -= panSpeed * dt;
-        if (Input::IsKeyDown(Key::Right)) m_camera.x += panSpeed * dt;
-        if (Input::IsKeyDown(Key::Up))    m_camera.y -= panSpeed * dt;
-        if (Input::IsKeyDown(Key::Down))  m_camera.y += panSpeed * dt;
+        // ----- Camera pan / resize -----
+        // Ctrl claims the arrow keys for resize ops, so pan only runs when
+        // Ctrl is up. Resize is edge-triggered (one tap = one row/col).
+        if (ctrl) {
+            const bool shrink = Input::IsKeyDown(Key::LeftShift);
+            const int  d      = shrink ? -1 : +1;
+            if (Input::IsKeyPressed(Key::Left))  DoResize(ResizeEdge::Left,   d);
+            if (Input::IsKeyPressed(Key::Right)) DoResize(ResizeEdge::Right,  d);
+            if (Input::IsKeyPressed(Key::Up))    DoResize(ResizeEdge::Top,    d);
+            if (Input::IsKeyPressed(Key::Down))  DoResize(ResizeEdge::Bottom, d);
+        } else {
+            const float panSpeed = 400.0f / std::max(0.5f, m_zoom);
+            if (Input::IsKeyDown(Key::Left))  m_camera.x -= panSpeed * dt;
+            if (Input::IsKeyDown(Key::Right)) m_camera.x += panSpeed * dt;
+            if (Input::IsKeyDown(Key::Up))    m_camera.y -= panSpeed * dt;
+            if (Input::IsKeyDown(Key::Down))  m_camera.y += panSpeed * dt;
+        }
 
         // Middle-drag pan.
         if (Input::IsMousePressed(MouseButton::Middle) && m_inCanvas) {
@@ -545,7 +556,22 @@ private:
     // mid-way -- this just keeps the undo stack honest if it ever does.
     enum class EditLayer : int { Tile = 0, Collision = 1 };
     struct StrokeEdit { EditLayer layer; int x, y, oldId, newId; };
-    struct Stroke     { std::vector<StrokeEdit> edits; };
+
+    // Resize is too coarse to express as cell edits -- one operation can
+    // change the dimensions and shift every cell. Stash whole-grid before /
+    // after snapshots in a Stroke and undo by restoring the old shape.
+    struct ResizeSnapshot {
+        int                  oldW = 0, oldH = 0;
+        std::vector<int>     oldTiles;
+        std::vector<uint8_t> oldCol;
+        int                  newW = 0, newH = 0;
+        std::vector<int>     newTiles;
+        std::vector<uint8_t> newCol;
+    };
+    struct Stroke {
+        std::vector<StrokeEdit>         edits;
+        std::unique_ptr<ResizeSnapshot> resize;   // null for normal strokes
+    };
     static constexpr size_t kUndoLimit = 200;
 
     // Paint to the currently active layer. Routes to either the visual
@@ -609,14 +635,36 @@ private:
         }
     }
 
+    // Swap the whole map/collision out for the supplied snapshot. Used by
+    // both DoResize (forward) and Undo/Redo (backward/forward); keeps the
+    // SpriteSheet binding the editor already had so palette / drawing keep
+    // working without re-binding tileset state.
+    void ApplyResizeSnapshot(int w, int h,
+                             const std::vector<int>& tiles,
+                             const std::vector<uint8_t>& col) {
+        Tilemap newMap(w, h, float(m_tileW), float(m_tileH));
+        newMap.SetTileset(m_sheet);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                newMap.SetTile(x, y, tiles[size_t(y) * size_t(w) + size_t(x)]);
+        m_map       = std::move(newMap);
+        m_collision = col;
+    }
+
     void Undo() {
         if (m_undoStack.empty()) return;
         Stroke s = std::move(m_undoStack.back());
         m_undoStack.pop_back();
-        // Apply in reverse so overlapping edits inside one stroke wind back
-        // to the original baseline rather than to an intermediate state.
-        for (auto it = s.edits.rbegin(); it != s.edits.rend(); ++it) {
-            ApplyEdit(*it, /*undo=*/true);
+        if (s.resize) {
+            ApplyResizeSnapshot(s.resize->oldW, s.resize->oldH,
+                                s.resize->oldTiles, s.resize->oldCol);
+        } else {
+            // Apply in reverse so overlapping edits inside one stroke wind
+            // back to the original baseline rather than to an intermediate
+            // state.
+            for (auto it = s.edits.rbegin(); it != s.edits.rend(); ++it) {
+                ApplyEdit(*it, /*undo=*/true);
+            }
         }
         m_redoStack.push_back(std::move(s));
         m_dirty = true;
@@ -626,8 +674,13 @@ private:
         if (m_redoStack.empty()) return;
         Stroke s = std::move(m_redoStack.back());
         m_redoStack.pop_back();
-        for (auto& e : s.edits) {
-            ApplyEdit(e, /*undo=*/false);
+        if (s.resize) {
+            ApplyResizeSnapshot(s.resize->newW, s.resize->newH,
+                                s.resize->newTiles, s.resize->newCol);
+        } else {
+            for (auto& e : s.edits) {
+                ApplyEdit(e, /*undo=*/false);
+            }
         }
         m_undoStack.push_back(std::move(s));
         m_dirty = true;
@@ -639,6 +692,81 @@ private:
         m_currentStroke.reset();
         m_currentTouched.clear();
         m_dirty = false;
+    }
+
+    // Map resize. delta > 0 grows by one row/col on the given edge; delta < 0
+    // shrinks. Shrinking past 1 in either axis is a no-op (a zero-area map
+    // breaks every other path). When growing, the new cells are -1 / 0
+    // (empty tile / Floor); when shrinking, dropped cells are kept in the
+    // ResizeSnapshot so Undo can put them back.
+    enum class ResizeEdge { Left, Right, Top, Bottom };
+
+    void DoResize(ResizeEdge edge, int delta) {
+        if (m_map.Width() <= 0 || delta == 0) return;
+        const int W = m_map.Width();
+        const int H = m_map.Height();
+        int newW = W, newH = H;
+        switch (edge) {
+            case ResizeEdge::Left:
+            case ResizeEdge::Right:  newW = W + delta; break;
+            case ResizeEdge::Top:
+            case ResizeEdge::Bottom: newH = H + delta; break;
+        }
+        if (newW < 1 || newH < 1) return;
+
+        const bool hasCol = (m_collision.size() == size_t(W) * size_t(H));
+        std::vector<int>     oldTiles(size_t(W) * size_t(H), -1);
+        std::vector<uint8_t> oldCol;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+                oldTiles[size_t(y) * W + x] = m_map.GetTile(x, y);
+        if (hasCol) oldCol = m_collision;
+
+        // src(x, y) — index from the OLD grid that the NEW cell (x, y) takes
+        // its value from. Returns -1 if there's no source (newly added edge).
+        // For shrink ops we just shift the window; for grow ops we offset.
+        auto src = [&](int x, int y, int& sx, int& sy) {
+            sx = x; sy = y;
+            switch (edge) {
+                case ResizeEdge::Left:   sx = x - delta; break;
+                case ResizeEdge::Right:  /* sx = x */     break;
+                case ResizeEdge::Top:    sy = y - delta; break;
+                case ResizeEdge::Bottom: /* sy = y */     break;
+            }
+        };
+
+        std::vector<int>     newTiles(size_t(newW) * size_t(newH), -1);
+        std::vector<uint8_t> newCol;
+        if (hasCol) newCol.assign(size_t(newW) * size_t(newH), 0);
+        for (int y = 0; y < newH; ++y) {
+            for (int x = 0; x < newW; ++x) {
+                int sx, sy;
+                src(x, y, sx, sy);
+                if (sx >= 0 && sy >= 0 && sx < W && sy < H) {
+                    newTiles[size_t(y) * newW + x] = oldTiles[size_t(sy) * W + sx];
+                    if (hasCol)
+                        newCol[size_t(y) * newW + x] = oldCol[size_t(sy) * W + sx];
+                }
+            }
+        }
+
+        // Push a resize-only stroke onto the undo stack and clear redo.
+        // Any in-flight paint stroke is finalised first so the resize
+        // doesn't bury an un-pushed paint operation.
+        if (m_currentStroke) EndStroke();
+        Stroke s;
+        s.resize = std::make_unique<ResizeSnapshot>();
+        s.resize->oldW = W;     s.resize->oldH = H;
+        s.resize->oldTiles = std::move(oldTiles);
+        s.resize->oldCol   = std::move(oldCol);
+        s.resize->newW = newW;  s.resize->newH = newH;
+        s.resize->newTiles = newTiles;
+        s.resize->newCol   = newCol;
+        ApplyResizeSnapshot(newW, newH, newTiles, newCol);
+        m_undoStack.push_back(std::move(s));
+        if (m_undoStack.size() > kUndoLimit) m_undoStack.pop_front();
+        m_redoStack.clear();
+        m_dirty = true;
     }
 
     // Paint-bucket fill. 4-connected BFS over the active layer; only cells
@@ -1036,6 +1164,7 @@ private:
                       "LMB paint  RMB erase  SHIFT+drag rect  F fill  "
                       "MMB pan  WHEEL zoom  HOME reset view  "
                       "1-9 quick select  G grid  TAB/L mode  "
+                      "CTRL+ARROW grow  CTRL+SHIFT+ARROW shrink  "
                       "CTRL+Z undo  CTRL+Y redo  CTRL+S save  "
                       "CTRL+N new  CTRL+O reload",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
