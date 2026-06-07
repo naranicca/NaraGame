@@ -44,13 +44,15 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
     std::string tilesetRel;
     int cellW = 0, cellH = 0, margin = 0, spacing = 0;
     int mapW = 0, mapH = 0;
-    std::vector<int>     tiles;
-    std::vector<uint8_t> collision;
+    std::vector<int>          tiles;
+    std::vector<uint8_t>      collision;
+    std::vector<ObjectMarker> objects;
     bool sawHeader  = false;
     bool sawTileset = false;
     bool sawSize    = false;
-    // section tracks which body block subsequent integer lines belong to.
-    // 0 = none, 1 = layer (tile ids), 2 = collision (uint8 codes).
+    // section tracks which body block subsequent body lines belong to.
+    // 0 = none, 1 = layer (tile ids), 2 = collision (uint8 codes),
+    // 3 = objects (symbol + x + y per line).
     int section = 0;
 
     std::string line;
@@ -60,11 +62,31 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
         if (line.empty()) continue;
         if (line[0] == '#') continue;
         std::istringstream ls(line);
-        // A line starting with a number/minus belongs to the active section;
-        // any other leading token is a new directive and ends the section.
+        // A numeric line continues a layer/collision section. The objects
+        // section is line-oriented (`<sym> <x> <y>`), so we route it on its
+        // own: a line is an object entry as long as the active section is
+        // "objects" and we can read at least a symbol character.
         const char first = line[0];
         const bool isData = (first == '-' || (first >= '0' && first <= '9'));
-        if (section != 0 && isData) {
+        if (section == 3) {
+            // Each line: <symbol> <x> <y>. Skip if the leading token isn't
+            // a single printable char (probably a new directive).
+            std::string sym;
+            int ox, oy;
+            if ((ls >> sym >> ox >> oy) && sym.size() == 1) {
+                ObjectMarker m;
+                m.symbol = sym[0];
+                m.x = ox;
+                m.y = oy;
+                objects.push_back(m);
+                continue;
+            }
+            // Fall through to the directive branch -- this wasn't an object
+            // line after all.
+            ls.clear();
+            ls.seekg(0);
+        }
+        if (section != 0 && section != 3 && isData) {
             int v;
             while (ls >> v) {
                 if (section == 1) tiles.push_back(v);
@@ -96,6 +118,8 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             section = 1;
         } else if (tok == "collision") {
             section = 2;
+        } else if (tok == "objects") {
+            section = 3;
         }
     }
 
@@ -140,6 +164,13 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
         NARAGAME_WARN("LoadNtmap: '%s' collision size %zu != %zu, ignored",
                       path.c_str(), collision.size(), expected);
     }
+    // Objects: drop entries pointing outside the map but keep the rest;
+    // resizing a map shouldn't silently delete every marker.
+    for (const auto& m : objects) {
+        if (m.x >= 0 && m.y >= 0 && m.x < mapW && m.y < mapH) {
+            asset.objects.push_back(m);
+        }
+    }
 
     asset.tilesetPath = tilesetRel;
     asset.tileWidth   = cellW;
@@ -151,7 +182,8 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
 bool SaveNtmap(const std::string& path, const Tilemap& map,
                const std::string& tilesetPath, int tileWidth, int tileHeight,
                int margin, int spacing,
-               const std::vector<uint8_t>& collision) {
+               const std::vector<uint8_t>& collision,
+               const std::vector<ObjectMarker>& objects) {
     std::ofstream out(path, std::ios::binary);
     if (!out.is_open()) {
         NARAGAME_ERROR("SaveNtmap: cannot open '%s' for write", path.c_str());
@@ -181,6 +213,17 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                 out << int(collision[size_t(y) * map.Width() + x]);
             }
             out << '\n';
+        }
+    }
+    if (!objects.empty()) {
+        out << "objects\n";
+        for (const auto& m : objects) {
+            // Skip markers that no longer fit. They've been dropped from
+            // the asset by the loader's clip step too, so a round-trip
+            // never resurrects them.
+            if (m.x < 0 || m.y < 0 ||
+                m.x >= map.Width() || m.y >= map.Height()) continue;
+            out << m.symbol << ' ' << m.x << ' ' << m.y << '\n';
         }
     }
     return out.good();

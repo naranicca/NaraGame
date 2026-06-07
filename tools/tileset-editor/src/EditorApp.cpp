@@ -374,8 +374,9 @@ protected:
         // ----- Global shortcuts -----
         if (Input::IsKeyPressed(Key::G)) m_grid = !m_grid;
         if (Input::IsKeyPressed(Key::L) || Input::IsKeyPressed(Key::Tab)) {
-            m_mode = (m_mode == EditLayer::Tile) ? EditLayer::Collision
-                                                 : EditLayer::Tile;
+            // 3-way cycle: Tile → Collision → Object → Tile.
+            m_mode = static_cast<EditLayer>(
+                (static_cast<int>(m_mode) + 1) % 3);
             if (m_mode == EditLayer::Collision) EnsureCollisionGrid();
         }
         // Home: recentre the canvas. Pretty much always the right "I got lost"
@@ -397,8 +398,10 @@ protected:
                 if (!Input::IsKeyPressed(digits[i])) continue;
                 if (m_mode == EditLayer::Tile) {
                     if (i < m_sheet.Count()) m_selectedTile = i;
-                } else if (i < 3) {
-                    m_selectedCol = i;
+                } else if (m_mode == EditLayer::Collision) {
+                    if (i < 3) m_selectedCol = i;
+                } else {
+                    if (i < kObjectSymbolCount) m_selectedSym = kObjectSymbols[i];
                 }
             }
         }
@@ -504,6 +507,9 @@ protected:
             } else if (m_mode == EditLayer::Collision) {
                 const int picked = CollisionPaletteHit(mouse, paletteOrigin);
                 if (picked >= 0) m_selectedCol = picked;
+            } else if (m_mode == EditLayer::Object) {
+                const int picked = ObjectPaletteHit(mouse, paletteOrigin);
+                if (picked >= 0) m_selectedSym = kObjectSymbols[picked];
             }
         }
 
@@ -518,10 +524,18 @@ protected:
                                tx < m_map.Width() && ty < m_map.Height();
             // Mode-dependent values:
             //   Tile     → LMB paints m_selectedTile, RMB clears (-1)
-            //   Collision→ LMB paints m_selectedCol,  RMB clears (0 = Floor)
-            const int leftVal  = (m_mode == EditLayer::Tile)
-                                     ? m_selectedTile : m_selectedCol;
-            const int rightVal = (m_mode == EditLayer::Tile) ? -1 : 0;
+            //   Collision→ LMB paints m_selectedCol,  RMB clears (0=Floor)
+            //   Object   → LMB paints m_selectedSym,  RMB clears (0=remove)
+            int leftVal = 0, rightVal = 0;
+            switch (m_mode) {
+                case EditLayer::Tile:
+                    leftVal = m_selectedTile; rightVal = -1; break;
+                case EditLayer::Collision:
+                    leftVal = m_selectedCol;  rightVal = 0;  break;
+                case EditLayer::Object:
+                    leftVal = int(uint8_t(m_selectedSym));
+                    rightVal = 0;  break;
+            }
             const bool shift = Input::IsKeyDown(Key::LeftShift);
             const bool alt   = Input::IsKeyDown(Key::LeftAlt);
 
@@ -693,19 +707,21 @@ private:
     // edit landed on (0 = tile id, 1 = collision code). One stroke can
     // freely mix both layers, but in practice a drag never switches modes
     // mid-way -- this just keeps the undo stack honest if it ever does.
-    enum class EditLayer : int { Tile = 0, Collision = 1 };
+    enum class EditLayer : int { Tile = 0, Collision = 1, Object = 2 };
     struct StrokeEdit { EditLayer layer; int x, y, oldId, newId; };
 
     // Resize is too coarse to express as cell edits -- one operation can
     // change the dimensions and shift every cell. Stash whole-grid before /
     // after snapshots in a Stroke and undo by restoring the old shape.
     struct ResizeSnapshot {
-        int                  oldW = 0, oldH = 0;
-        std::vector<int>     oldTiles;
-        std::vector<uint8_t> oldCol;
-        int                  newW = 0, newH = 0;
-        std::vector<int>     newTiles;
-        std::vector<uint8_t> newCol;
+        int                       oldW = 0, oldH = 0;
+        std::vector<int>          oldTiles;
+        std::vector<uint8_t>      oldCol;
+        std::vector<ObjectMarker> oldObjects;
+        int                       newW = 0, newH = 0;
+        std::vector<int>          newTiles;
+        std::vector<uint8_t>      newCol;
+        std::vector<ObjectMarker> newObjects;
     };
     struct Stroke {
         std::vector<StrokeEdit>         edits;
@@ -714,7 +730,9 @@ private:
     static constexpr size_t kUndoLimit = 200;
 
     // Paint to the currently active layer. Routes to either the visual
-    // Tilemap or the parallel collision grid based on m_mode.
+    // Tilemap, the parallel collision grid, or the object marker list
+    // based on m_mode. For objects, newId is the symbol char (0 = no
+    // marker / erase).
     void PaintCell(int x, int y, int newId) {
         if (m_map.Width() <= 0) return;
         if (m_mode == EditLayer::Tile) {
@@ -722,15 +740,38 @@ private:
             if (oldId == newId) return;
             RecordEdit(EditLayer::Tile, x, y, oldId, newId);
             m_map.SetTile(x, y, newId);
-        } else {
+        } else if (m_mode == EditLayer::Collision) {
             EnsureCollisionGrid();
             const size_t idx = size_t(y) * m_map.Width() + size_t(x);
             const int oldId = int(m_collision[idx]);
             if (oldId == newId) return;
             RecordEdit(EditLayer::Collision, x, y, oldId, newId);
             m_collision[idx] = uint8_t(newId);
+        } else {
+            const int oldSym = GetObjectSymbol(x, y);
+            if (oldSym == newId) return;
+            RecordEdit(EditLayer::Object, x, y, oldSym, newId);
+            SetObjectSymbol(x, y, char(newId));
         }
         m_dirty = true;
+    }
+
+    // Object marker helpers. Markers live in a flat std::vector; at most
+    // one per cell so writes are insert-or-replace and 0 means "remove".
+    int GetObjectSymbol(int x, int y) const {
+        for (const auto& m : m_objects)
+            if (m.x == x && m.y == y) return int(uint8_t(m.symbol));
+        return 0;
+    }
+    void SetObjectSymbol(int x, int y, char sym) {
+        for (auto it = m_objects.begin(); it != m_objects.end(); ++it) {
+            if (it->x == x && it->y == y) {
+                if (sym == 0) m_objects.erase(it);
+                else it->symbol = sym;
+                return;
+            }
+        }
+        if (sym != 0) m_objects.push_back({sym, x, y});
     }
 
     void RecordEdit(EditLayer layer, int x, int y, int oldId, int newId) {
@@ -768,9 +809,11 @@ private:
         const int v = undo ? e.oldId : e.newId;
         if (e.layer == EditLayer::Tile) {
             m_map.SetTile(e.x, e.y, v);
-        } else {
+        } else if (e.layer == EditLayer::Collision) {
             EnsureCollisionGrid();
             m_collision[size_t(e.y) * m_map.Width() + size_t(e.x)] = uint8_t(v);
+        } else {
+            SetObjectSymbol(e.x, e.y, char(v));
         }
     }
 
@@ -780,7 +823,8 @@ private:
     // working without re-binding tileset state.
     void ApplyResizeSnapshot(int w, int h,
                              const std::vector<int>& tiles,
-                             const std::vector<uint8_t>& col) {
+                             const std::vector<uint8_t>& col,
+                             const std::vector<ObjectMarker>& objs) {
         Tilemap newMap(w, h, float(m_tileW), float(m_tileH));
         newMap.SetTileset(m_sheet);
         for (int y = 0; y < h; ++y)
@@ -788,6 +832,7 @@ private:
                 newMap.SetTile(x, y, tiles[size_t(y) * size_t(w) + size_t(x)]);
         m_map       = std::move(newMap);
         m_collision = col;
+        m_objects   = objs;
     }
 
     void Undo() {
@@ -796,7 +841,8 @@ private:
         m_undoStack.pop_back();
         if (s.resize) {
             ApplyResizeSnapshot(s.resize->oldW, s.resize->oldH,
-                                s.resize->oldTiles, s.resize->oldCol);
+                                s.resize->oldTiles, s.resize->oldCol,
+                                s.resize->oldObjects);
         } else {
             // Apply in reverse so overlapping edits inside one stroke wind
             // back to the original baseline rather than to an intermediate
@@ -815,7 +861,8 @@ private:
         m_redoStack.pop_back();
         if (s.resize) {
             ApplyResizeSnapshot(s.resize->newW, s.resize->newH,
-                                s.resize->newTiles, s.resize->newCol);
+                                s.resize->newTiles, s.resize->newCol,
+                                s.resize->newObjects);
         } else {
             for (auto& e : s.edits) {
                 ApplyEdit(e, /*undo=*/false);
@@ -955,6 +1002,24 @@ private:
             }
         }
 
+        // Object markers shift by the same delta as the cells on a grow
+        // edge / shift inward on a shrink edge; anything that falls off
+        // the new bounds is dropped (Undo's snapshot keeps the originals).
+        std::vector<ObjectMarker> oldObjects = m_objects;
+        std::vector<ObjectMarker> newObjects;
+        newObjects.reserve(oldObjects.size());
+        for (const auto& m : oldObjects) {
+            int mx = m.x, my = m.y;
+            switch (edge) {
+                case ResizeEdge::Left:   mx += delta; break;
+                case ResizeEdge::Right:                break;
+                case ResizeEdge::Top:    my += delta; break;
+                case ResizeEdge::Bottom:               break;
+            }
+            if (mx >= 0 && my >= 0 && mx < newW && my < newH)
+                newObjects.push_back({m.symbol, mx, my});
+        }
+
         // Push a resize-only stroke onto the undo stack and clear redo.
         // Any in-flight paint stroke is finalised first so the resize
         // doesn't bury an un-pushed paint operation.
@@ -962,12 +1027,14 @@ private:
         Stroke s;
         s.resize = std::make_unique<ResizeSnapshot>();
         s.resize->oldW = W;     s.resize->oldH = H;
-        s.resize->oldTiles = std::move(oldTiles);
-        s.resize->oldCol   = std::move(oldCol);
+        s.resize->oldTiles   = std::move(oldTiles);
+        s.resize->oldCol     = std::move(oldCol);
+        s.resize->oldObjects = std::move(oldObjects);
         s.resize->newW = newW;  s.resize->newH = newH;
-        s.resize->newTiles = newTiles;
-        s.resize->newCol   = newCol;
-        ApplyResizeSnapshot(newW, newH, newTiles, newCol);
+        s.resize->newTiles   = newTiles;
+        s.resize->newCol     = newCol;
+        s.resize->newObjects = newObjects;
+        ApplyResizeSnapshot(newW, newH, newTiles, newCol, newObjects);
         m_undoStack.push_back(std::move(s));
         if (m_undoStack.size() > kUndoLimit) m_undoStack.pop_front();
         m_redoStack.clear();
@@ -1040,6 +1107,7 @@ private:
         m_tilesetTex = std::move(asset.texture);
         m_map        = std::move(asset.map);
         m_collision  = std::move(asset.collision);   // empty if none in file
+        m_objects    = std::move(asset.objects);     // empty if none in file
         // The Tilemap stored a SpriteSheet pointing at the asset's texture
         // before we moved it. Rebind so it points at our owned copy.
         m_tileW = asset.tileWidth;
@@ -1075,6 +1143,7 @@ private:
         m_map.SetTileset(m_sheet);
         m_map.Fill(-1);
         m_collision.clear();
+        m_objects.clear();
         m_currentTilesetPath = tilesetPath;
         m_camera = {0.0f, 0.0f};
         m_zoom   = 1.0f;
@@ -1103,7 +1172,8 @@ private:
         const bool ok = SaveNtmap(out, m_map, m_currentTilesetPath,
                                   m_tileW, m_tileH, 0, 0,
                                   m_collision.size() == need ? m_collision
-                                                             : emptyCol);
+                                                             : emptyCol,
+                                  m_objects);
         if (ok) {
             m_filePath = out;
             m_dirty = false;
@@ -1224,6 +1294,27 @@ private:
             }
         }
 
+        // Object markers. Drawn over both tile and collision layers so the
+        // user can keep an eye on spawn placement while editing anything.
+        if (!m_objects.empty()) {
+            const float sx = float(m_tileW) * m_zoom;
+            const float sy = float(m_tileH) * m_zoom;
+            for (const auto& m : m_objects) {
+                const Vec2 p = WorldToScreen(
+                    {float(m.x * m_tileW), float(m.y * m_tileH)}, origin);
+                r.DrawQuad(p, {sx, sy}, Color(0.0f, 0.0f, 0.0f, 0.55f));
+                DrawRectOutline(r, p, {sx, sy}, 2.0f,
+                                Color(1.0f, 0.86f, 0.20f, 1.0f));
+                const char text[2] = { m.symbol, 0 };
+                const float gh = std::min(sx, sy) * 0.6f;
+                const float w  = MeasureMicroText(text, gh);
+                DrawMicroText(r, text,
+                              {p.x + (sx - w) * 0.5f,
+                               p.y + (sy - gh) * 0.5f},
+                              gh, Color(1.0f, 0.95f, 0.30f, 1.0f));
+            }
+        }
+
         // Hover highlight.
         if (m_hoverTx >= 0 && m_hoverTy >= 0 &&
             m_hoverTx < m_map.Width() && m_hoverTy < m_map.Height()) {
@@ -1278,6 +1369,10 @@ private:
 
         if (m_mode == EditLayer::Collision) {
             DrawCollisionPalette(r, origin);
+            return;
+        }
+        if (m_mode == EditLayer::Object) {
+            DrawObjectPalette(r, origin);
             return;
         }
 
@@ -1354,6 +1449,66 @@ private:
         return -1;
     }
 
+    // Object marker palette: a fixed roster of single-character symbols.
+    // The brawl integration reads 'P' as the player spawn and 'E' as an
+    // enemy spawn; the other entries are placeholders games can claim.
+    static constexpr char  kObjectSymbols[]    = { 'P', 'E', 'I', 'C', 'X' };
+    static constexpr int   kObjectSymbolCount  = sizeof(kObjectSymbols)
+                                                 / sizeof(kObjectSymbols[0]);
+
+    void DrawObjectPalette(Renderer2D& r, Vec2 origin) {
+        DrawMicroText(r, "object layer",
+                      {origin.x + 12.0f, origin.y + 8.0f},
+                      14.0f, kStatusText);
+        constexpr float pad   = 12.0f;
+        constexpr float cellH = 56.0f;
+        constexpr float gap   = 8.0f;
+        for (int i = 0; i < kObjectSymbolCount; ++i) {
+            const float py = origin.y + 32.0f + i * (cellH + gap);
+            const Vec2 p{origin.x + pad, py};
+            const Vec2 sz{kPaletteW - pad * 2.0f, cellH};
+            r.DrawQuad(p, sz, Color(0.20f, 0.22f, 0.30f, 1.0f));
+            DrawRectOutline(r, p, sz, 1.0f, Color(0.0f, 0.0f, 0.0f, 0.6f));
+            const char text[2] = { kObjectSymbols[i], 0 };
+            DrawMicroText(r, text,
+                          {p.x + 12.0f, p.y + cellH * 0.5f - 12.0f},
+                          24.0f, kSelectHi);
+            DrawMicroText(r, ObjectLabel(kObjectSymbols[i]),
+                          {p.x + 50.0f, p.y + cellH * 0.5f - 8.0f},
+                          14.0f, kStatusText);
+            if (kObjectSymbols[i] == m_selectedSym) {
+                DrawRectOutline(r, {p.x - 2.0f, p.y - 2.0f},
+                                {sz.x + 4.0f, sz.y + 4.0f},
+                                2.0f, kSelectHi);
+            }
+        }
+    }
+
+    int ObjectPaletteHit(Vec2 mouse, Vec2 origin) const {
+        constexpr float pad   = 12.0f;
+        constexpr float cellH = 56.0f;
+        constexpr float gap   = 8.0f;
+        for (int i = 0; i < kObjectSymbolCount; ++i) {
+            const float py = origin.y + 32.0f + i * (cellH + gap);
+            const float px = origin.x + pad;
+            if (mouse.x >= px && mouse.x < px + (kPaletteW - pad * 2.0f) &&
+                mouse.y >= py && mouse.y < py + cellH) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    static const char* ObjectLabel(char sym) {
+        switch (sym) {
+            case 'P': return "player";
+            case 'E': return "enemy";
+            case 'I': return "item";
+            case 'C': return "coin";
+            default:  return "marker";
+        }
+    }
+
     void DrawToolbar(Renderer2D& r) {
         r.DrawQuad({0.0f, 0.0f}, {kScreenW, kToolbarH}, kToolbarBg);
 
@@ -1372,10 +1527,12 @@ private:
 
         char buf[256];
         const int hx = m_hoverTx, hy = m_hoverTy;
-        const char* modeName = (m_mode == EditLayer::Tile) ? "TILE"
-                                                           : "COLLISION";
-        const int   selVal   = (m_mode == EditLayer::Tile) ? m_selectedTile
-                                                           : m_selectedCol;
+        const char* modeName = (m_mode == EditLayer::Tile)      ? "TILE"
+                             : (m_mode == EditLayer::Collision) ? "COLLISION"
+                                                                : "OBJECT";
+        const int   selVal   = (m_mode == EditLayer::Tile)      ? m_selectedTile
+                             : (m_mode == EditLayer::Collision) ? m_selectedCol
+                                                                : int(m_selectedSym);
         std::snprintf(buf, sizeof(buf),
                       "MAP: %dx%d   TILE: %dx%d   ZOOM: %.0f%%   "
                       "MODE: %s   SEL: %d   HOVER: %d,%d   "
@@ -1436,9 +1593,11 @@ private:
     // 0=Floor, 1=Wall, 2=Water (matching the engine's Collision::* codes).
     // Empty until the user enters Collision mode or a .ntmap with a
     // `collision` section is loaded.
-    std::vector<uint8_t> m_collision;
-    EditLayer            m_mode        = EditLayer::Tile;
-    int                  m_selectedCol = 1; // default Wall when entering mode
+    std::vector<uint8_t>      m_collision;
+    std::vector<ObjectMarker> m_objects;
+    EditLayer                 m_mode         = EditLayer::Tile;
+    int                       m_selectedCol  = 1; // default Wall in collision mode
+    char                      m_selectedSym  = 'P'; // default player spawn
 
     // Rectangle paint state. Latched when the user pressed LMB while holding
     // shift; cleared when LMB is released. While latched the per-cell paint

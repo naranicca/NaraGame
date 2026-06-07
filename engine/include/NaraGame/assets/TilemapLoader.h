@@ -24,6 +24,15 @@ namespace Collision {
     constexpr uint8_t Water = 2;
 }
 
+// Object marker — a single character at a tile coordinate, written to the
+// .ntmap's optional `objects` section. Meaning is up to the game: brawl
+// reads `P` as the player spawn, `E` as an enemy spawn, etc.
+struct ObjectMarker {
+    char symbol = 0;
+    int  x = 0;
+    int  y = 0;
+};
+
 // Bundle a Tilemap + the texture its SpriteSheet samples from. The texture
 // lives inside the asset because the SpriteSheet inside `map.SetTileset(...)`
 // only stores a raw pointer -- if the texture goes out of scope the tilemap's
@@ -37,6 +46,7 @@ struct TilemapAsset {
     std::unique_ptr<RHITexture> texture;
     Tilemap                     map;
     std::vector<uint8_t>        collision;     // mapW * mapH; empty if absent
+    std::vector<ObjectMarker>   objects;       // empty if absent
     std::string                 tilesetPath;   // relative path saved in the file
     int                         tileWidth  = 0;
     int                         tileHeight = 0;
@@ -66,10 +76,12 @@ TilemapAsset LoadTmx(RHIDevice& device, const std::string& path,
 // so callers should pass either an absolute path or one resolved relative to
 // the .ntmap file's directory. If `collision` is non-empty and matches the
 // map dimensions, a `collision` section is appended; pass an empty vector
-// to skip it. Returns false on I/O failure.
+// to skip it. `objects` is appended as a list when non-empty. Returns false
+// on I/O failure.
 bool SaveNtmap(const std::string& path, const Tilemap& map,
                const std::string& tilesetPath, int tileWidth, int tileHeight,
                int margin = 0, int spacing = 0,
-               const std::vector<uint8_t>& collision = {});
+               const std::vector<uint8_t>& collision = {},
+               const std::vector<ObjectMarker>& objects = {});
 
 } // namespace NaraGame
