@@ -349,8 +349,17 @@ protected:
         const float wheel = Input::MouseWheelDelta();
         const bool ctrl = Input::IsKeyDown(Key::LeftCtrl);
 
-        // Quit.
-        if (Input::IsKeyPressed(Key::Escape)) Close();
+        // Esc: clear an active selection first, only close the app when
+        // there's nothing to dismiss. Lets the user back out of a marquee
+        // without accidentally killing the editor.
+        if (Input::IsKeyPressed(Key::Escape)) {
+            if (m_hasSelection || m_selDragging) {
+                m_hasSelection = false;
+                m_selDragging  = false;
+            } else {
+                Close();
+            }
+        }
 
         // Toolbar/palette/canvas rectangles.
         const Vec2 paletteOrigin{0.0f, kToolbarH};
@@ -392,6 +401,15 @@ protected:
                     m_selectedCol = i;
                 }
             }
+        }
+        if (ctrl && Input::IsKeyPressed(Key::C)) CopySelection();
+        if (ctrl && Input::IsKeyPressed(Key::X)) {
+            CopySelection();
+            ClearSelectionCells();
+        }
+        if (ctrl && Input::IsKeyPressed(Key::V) &&
+            m_hoverTx >= 0 && m_hoverTy >= 0) {
+            PasteAt(m_hoverTx, m_hoverTy);
         }
         if (ctrl && Input::IsKeyPressed(Key::S) && m_map.Width() > 0) {
             // First save → pop a Save As dialog so the user can pick where
@@ -520,6 +538,33 @@ protected:
                         m_selectedCol = int(
                             m_collision[size_t(ty) * m_map.Width()
                                         + size_t(tx)]);
+                    }
+                }
+            } else if (ctrl) {
+                // Ctrl + LMB drag: marquee selection. Press latches the
+                // anchor; while held the rectangle tracks the cursor;
+                // release leaves m_hasSelection set so Ctrl+C / V / X can
+                // grab it. Ctrl is also bound to grow/shrink (arrows) and
+                // many other shortcuts, but those are key events and don't
+                // collide with mouse drags.
+                if (inMap && Input::IsMousePressed(MouseButton::Left)) {
+                    m_selDragging  = true;
+                    m_hasSelection = true;
+                    m_selAnchorX   = tx;
+                    m_selAnchorY   = ty;
+                    m_selX0 = tx; m_selX1 = tx;
+                    m_selY0 = ty; m_selY1 = ty;
+                }
+                if (m_selDragging) {
+                    if (!Input::IsMouseDown(MouseButton::Left)) {
+                        m_selDragging = false;
+                    } else {
+                        const int ex = std::clamp(tx, 0, m_map.Width()  - 1);
+                        const int ey = std::clamp(ty, 0, m_map.Height() - 1);
+                        m_selX0 = std::min(m_selAnchorX, ex);
+                        m_selX1 = std::max(m_selAnchorX, ex);
+                        m_selY0 = std::min(m_selAnchorY, ey);
+                        m_selY1 = std::max(m_selAnchorY, ey);
                     }
                 }
             } else {
@@ -786,6 +831,72 @@ private:
         m_currentStroke.reset();
         m_currentTouched.clear();
         m_dirty = false;
+    }
+
+    // ----- Selection clipboard -----
+    //
+    // Copy reads the selection rectangle from the active layer and stashes
+    // a snapshot in m_clipboard. Paste lays the snapshot down at (tx, ty),
+    // clipping at the map's far edges so a paste near the corner doesn't
+    // wrap. Both ops run through PaintCell so they land on the undo stack
+    // as a single stroke.
+    void CopySelection() {
+        if (!m_hasSelection || m_map.Width() <= 0) return;
+        const int w = m_selX1 - m_selX0 + 1;
+        const int h = m_selY1 - m_selY0 + 1;
+        if (w <= 0 || h <= 0) return;
+        m_clipboard.layer = m_mode;
+        m_clipboard.w     = w;
+        m_clipboard.h     = h;
+        m_clipboard.data.assign(size_t(w) * size_t(h), 0);
+        for (int yy = 0; yy < h; ++yy) {
+            for (int xx = 0; xx < w; ++xx) {
+                int v = 0;
+                if (m_mode == EditLayer::Tile) {
+                    v = m_map.GetTile(m_selX0 + xx, m_selY0 + yy);
+                } else {
+                    EnsureCollisionGrid();
+                    v = int(m_collision[size_t(m_selY0 + yy) * m_map.Width()
+                                        + size_t(m_selX0 + xx)]);
+                }
+                m_clipboard.data[size_t(yy) * w + xx] = v;
+            }
+        }
+    }
+
+    void PasteAt(int tx, int ty) {
+        if (m_clipboard.w <= 0 || m_map.Width() <= 0) return;
+        if (m_clipboard.layer != m_mode) {
+            NARAGAME_INFO("editor: paste skipped (clipboard layer mismatch -- "
+                          "switch with TAB)");
+            return;
+        }
+        BeginStroke();
+        for (int yy = 0; yy < m_clipboard.h; ++yy) {
+            for (int xx = 0; xx < m_clipboard.w; ++xx) {
+                const int dx = tx + xx;
+                const int dy = ty + yy;
+                if (dx < 0 || dy < 0 ||
+                    dx >= m_map.Width() || dy >= m_map.Height())
+                    continue;
+                PaintCell(dx, dy,
+                          m_clipboard.data[size_t(yy) * m_clipboard.w + xx]);
+            }
+        }
+        EndStroke();
+    }
+
+    // Cut: copy then wipe the selection on the active layer. Wipe runs as
+    // its own stroke (separate from the copy, which doesn't change the
+    // map), so Undo backs out the wipe and leaves the clipboard alone.
+    void ClearSelectionCells() {
+        if (!m_hasSelection || m_map.Width() <= 0) return;
+        const int empty = (m_mode == EditLayer::Tile) ? -1 : 0;
+        BeginStroke();
+        for (int yy = m_selY0; yy <= m_selY1; ++yy)
+            for (int xx = m_selX0; xx <= m_selX1; ++xx)
+                PaintCell(xx, yy, empty);
+        EndStroke();
     }
 
     // Map resize. delta > 0 grows by one row/col on the given edge; delta < 0
@@ -1123,6 +1234,20 @@ private:
                             2.0f, kHoverHi);
         }
 
+        // Persistent marquee selection. Drawn whenever m_hasSelection is
+        // true, regardless of mode, so the user can switch layers / pan /
+        // zoom and the selection stays anchored.
+        if (m_hasSelection) {
+            const Vec2 a = WorldToScreen(
+                {float(m_selX0 * m_tileW), float(m_selY0 * m_tileH)}, origin);
+            const Vec2 b = WorldToScreen(
+                {float((m_selX1 + 1) * m_tileW),
+                 float((m_selY1 + 1) * m_tileH)}, origin);
+            const Vec2 sz{b.x - a.x, b.y - a.y};
+            r.DrawQuad(a, sz, Color(1.0f, 1.0f, 1.0f, 0.10f));
+            DrawRectOutline(r, a, sz, 2.0f, Color(1.0f, 1.0f, 1.0f, 0.95f));
+        }
+
         // Rectangle marquee preview while shift-dragging. Drawn last so it
         // sits on top of grid + hover; commit happens on mouse release.
         if (m_rectActive && m_hoverTx >= 0 && m_hoverTy >= 0) {
@@ -1256,10 +1381,11 @@ private:
                       "MODE: %s   SEL: %d   HOVER: %d,%d   "
                       "UNDO: %zu/%zu   %s   "
                       "LMB paint  RMB erase  ALT+click pick  "
-                      "SHIFT+drag rect  F fill  "
+                      "SHIFT+drag rect  CTRL+drag select  F fill  "
                       "MMB pan  WHEEL zoom  HOME reset view  "
-                      "1-9 quick select  G grid  TAB/L mode  "
+                      "1-9 quick select  G grid  TAB/L mode  ESC clear sel  "
                       "CTRL+ARROW grow  CTRL+SHIFT+ARROW shrink  "
+                      "CTRL+C copy  CTRL+V paste  CTRL+X cut  "
                       "CTRL+Z undo  CTRL+Y redo  CTRL+S save  "
                       "CTRL+N new  CTRL+O open",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
@@ -1322,6 +1448,25 @@ private:
     int  m_rectAnchorX = 0;
     int  m_rectAnchorY = 0;
     int  m_rectLastButton = 0;  // 0 = LMB, 1 = RMB; remembered across the drag
+
+    // Marquee selection state. Ctrl + LMB drag sets up the anchor and
+    // updates the rectangle each frame; release latches m_hasSelection.
+    // Esc clears it. Ctrl+C / Ctrl+V / Ctrl+X operate on it.
+    bool m_hasSelection = false;
+    bool m_selDragging  = false;
+    int  m_selAnchorX   = 0;
+    int  m_selAnchorY   = 0;
+    int  m_selX0 = 0, m_selY0 = 0;
+    int  m_selX1 = 0, m_selY1 = 0;
+
+    // Clipboard. Stores whichever layer the copy came from; paste refuses
+    // to apply across layers (mismatched data wouldn't make sense).
+    struct Clipboard {
+        EditLayer        layer = EditLayer::Tile;
+        int              w = 0, h = 0;
+        std::vector<int> data;   // tile ids OR collision codes per layer
+    };
+    Clipboard m_clipboard;
 };
 
 Application* NaraGame::CreateApplication(int argc, char** argv) {
