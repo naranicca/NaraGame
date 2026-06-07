@@ -8,9 +8,11 @@ set(NARAGAME_SOURCES
     src/assets/BMFont.cpp
     src/assets/Inflate.cpp
     src/assets/MSDFFontLoader.cpp
+    src/assets/Ntmap.cpp
     src/assets/Png.cpp
     src/assets/TextureLoader.cpp
     src/assets/TileLevel.cpp
+    src/assets/Tmx.cpp
     src/audio/AudioClip.cpp
     src/audio/AudioDevice.cpp
     src/core/Application.cpp

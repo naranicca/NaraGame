@@ -48,3 +48,4 @@ endif()
 
 add_subdirectory(engine)
 add_subdirectory(test)
+add_subdirectory(tools)

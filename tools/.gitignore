@@ -1,0 +1,9 @@
+# Local helper binaries + source fonts (downloaded externally) -- not committed.
+# Generated atlases (.png/.json) live next to game assets and ARE committed.
+*
+
+# Source-controlled tools we built ourselves.
+!.gitignore
+!CMakeLists.txt
+!tileset-editor/
+!tileset-editor/**

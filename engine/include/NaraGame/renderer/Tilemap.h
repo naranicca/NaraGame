@@ -19,6 +19,7 @@ public:
     Tilemap(int width, int height, float tileWidth, float tileHeight);
 
     void SetTileset(const SpriteSheet& tileset) { m_tileset = tileset; }
+    const SpriteSheet& Tileset() const { return m_tileset; }
 
     int Width() const { return m_width; }
     int Height() const { return m_height; }
