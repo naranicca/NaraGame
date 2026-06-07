@@ -37,6 +37,10 @@ static Key TranslateKey(WPARAM vk) {
         case VK_RIGHT:   return Key::Right;
         case VK_UP:      return Key::Up;
         case VK_DOWN:    return Key::Down;
+        case VK_HOME:    return Key::Home;
+        case VK_END:     return Key::End;
+        case VK_PRIOR:   return Key::PageUp;
+        case VK_NEXT:    return Key::PageDown;
         case VK_SHIFT:   return Key::LeftShift;
         case VK_CONTROL: return Key::LeftCtrl;
         case VK_MENU:    return Key::LeftAlt;
