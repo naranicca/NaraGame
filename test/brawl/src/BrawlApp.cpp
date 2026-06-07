@@ -14,6 +14,7 @@
 
 #include <NaraGame/assets/MSDFFontLoader.h>
 #include <NaraGame/assets/TextureLoader.h>
+#include <NaraGame/assets/TilemapLoader.h>
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
 #include <NaraGame/core/Log.h>
@@ -220,6 +221,12 @@ const Color kArenaBorder = Color(0.13f, 0.17f, 0.13f, 1.0f);
 const Color kWallTop     = Color(0.66f, 0.50f, 0.34f, 1.0f);
 const Color kWallSide    = Color(0.36f, 0.25f, 0.16f, 1.0f);
 const Color kWallEdge    = Color(0.82f, 0.66f, 0.46f, 1.0f);
+// Water: a deeper teal-blue with a slightly lighter highlight for variation.
+// Bullets fly over water (no collision), but characters/coins/items can't
+// step into it — see CircleBlockedForGround vs CircleBlockedByWalls.
+const Color kWaterA      = Color(0.15f, 0.42f, 0.72f, 1.0f);
+const Color kWaterB      = Color(0.20f, 0.52f, 0.82f, 1.0f);
+const Color kWaterEdge   = Color(0.75f, 0.92f, 1.00f, 0.55f);
 const Color kPlayerBody  = Color(0.22f, 0.62f, 0.95f, 1.0f);
 const Color kPlayerHead  = Color(0.92f, 0.78f, 0.58f, 1.0f);
 const Color kPlayerHurt  = Color(1.00f, 0.40f, 0.40f, 1.0f);
@@ -253,7 +260,10 @@ inline float WorldDirToScreenAngle(Vec2 worldDir) {
 // ---------------------------------------------------------------------------
 // Tile grid + random arena.
 // ---------------------------------------------------------------------------
-enum class Tile : uint8_t { Floor = 0, Wall };
+// Floor: walkable + bullets pass.
+// Wall : blocks both characters and bullets, extrudes upward on screen.
+// Water: blocks characters/coins/items but bullets fly over freely.
+enum class Tile : uint8_t { Floor = 0, Wall, Water };
 
 struct Grid {
     int w = 0, h = 0;
@@ -322,6 +332,44 @@ void BuildArena(Grid& g, uint32_t seed, Vec2& spawn) {
             g.Set(sx + dx, sy + dy, Tile::Wall);
         }
     }
+    // Water patches — 2-4 organic-ish blobs scattered through the arena.
+    // Bullets fly over, characters can't enter. We only paint cells that are
+    // currently Floor so walls keep priority; the spawn-area sweep below then
+    // wipes any water that happened to land near the player start.
+    static const int kWaterShapes[6][7][2] = {
+        // 3x2 pond
+        {{0,0},{1,0},{2,0},{0,1},{1,1},{2,1},{-99,-99}},
+        // 2x3 pond
+        {{0,0},{1,0},{0,1},{1,1},{0,2},{1,2},{-99,-99}},
+        // plus
+        {{1,0},{0,1},{1,1},{2,1},{1,2},{-99,-99},{-99,-99}},
+        // L-bend river
+        {{0,0},{0,1},{0,2},{1,2},{2,2},{-99,-99},{-99,-99}},
+        // diagonal scatter
+        {{0,0},{1,0},{1,1},{2,1},{2,2},{-99,-99},{-99,-99}},
+        // small 2x2 puddle
+        {{0,0},{1,0},{0,1},{1,1},{-99,-99},{-99,-99},{-99,-99}},
+    };
+    std::uniform_int_distribution<int> nWater(2, 4);
+    std::uniform_int_distribution<int> waterRoll(0, 5);
+    std::uniform_int_distribution<int> wxDist(2, kArenaW - 5);
+    std::uniform_int_distribution<int> wyDist(2, kArenaH - 5);
+    const int nw = nWater(rng);
+    for (int c = 0; c < nw; ++c) {
+        const int sx = wxDist(rng);
+        const int sy = wyDist(rng);
+        if (std::abs(sx - cx) < 3 && std::abs(sy - cy) < 3) continue;
+        const int shape = waterRoll(rng);
+        for (int i = 0; i < 7; ++i) {
+            const int dx = kWaterShapes[shape][i][0];
+            if (dx == -99) break;
+            const int dy = kWaterShapes[shape][i][1];
+            const int wx = sx + dx;
+            const int wy = sy + dy;
+            if (g.At(wx, wy) == Tile::Floor) g.Set(wx, wy, Tile::Water);
+        }
+    }
+
     spawn = { kArenaW * 0.5f, kArenaH * 0.5f };
     const int px = int(spawn.x);
     const int py = int(spawn.y);
@@ -344,6 +392,27 @@ bool CircleBlockedByWalls(const Grid& g, float wx, float wy, float r) {
         for (int tx = minTx; tx <= maxTx; ++tx) {
             if (g.At(tx, ty) != Tile::Wall) continue;
             // Closest point on the wall AABB to the circle center.
+            const float cx = std::max(float(tx), std::min(wx, float(tx + 1)));
+            const float cy = std::max(float(ty), std::min(wy, float(ty + 1)));
+            const float dx = wx - cx;
+            const float dy = wy - cy;
+            if (dx * dx + dy * dy < r * r) return true;
+        }
+    }
+    return false;
+}
+
+// Character/coin/item collision: both Wall and Water block. Bullets keep
+// using CircleBlockedByWalls so they fly over water freely.
+bool CircleBlockedForGround(const Grid& g, float wx, float wy, float r) {
+    const int minTx = int(std::floor(wx - r));
+    const int maxTx = int(std::floor(wx + r));
+    const int minTy = int(std::floor(wy - r));
+    const int maxTy = int(std::floor(wy + r));
+    for (int ty = minTy; ty <= maxTy; ++ty) {
+        for (int tx = minTx; tx <= maxTx; ++tx) {
+            const Tile t = g.At(tx, ty);
+            if (t != Tile::Wall && t != Tile::Water) continue;
             const float cx = std::max(float(tx), std::min(wx, float(tx + 1)));
             const float cy = std::max(float(ty), std::min(wy, float(ty + 1)));
             const float dx = wx - cx;
@@ -790,7 +859,19 @@ public:
         EnsureEnemySprite();
         EnsureBitmapFont();
         EnsureIndicatorTexture();
+        EnsureBackgroundMap();
         m_animTime = 0.0f;
+    }
+
+    // Try to load a .ntmap background once. Silently no-ops if the file is
+    // missing (the procedural checker floor stays as the fallback).
+    void EnsureBackgroundMap() {
+        if (m_bgAsset.valid || !m_ctx->device) return;
+        const std::string path = std::string(NARAGAME_ASSETS_DIR) + "/arena-bg.ntmap";
+        m_bgAsset = LoadNtmap(*m_ctx->device, path, TextureFilter::Point);
+        if (!m_bgAsset.valid) {
+            NARAGAME_INFO("brawl: no '%s' (using procedural floor)", path.c_str());
+        }
     }
 
     void EnsureBitmapFont() {
@@ -1693,9 +1774,9 @@ private:
         const float step = kPlayerSpeed * dt;
         const float nx = m_player.x + input.x * step;
         const float ny = m_player.y + input.y * step;
-        // Axis-separated collision so the player can slide along walls.
-        if (!CircleBlockedByWalls(m_grid, nx, m_player.y, kPlayerR)) m_player.x = nx;
-        if (!CircleBlockedByWalls(m_grid, m_player.x, ny, kPlayerR)) m_player.y = ny;
+        // Axis-separated collision so the player can slide along walls/water.
+        if (!CircleBlockedForGround(m_grid, nx, m_player.y, kPlayerR)) m_player.x = nx;
+        if (!CircleBlockedForGround(m_grid, m_player.x, ny, kPlayerR)) m_player.y = ny;
 
         // Aim. Auto-aim picks the locked target's direction; with no lock,
         // the gun points along m_moveDir so the sprite still reads.
@@ -1714,9 +1795,7 @@ private:
         // Shoot: no input required, the gun auto-fires whenever there's a
         // lock and the cooldown has elapsed.
         if (m_autoLocked && m_fireCd <= 0.0f) {
-            // Moving halves the effective fire rate (cooldown doubles).
-            const float moveMult = m_playerMoving ? 2.0f : 1.0f;
-            m_fireCd = kPlayerFireCd * moveMult / m_playerRateMult;
+            m_fireCd = kPlayerFireCd / m_playerRateMult;
             // Multi-shot: m_playerShotCount bullets fanned symmetrically
             // around m_facing with kMultiSpreadDeg between adjacent shots.
             // For N shots the angle offset of shot i is
@@ -1864,8 +1943,8 @@ private:
             const float step = kEnemySpeed * dt;
             const float nx = e.pos.x + wantDir.x * step;
             const float ny = e.pos.y + wantDir.y * step;
-            if (!CircleBlockedByWalls(m_grid, nx, e.pos.y, kEnemyR)) e.pos.x = nx;
-            if (!CircleBlockedByWalls(m_grid, e.pos.x, ny, kEnemyR)) e.pos.y = ny;
+            if (!CircleBlockedForGround(m_grid, nx, e.pos.y, kEnemyR)) e.pos.x = nx;
+            if (!CircleBlockedForGround(m_grid, e.pos.x, ny, kEnemyR)) e.pos.y = ny;
             if (wantDir.x != 0.0f || wantDir.y != 0.0f) e.animTime += dt;
             else                                       e.animTime  = 0.0f;
 
@@ -1876,9 +1955,9 @@ private:
                 e.knockback.y * e.knockback.y > 0.01f) {
                 const float kx = e.knockback.x * dt;
                 const float ky = e.knockback.y * dt;
-                if (!CircleBlockedByWalls(m_grid, e.pos.x + kx, e.pos.y, kEnemyR))
+                if (!CircleBlockedForGround(m_grid, e.pos.x + kx, e.pos.y, kEnemyR))
                     e.pos.x += kx;
-                if (!CircleBlockedByWalls(m_grid, e.pos.x, e.pos.y + ky, kEnemyR))
+                if (!CircleBlockedForGround(m_grid, e.pos.x, e.pos.y + ky, kEnemyR))
                     e.pos.y += ky;
                 const float decay = std::exp(-kKnockbackDecay * dt);
                 e.knockback.x *= decay;
@@ -1916,12 +1995,12 @@ private:
             if (!it.settled) {
                 it.vz -= kCoinGravity * dt;
                 const float nx = it.pos.x + it.vel.x * dt;
-                if (CircleBlockedByWalls(m_grid, nx, it.pos.y, kCoinR))
+                if (CircleBlockedForGround(m_grid, nx, it.pos.y, kCoinR))
                     it.vel.x = -it.vel.x * kCoinWallBounce;
                 else
                     it.pos.x = nx;
                 const float ny = it.pos.y + it.vel.y * dt;
-                if (CircleBlockedByWalls(m_grid, it.pos.x, ny, kCoinR))
+                if (CircleBlockedForGround(m_grid, it.pos.x, ny, kCoinR))
                     it.vel.y = -it.vel.y * kCoinWallBounce;
                 else
                     it.pos.y = ny;
@@ -1967,12 +2046,12 @@ private:
                 // (with damping). Same on Y. Without this coins can fly
                 // through walls and settle inside unreachable tiles.
                 const float nx = c.pos.x + c.vel.x * dt;
-                if (CircleBlockedByWalls(m_grid, nx, c.pos.y, kCoinR))
+                if (CircleBlockedForGround(m_grid, nx, c.pos.y, kCoinR))
                     c.vel.x = -c.vel.x * kCoinWallBounce;
                 else
                     c.pos.x = nx;
                 const float ny = c.pos.y + c.vel.y * dt;
-                if (CircleBlockedByWalls(m_grid, c.pos.x, ny, kCoinR))
+                if (CircleBlockedForGround(m_grid, c.pos.x, ny, kCoinR))
                     c.vel.y = -c.vel.y * kCoinWallBounce;
                 else
                     c.pos.y = ny;
@@ -2080,7 +2159,7 @@ private:
             const float dx = ex - m_player.x;
             const float dy = ey - m_player.y;
             if (dx * dx + dy * dy < 5.0f * 5.0f) continue;        // not on player
-            if (CircleBlockedByWalls(m_grid, ex, ey, kEnemyR)) continue;
+            if (CircleBlockedForGround(m_grid, ex, ey, kEnemyR)) continue;
             Enemy e;
             e.pos   = { ex, ey };
             // Per-wave HP scaling: +kEnemyHpPerWave on top of the base
@@ -2118,13 +2197,54 @@ private:
         r.DrawQuad({topLeft.x - 8.0f, topLeft.y - 8.0f},
                    {kArenaW * kTileW + 16.0f, kArenaH * kTileH + 16.0f},
                    kArenaBorder);
-        // Checker floor.
+        // If a .ntmap background was loaded, paint it under the procedural
+        // overlay. The bg map is purely visual -- collision still comes from
+        // m_grid, so water/walls drawn below the bg still block movement.
+        if (m_bgAsset.valid) {
+            const SpriteSheet& sheet = m_bgAsset.map.Tileset();
+            const int bw = m_bgAsset.map.Width();
+            const int bh = m_bgAsset.map.Height();
+            for (int ty = 0; ty < bh; ++ty) {
+                for (int tx = 0; tx < bw; ++tx) {
+                    const int id = m_bgAsset.map.GetTile(tx, ty);
+                    if (id < 0) continue;
+                    const TextureRegion region = sheet.At(id);
+                    if (!region.Valid()) continue;
+                    const Vec2 p = W2S({float(tx), float(ty)}, m_camOrigin);
+                    r.DrawQuad(p, {kTileW, kTileH}, region);
+                }
+            }
+        }
+        // Checker floor + water. Walls are drawn later in the sorted pass.
+        // Water tiles get a flat blue + a thin white rim where they touch
+        // non-water (floor/wall) so the shoreline reads cleanly. When a bg
+        // tilemap is active, skip the green checker (the bg is the floor);
+        // we still draw water on top so it stays visually distinct.
         for (int ty = 0; ty < kArenaH; ++ty) {
             for (int tx = 0; tx < kArenaW; ++tx) {
-                if (m_grid.At(tx, ty) == Tile::Wall) continue;
+                const Tile t = m_grid.At(tx, ty);
+                if (t == Tile::Wall) continue;
+                if (m_bgAsset.valid && t == Tile::Floor) continue;
                 const Vec2 p = W2S({float(tx), float(ty)}, m_camOrigin);
-                const Color c = ((tx + ty) & 1) ? kFloorA : kFloorB;
-                r.DrawQuad(p, {kTileW, kTileH}, c);
+                if (t == Tile::Water) {
+                    const Color c = ((tx + ty) & 1) ? kWaterA : kWaterB;
+                    r.DrawQuad(p, {kTileW, kTileH}, c);
+                    // Thin white shore line on edges that face non-water.
+                    constexpr float kRim = 2.0f;
+                    if (m_grid.At(tx, ty - 1) != Tile::Water)
+                        r.DrawQuad(p, {kTileW, kRim}, kWaterEdge);
+                    if (m_grid.At(tx, ty + 1) != Tile::Water)
+                        r.DrawQuad({p.x, p.y + kTileH - kRim},
+                                   {kTileW, kRim}, kWaterEdge);
+                    if (m_grid.At(tx - 1, ty) != Tile::Water)
+                        r.DrawQuad(p, {kRim, kTileH}, kWaterEdge);
+                    if (m_grid.At(tx + 1, ty) != Tile::Water)
+                        r.DrawQuad({p.x + kTileW - kRim, p.y},
+                                   {kRim, kTileH}, kWaterEdge);
+                } else {
+                    const Color c = ((tx + ty) & 1) ? kFloorA : kFloorB;
+                    r.DrawQuad(p, {kTileW, kTileH}, c);
+                }
             }
         }
     }
@@ -2933,6 +3053,12 @@ private:
     // the file-scope DrawBmpText / MeasureBmpText / DrawCenteredBmpText
     // helpers (or their member-wrapper shorthand).
     BmpFont m_bmpFont;
+    // Optional .ntmap background painted under the procedural arena. Owns
+    // the bg tileset texture; map cells are drawn at brawl's kTileW x kTileH
+    // (the source PNG is square 32x32 but is stretched to match the arena's
+    // y-compressed projection). Loaded on enter; valid=false silently falls
+    // back to the procedural checker floor.
+    TilemapAsset m_bgAsset;
     int     m_shadowW = 0, m_shadowH = 0;
     Vec2    m_lastShadowSrc{1e9f, 1e9f};          // forces first-frame rebuild
     float   m_shadowFlash = 0.0f;                 // HUD flash after H toggle
