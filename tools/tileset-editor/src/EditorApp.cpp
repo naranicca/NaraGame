@@ -373,6 +373,10 @@ protected:
 
         // ----- Global shortcuts -----
         if (Input::IsKeyPressed(Key::G)) m_grid = !m_grid;
+        // H: hide non-active layer overlays. Lets you stare at just the
+        // collision grid (or just objects) without tile clutter when the
+        // overlays are getting in the way.
+        if (Input::IsKeyPressed(Key::H)) m_layerOverlay = !m_layerOverlay;
         if (Input::IsKeyPressed(Key::L) || Input::IsKeyPressed(Key::Tab)) {
             // 3-way cycle: Tile → Collision → Object → Tile.
             m_mode = static_cast<EditLayer>(
@@ -1355,10 +1359,12 @@ private:
             }
         }
 
-        // Collision overlay. Visible in BOTH modes so authors can always see
-        // what they've marked as solid -- collision-mode just makes the
-        // overlay the primary thing they're editing.
-        if (!m_collision.empty()) {
+        // Collision overlay. Visible when its layer is active, or when
+        // overlays are on (default). Hidden in Tile/Object modes when the
+        // user has pressed H to clear the canvas of non-active overlays.
+        const bool showCollision = !m_collision.empty() &&
+            (m_layerOverlay || m_mode == EditLayer::Collision);
+        if (showCollision) {
             const Color cWall (0.95f, 0.30f, 0.30f, 0.42f);
             const Color cWater(0.25f, 0.55f, 0.95f, 0.42f);
             for (int ty = 0; ty < m_map.Height(); ++ty) {
@@ -1390,9 +1396,11 @@ private:
             }
         }
 
-        // Object markers. Drawn over both tile and collision layers so the
-        // user can keep an eye on spawn placement while editing anything.
-        if (!m_objects.empty()) {
+        // Object markers. Same overlay gate as collision -- always shown
+        // in Object mode, otherwise gated by m_layerOverlay (default on).
+        const bool showObjects = !m_objects.empty() &&
+            (m_layerOverlay || m_mode == EditLayer::Object);
+        if (showObjects) {
             const float sx = float(m_tileW) * m_zoom;
             const float sy = float(m_tileH) * m_zoom;
             for (const auto& m : m_objects) {
@@ -1411,9 +1419,44 @@ private:
             }
         }
 
-        // Hover highlight.
-        if (m_hoverTx >= 0 && m_hoverTy >= 0 &&
-            m_hoverTx < m_map.Width() && m_hoverTy < m_map.Height()) {
+        // Stamp hover preview (Tile mode, multi-cell stamp). Draws a faint
+        // copy of each stamp cell at the hover position so the user can
+        // see exactly where the brush will land before clicking. Cells
+        // outside the map are clipped; cells marked -1 (palette rect
+        // overhanging the tileset end) are skipped, matching paint.
+        if (m_mode == EditLayer::Tile &&
+            m_hoverTx >= 0 && m_hoverTy >= 0 &&
+            !m_stampTiles.empty() &&
+            (m_stampW > 1 || m_stampH > 1)) {
+            const float sx = float(m_tileW) * m_zoom;
+            const float sy = float(m_tileH) * m_zoom;
+            const Color tint(1.0f, 1.0f, 1.0f, 0.55f);
+            for (int dy = 0; dy < m_stampH; ++dy) {
+                for (int dx = 0; dx < m_stampW; ++dx) {
+                    const int cx = m_hoverTx + dx;
+                    const int cy = m_hoverTy + dy;
+                    if (cx < 0 || cy < 0 ||
+                        cx >= m_map.Width() || cy >= m_map.Height()) continue;
+                    const int id =
+                        m_stampTiles[size_t(dy) * m_stampW + size_t(dx)];
+                    if (id < 0) continue;
+                    const TextureRegion region = m_sheet.At(id);
+                    if (!region.Valid()) continue;
+                    const Vec2 p = WorldToScreen(
+                        {float(cx * m_tileW), float(cy * m_tileH)}, origin);
+                    r.DrawQuad(p, {sx, sy}, region, tint);
+                }
+            }
+            const Vec2 a = WorldToScreen(
+                {float(m_hoverTx * m_tileW),
+                 float(m_hoverTy * m_tileH)}, origin);
+            DrawRectOutline(r, a,
+                            {sx * float(m_stampW), sy * float(m_stampH)},
+                            2.0f, kHoverHi);
+        } else if (m_hoverTx >= 0 && m_hoverTy >= 0 &&
+                   m_hoverTx < m_map.Width() &&
+                   m_hoverTy < m_map.Height()) {
+            // Single-cell hover for 1x1 stamps and the non-Tile modes.
             const Vec2 hp = WorldToScreen(
                 {float(m_hoverTx * m_tileW), float(m_hoverTy * m_tileH)}, origin);
             DrawRectOutline(r, hp,
@@ -1683,6 +1726,11 @@ private:
     Vec2  m_camera{0.0f, 0.0f};
     float m_zoom = 1.0f;
     bool  m_grid = true;
+    // When false, only the active edit layer is drawn on the canvas. Tile
+    // is the always-on base layer (collision and objects would have no
+    // visual context without it), so this gates the *non-active* overlays:
+    // collision tint and object markers.
+    bool  m_layerOverlay = true;
 
     Vec2  m_panAnchor{0.0f, 0.0f};
     Vec2  m_camAnchor{0.0f, 0.0f};
