@@ -440,6 +440,11 @@ protected:
         // collision grid (or just objects) without tile clutter when the
         // overlays are getting in the way.
         if (Input::IsKeyPressed(Key::H)) m_layerOverlay = !m_layerOverlay;
+        // [ / ]: brush size, photoshop-style. Sizes are odd so the brush
+        // is centred on the hover cell. Object mode ignores it (markers
+        // are always one per cell).
+        if (Input::IsKeyPressed(Key::LeftBracket))  AdjustBrushSize(-1);
+        if (Input::IsKeyPressed(Key::RightBracket)) AdjustBrushSize(+1);
         if (Input::IsKeyPressed(Key::L) || Input::IsKeyPressed(Key::Tab)) {
             // 3-way cycle: Tile → Collision → Object → Tile.
             m_mode = static_cast<EditLayer>(
@@ -808,10 +813,9 @@ protected:
                     }
                 } else if (inMap) {
                     if (Input::IsMouseDown(MouseButton::Left)) {
-                        if (m_mode == EditLayer::Tile) PaintStampAt(tx, ty);
-                        else                          PaintCell(tx, ty, leftVal);
+                        PaintBrushAt(tx, ty, leftVal, /*isLeft=*/true);
                     } else if (Input::IsMouseDown(MouseButton::Right)) {
-                        PaintCell(tx, ty, rightVal);
+                        PaintBrushAt(tx, ty, rightVal, /*isLeft=*/false);
                     }
                 }
             }
@@ -942,6 +946,52 @@ private:
     // Paint the stamp at canvas (tx, ty) — top-left aligned. Cells with
     // a sentinel -1 (palette rect overhanging the tileset end) are
     // skipped so the user doesn't unintentionally erase tiles.
+    // Brush size step. We keep odd sizes so the brush footprint is
+    // perfectly centred on the hover cell (radius = (n-1)/2). Object
+    // mode collapses back to 1 -- placing N copies of a marker on the
+    // same cell can't happen anyway (one per cell), so honouring the
+    // brush there would be misleading.
+    void AdjustBrushSize(int dir) {
+        static constexpr int kBrushSizes[] = {1, 3, 5, 7, 9};
+        static constexpr int kCount =
+            int(sizeof(kBrushSizes) / sizeof(kBrushSizes[0]));
+        int idx = 0;
+        for (int i = 0; i < kCount; ++i)
+            if (kBrushSizes[i] == m_brushSize) { idx = i; break; }
+        idx = std::clamp(idx + dir, 0, kCount - 1);
+        m_brushSize = kBrushSizes[idx];
+    }
+
+    int EffectiveBrushSize() const {
+        return (m_mode == EditLayer::Object) ? 1 : m_brushSize;
+    }
+
+    // Top-level paint dispatch from the click-and-drag handler. For a
+    // 1x1 brush we route Tile mode through PaintStampAt so multi-cell
+    // stamps still work; everything else paints a single value into the
+    // brush footprint. Stamps and brush size are intentionally
+    // exclusive -- mixing them would require deciding whether the stamp
+    // tiles inside the brush footprint or strides across it, and the
+    // current users haven't asked for either.
+    void PaintBrushAt(int tx, int ty, int val, bool isLeft) {
+        if (m_map.Width() <= 0) return;
+        const int n = EffectiveBrushSize();
+        if (n <= 1 && m_mode == EditLayer::Tile && isLeft) {
+            PaintStampAt(tx, ty);
+            return;
+        }
+        const int r = (n - 1) / 2;
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                const int xx = tx + dx;
+                const int yy = ty + dy;
+                if (xx < 0 || yy < 0 ||
+                    xx >= m_map.Width() || yy >= m_map.Height()) continue;
+                PaintCell(xx, yy, val);
+            }
+        }
+    }
+
     void PaintStampAt(int tx, int ty) {
         if (m_stampTiles.empty()) return;
         for (int sy = 0; sy < m_stampH; ++sy) {
@@ -1665,11 +1715,17 @@ private:
         } else if (m_hoverTx >= 0 && m_hoverTy >= 0 &&
                    m_hoverTx < m_map.Width() &&
                    m_hoverTy < m_map.Height()) {
-            // Single-cell hover for 1x1 stamps and the non-Tile modes.
+            // Brush hover. brush=1 -> single cell outline; brush>1 ->
+            // N-cell square centred on hover. Object mode forces 1
+            // through EffectiveBrushSize().
+            const int n = EffectiveBrushSize();
+            const int rOff = (n - 1) / 2;
             const Vec2 hp = WorldToScreen(
-                {float(m_hoverTx * m_tileW), float(m_hoverTy * m_tileH)}, origin);
+                {float((m_hoverTx - rOff) * m_tileW),
+                 float((m_hoverTy - rOff) * m_tileH)}, origin);
             DrawRectOutline(r, hp,
-                            {float(m_tileW) * m_zoom, float(m_tileH) * m_zoom},
+                            {float(m_tileW * n) * m_zoom,
+                             float(m_tileH * n) * m_zoom},
                             2.0f, kHoverHi);
         }
 
@@ -1962,6 +2018,7 @@ private:
             {"Shift+drag",  "fill rectangle"},
             {"Alt+LMB",     "eyedropper"},
             {"F",           "flood fill same value"},
+            {"[ / ]",       "brush size (1..9, odd)"},
         };
         static const Row kSelect[] = {
             {"Ctrl+drag",  "marquee select"},
@@ -2082,13 +2139,20 @@ private:
         } else {
             std::snprintf(selBuf, sizeof(selBuf), "%d", selVal);
         }
+        char brushBuf[16];
+        const int effBrush = EffectiveBrushSize();
+        if (effBrush > 1)
+            std::snprintf(brushBuf, sizeof(brushBuf), "BRUSH: %dx%d   ",
+                          effBrush, effBrush);
+        else
+            brushBuf[0] = '\0';
         std::snprintf(buf, sizeof(buf),
                       "MAP: %dx%d   TILE: %dx%d   ZOOM: %.0f%%   "
-                      "MODE: %s   SEL: %s   HOVER: %d,%d   "
+                      "MODE: %s   SEL: %s   %sHOVER: %d,%d   "
                       "UNDO: %zu/%zu   %s   "
                       "F1 help",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
-                      m_zoom * 100.0f, modeName, selBuf,
+                      m_zoom * 100.0f, modeName, selBuf, brushBuf,
                       hx, hy, m_undoStack.size(), m_redoStack.size(),
                       m_dirty ? "MODIFIED" : "SAVED");
         DrawMicroText(r, buf, {12.0f, y + 8.0f}, 12.0f, kStatusText);
@@ -2135,6 +2199,11 @@ private:
     // F1 keybind cheatsheet. Modal: all other input is suppressed while
     // the overlay is up so the user can read without accidentally editing.
     bool  m_helpOverlay = false;
+
+    // Brush size for single-value paint (Tile single-tile, Collision).
+    // Always odd so the brush footprint is centred on the hover cell.
+    // Object mode forces 1 via EffectiveBrushSize().
+    int   m_brushSize = 1;
 
     float m_paletteScroll = 0.0f;
     int   m_selectedTile = 0;

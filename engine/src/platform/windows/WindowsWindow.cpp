@@ -44,6 +44,8 @@ static Key TranslateKey(WPARAM vk) {
         case VK_SHIFT:   return Key::LeftShift;
         case VK_CONTROL: return Key::LeftCtrl;
         case VK_MENU:    return Key::LeftAlt;
+        case VK_OEM_4:   return Key::LeftBracket;   // [{
+        case VK_OEM_6:   return Key::RightBracket;  // ]}
         case VK_F1:      return Key::F1;
         case VK_F2:      return Key::F2;
         case VK_F3:      return Key::F3;
