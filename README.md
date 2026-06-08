@@ -88,6 +88,7 @@ $env:NARAGAME_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d1
 | 기반 기능 | 직접 구현 | 수학/윈도잉/입력/로깅을 외부 의존성 없이 |
 
 자세한 내용은 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 참고.
+인-엔진 타일맵 에디터 사용법은 [docs/TILESET-EDITOR.md](docs/TILESET-EDITOR.md) 참고.
 
 ## 현재 상태 / 다음 단계
 

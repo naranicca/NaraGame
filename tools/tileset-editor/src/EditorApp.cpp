@@ -1450,9 +1450,11 @@ private:
     }
 
     // Object marker palette: a fixed roster of single-character symbols.
-    // The brawl integration reads 'P' as the player spawn and 'E' as an
-    // enemy spawn; the other entries are placeholders games can claim.
-    static constexpr char  kObjectSymbols[]    = { 'P', 'E', 'I', 'C', 'X' };
+    // P/E/I/C/X are the brawl-style generic set; M/g/!/* belong to the
+    // Mario port (mario spawn, goomba spawn, mushroom block, fire flower
+    // block). A game ignores symbols it doesn't recognise.
+    static constexpr char  kObjectSymbols[]    = { 'P', 'E', 'I', 'C', 'X',
+                                                   'M', 'g', '!', '*' };
     static constexpr int   kObjectSymbolCount  = sizeof(kObjectSymbols)
                                                  / sizeof(kObjectSymbols[0]);
 
@@ -1505,6 +1507,10 @@ private:
             case 'E': return "enemy";
             case 'I': return "item";
             case 'C': return "coin";
+            case 'M': return "mario";
+            case 'g': return "goomba";
+            case '!': return "mushroom";
+            case '*': return "fire flower";
             default:  return "marker";
         }
     }

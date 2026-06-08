@@ -8,7 +8,7 @@
 #include <NaraGame/assets/AssetWatcher.h>
 #include <NaraGame/assets/BMFont.h>
 #include <NaraGame/assets/TextureLoader.h>
-#include <NaraGame/assets/TileLevel.h>
+#include <NaraGame/assets/TilemapLoader.h>
 #include <NaraGame/audio/AudioClip.h>
 #include <NaraGame/audio/AudioDevice.h>
 #include <NaraGame/core/Application.h>
@@ -38,7 +38,6 @@
 #include <memory>
 #include <set>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -224,8 +223,7 @@ struct GameContext {
     Renderer2D* renderer = nullptr;
     MSDFFont* font = nullptr;   // also serves the old propFont tagline path
     TextureAtlas* chars = nullptr;
-    RHITexture* tilesTexture = nullptr;
-    SpriteSheet tileset;
+    RHIDevice* device = nullptr; // for per-level LoadNtmap calls in GameScene
     float screenW = kScreenW;
     float screenH = kScreenH;
     std::string assetsDir;
@@ -245,10 +243,11 @@ struct GameContext {
     int coins = 0;
     int lives = 3;
 
-    // Bumped by MarioApp whenever an asset watcher event for a level<N>.txt
-    // fires. GameScene caches its last-seen value and re-runs OnEnter() when
-    // the counter changes -- a simple cross-class signal that avoids
-    // surfacing the watcher API to the scene layer.
+    // Bumped by MarioApp whenever an asset watcher event fires for the
+    // level data (.ntmap or its tileset .png). GameScene caches its
+    // last-seen value and re-runs OnEnter() when the counter changes --
+    // a simple cross-class signal that avoids surfacing the watcher API
+    // to the scene layer.
     int levelReloadCounter = 0;
 
     std::function<std::unique_ptr<Scene>()> makeTitle;
@@ -306,13 +305,13 @@ public:
         // re-entry on the next OnUpdate.
         m_seenLevelReload = m_ctx->levelReloadCounter;
 
-        const std::unordered_map<char, int> legend = {
-            {'#', GROUND}, {'=', DIRT}, {'b', BRICK}, {'?', QUESTION}, {'(', PIPE_TL},
-            {')', PIPE_TR}, {'{', PIPE_BL}, {'}', PIPE_BR}, {'X', HARD}, {'o', COIN}};
-
-        const std::string path = m_ctx->assetsDir + "/level" + std::to_string(m_level) + ".txt";
-        TileLevel level = LoadTileLevel(path, kT, kT, m_ctx->tileset, legend);
-        m_map = std::move(level.map);
+        const std::string path = m_ctx->assetsDir + "/level" +
+                                 std::to_string(m_level) + ".ntmap";
+        m_levelAsset = LoadNtmap(*m_ctx->device, path, TextureFilter::Point);
+        // Move the map out of the asset; the SpriteSheet inside still
+        // points at m_levelAsset.texture, which the asset keeps alive
+        // for as long as this scene exists.
+        m_map = std::move(m_levelAsset.map);
         m_worldSize = m_map.WorldSize();
 
         m_camera = Camera2D(m_ctx->screenW, m_ctx->screenH);
@@ -330,17 +329,16 @@ public:
         m_invulnTimer = 0.0f;
         m_spawn = {120.0f, kT * 14.0f};
 
-        // First pass: '!' = mushroom block, '*' = fire-flower block. Both
-        // promote to QUESTION tiles now so BuildTileColliders sees them as
-        // solid; remember the positions so the bump handler knows which
-        // power-up to spawn when each is hit.
-        for (const LevelObject& obj : level.objects) {
+        // First pass: '!' = mushroom block, '*' = fire-flower block. The
+        // saved .ntmap already has QUESTION tiles under both markers (the
+        // converter does the promotion), so BuildTileColliders sees them
+        // as solid. We just remember the positions so the bump handler
+        // knows which power-up to spawn when each is hit.
+        for (const ObjectMarker& obj : m_levelAsset.objects) {
             if (obj.symbol == '!') {
-                m_map.SetTile(obj.tileX, obj.tileY, QUESTION);
-                m_mushroomBlocks.insert({obj.tileX, obj.tileY});
+                m_mushroomBlocks.insert({obj.x, obj.y});
             } else if (obj.symbol == '*') {
-                m_map.SetTile(obj.tileX, obj.tileY, QUESTION);
-                m_fireFlowerBlocks.insert({obj.tileX, obj.tileY});
+                m_fireFlowerBlocks.insert({obj.x, obj.y});
             }
         }
 
@@ -353,16 +351,16 @@ public:
         BuildTileColliders();
 
         // Second pass: spawn points and dynamic actors.
-        for (const LevelObject& obj : level.objects) {
-            const float px = obj.tileX * kT;
+        for (const ObjectMarker& obj : m_levelAsset.objects) {
+            const float px = obj.x * kT;
             if (obj.symbol == 'M') {
-                m_spawn = {px, (obj.tileY + 1) * kT - kPlayerSmallH};
+                m_spawn = {px, (obj.y + 1) * kT - kPlayerSmallH};
             } else if (obj.symbol == 'g') {
                 Body gb;
                 gb.type = BodyType::Dynamic;
                 gb.tag = TagGoomba;
                 gb.size = {kGoombaW, kGoombaH};
-                gb.position = {px, (obj.tileY + 1) * kT - kGoombaH};
+                gb.position = {px, (obj.y + 1) * kT - kGoombaH};
                 Goomba g;
                 g.bodyId = m_world.AddBody(gb);
                 g.lastPos = gb.position;
@@ -545,7 +543,7 @@ public:
             const float u = bb.t / kBrickBumpLife;
             const float arc = 1.0f - (2.0f * u - 1.0f) * (2.0f * u - 1.0f);
             const Vec2 pos{bb.tx * kT, bb.ty * kT - kBrickBumpHeight * arc};
-            r.DrawQuad(pos, {kT, kT}, m_ctx->tileset.At(BRICK));
+            r.DrawQuad(pos, {kT, kT}, m_map.Tileset().At(BRICK));
         }
 
         // Coin pops: a coin sprite that rises out of a bumped block then
@@ -556,7 +554,7 @@ public:
             const float u = cp.t / kCoinPopLife;     // 0..1
             const float arc = 1.0f - (2.0f * u - 1.0f) * (2.0f * u - 1.0f); // 0..1..0
             const Vec2 pos{cp.origin.x - kT * 0.5f, cp.origin.y - kCoinPopRise * arc - kT};
-            r.DrawQuad(pos, {kT, kT}, m_ctx->tileset.At(COIN));
+            r.DrawQuad(pos, {kT, kT}, m_map.Tileset().At(COIN));
         }
         m_particles.Draw(r);
 
@@ -1337,6 +1335,10 @@ private:
 
     GameContext* m_ctx;
     int m_level;
+    // m_levelAsset owns the level's tileset texture; m_map below moves
+    // the Tilemap out of it but keeps a raw pointer into the texture, so
+    // the asset must outlive the map.
+    TilemapAsset m_levelAsset;
     Tilemap m_map;
     Camera2D m_camera;
     Vec2 m_worldSize;
@@ -1429,9 +1431,10 @@ protected:
         m_renderer.Init(GetDevice());
         const std::string assets = NARAGAME_ASSETS_DIR;
 
-        // Point sampling on both atlases so the SMB-style pixel art stays
-        // crisp at any zoom -- linear would smear the 2x source pixels.
-        m_tilesTexture = LoadTexture(GetDevice(), assets + "/tiles.png", TextureFilter::Point);
+        // Point sampling on the character atlas so the SMB-style pixel art
+        // stays crisp at any zoom -- linear would smear the 2x source
+        // pixels. The tiles texture is owned per-level by LoadNtmap inside
+        // GameScene, so there's no app-level handle for it any more.
         m_charTexture  = LoadTexture(GetDevice(), assets + "/characters.png", TextureFilter::Point);
         m_font = LoadMSDFFont(GetDevice(), assets + "/msdf-inter.json");
 
@@ -1466,8 +1469,7 @@ protected:
         m_ctx.renderer = &m_renderer;
         m_ctx.font = &m_font;
         m_ctx.chars = &m_chars;
-        m_ctx.tilesTexture = m_tilesTexture.get();
-        m_ctx.tileset = SpriteSheet(m_tilesTexture.get(), kTile, kTile);
+        m_ctx.device = &GetDevice();
         m_ctx.assetsDir = assets;
         m_ctx.audio = &GetAudio();
         m_ctx.sfxJump = &m_jump;
@@ -1486,10 +1488,14 @@ protected:
         m_watcher.Watch(assets, [this, assets](const std::string& rel) {
             if (rel == "characters.png") {
                 ReloadTexture(*m_charTexture, assets + "/characters.png");
-            } else if (rel == "tiles.png") {
-                ReloadTexture(*m_tilesTexture, assets + "/tiles.png");
-            } else if (rel.rfind("level", 0) == 0 &&
-                       rel.size() > 4 && rel.substr(rel.size() - 4) == ".txt") {
+                return;
+            }
+            // level{N}.ntmap or tiles.png both invalidate the active level
+            // asset (tiles.png is owned per-level by LoadNtmap now).
+            const bool isLevel = rel.rfind("level", 0) == 0 &&
+                                 rel.size() > 6 &&
+                                 rel.substr(rel.size() - 6) == ".ntmap";
+            if (isLevel || rel == "tiles.png") {
                 ++m_ctx.levelReloadCounter;
                 NARAGAME_INFO("Hot reload: %s -> level counter %d",
                               rel.c_str(), m_ctx.levelReloadCounter);
@@ -1501,7 +1507,6 @@ protected:
 
     void OnStop() override {
         m_watcher.Stop();
-        m_tilesTexture.reset();
         m_charTexture.reset();
         m_renderer.Shutdown();
     }
@@ -1522,7 +1527,6 @@ private:
     }
 
     Renderer2D m_renderer;
-    std::unique_ptr<RHITexture> m_tilesTexture;
     std::unique_ptr<RHITexture> m_charTexture;
     MSDFFont m_font;
     TextureAtlas m_chars;
