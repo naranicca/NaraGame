@@ -402,6 +402,31 @@ protected:
         const float wheel = Input::MouseWheelDelta();
         const bool ctrl = Input::IsKeyDown(Key::LeftCtrl);
 
+        // Quit-confirm modal. Set when the user presses Esc with unsaved
+        // changes -- gives them a chance to save before the editor exits.
+        // S saves (popping a Save-As dialog if the map has no path yet),
+        // D discards and quits, C / Esc cancels and returns to editing.
+        if (m_quitConfirm) {
+            if (Input::IsKeyPressed(Key::S)) {
+                if (m_filePath.empty()) {
+                    const std::string p = SaveFileDialog(
+                        L"NaraGame tilemap (*.ntmap)\0*.ntmap\0All files\0*.*\0",
+                        L"Save before quitting", L"ntmap");
+                    if (p.empty()) return;       // user cancelled the dialog
+                    m_filePath = p;
+                }
+                SaveCurrent();
+                Close();
+                return;
+            }
+            if (Input::IsKeyPressed(Key::D)) { Close(); return; }
+            if (Input::IsKeyPressed(Key::C) ||
+                Input::IsKeyPressed(Key::Escape)) {
+                m_quitConfirm = false;
+            }
+            return;
+        }
+
         // F1: toggle the keybind cheatsheet overlay. When it's up we treat
         // the editor as modal -- only F1/Esc clear it; paint / palette /
         // scrollbar are all suppressed so the user can read without
@@ -412,13 +437,16 @@ protected:
             return;
         }
 
-        // Esc: clear an active selection first, only close the app when
-        // there's nothing to dismiss. Lets the user back out of a marquee
-        // without accidentally killing the editor.
+        // Esc: clear an active selection first, then prompt to save if the
+        // map is dirty, then close. Lets the user back out of a marquee
+        // without accidentally killing the editor, and prevents a one-tap
+        // exit from throwing away unsaved work.
         if (Input::IsKeyPressed(Key::Escape)) {
             if (m_hasSelection || m_selDragging) {
                 m_hasSelection = false;
                 m_selDragging  = false;
+            } else if (m_dirty) {
+                m_quitConfirm = true;
             } else {
                 Close();
             }
@@ -488,10 +516,12 @@ protected:
             PasteAt(m_hoverTx, m_hoverTy);
         }
         if (ctrl && Input::IsKeyPressed(Key::S) && m_map.Width() > 0) {
-            // First save → pop a Save As dialog so the user can pick where
-            // the .ntmap lands. After that Ctrl+S writes back to the same
-            // path silently.
-            if (m_filePath.empty()) {
+            // Ctrl+Shift+S always pops the Save-As dialog regardless of
+            // m_filePath -- it's the "save a copy / rename" path. Bare
+            // Ctrl+S only pops the dialog on the first save and reuses
+            // m_filePath thereafter.
+            const bool shift = Input::IsKeyDown(Key::LeftShift);
+            if (shift || m_filePath.empty()) {
                 const std::string p = SaveFileDialog(
                     L"NaraGame tilemap (*.ntmap)\0*.ntmap\0All files\0*.*\0",
                     L"Save tilemap as", L"ntmap");
@@ -679,9 +709,38 @@ protected:
             }
         }
 
+        // ----- Map edge resize drag -----
+        // Hover within a few pixels of a visible map edge -> highlight it
+        // and capture LMB press to drag that edge in/out. Suppresses the
+        // canvas paint block below for the duration so a missed grab
+        // doesn't paint a stripe along the boundary.
+        if (m_scrollDrag == 0 && !ctrl && m_map.Width() > 0) {
+            if (!m_resizingMap) {
+                const ResizeEdge edge = HoveredResizeEdge(
+                    mouse, canvasOrigin, canvasSize);
+                m_resizeHoverEdge = edge;
+                if (edge != ResizeEdge::None &&
+                    Input::IsMousePressed(MouseButton::Left)) {
+                    m_resizingMap       = true;
+                    m_resizingEdge      = edge;
+                    m_resizeMouseOrigin = mouse;
+                }
+            } else {
+                if (!Input::IsMouseDown(MouseButton::Left)) {
+                    const int delta = ComputeResizeDelta(
+                        m_resizingEdge, mouse);
+                    if (delta != 0) DoResize(m_resizingEdge, delta);
+                    m_resizingMap     = false;
+                    m_resizeHoverEdge = ResizeEdge::None;
+                }
+            }
+        } else {
+            m_resizeHoverEdge = ResizeEdge::None;
+        }
+
         // ----- Canvas paint / erase / fill / rect -----
         if (m_inCanvas && m_map.Width() > 0 && !m_panning &&
-            m_scrollDrag == 0) {
+            m_scrollDrag == 0 && !m_resizingMap) {
             const Vec2 world = ScreenToWorld(mouse, canvasOrigin, m_zoom);
             const int tx = int(std::floor(world.x / float(m_tileW)));
             const int ty = int(std::floor(world.y / float(m_tileH)));
@@ -858,6 +917,7 @@ protected:
         DrawToolbar(r);
         DrawStatusBar(r);
         if (m_helpOverlay) DrawHelpOverlay(r);
+        if (m_quitConfirm) DrawQuitConfirm(r);
 
         r.End();
     }
@@ -1225,10 +1285,72 @@ private:
     // breaks every other path). When growing, the new cells are -1 / 0
     // (empty tile / Floor); when shrinking, dropped cells are kept in the
     // ResizeSnapshot so Undo can put them back.
-    enum class ResizeEdge { Left, Right, Top, Bottom };
+    enum class ResizeEdge { None, Left, Right, Top, Bottom };
+
+    // Pixel slop around an edge that counts as "hovering" it. Wide enough
+    // to give a comfortable grab area, narrow enough to never collide
+    // with paint clicks one cell in from the edge.
+    static constexpr float kResizeHandleSlop = 6.0f;
+
+    // Which edge -- if any -- the cursor is within kResizeHandleSlop px
+    // of. Returns None when nothing's hovered. Corners deliberately pick
+    // the horizontal edge so the user doesn't accidentally fall into a
+    // two-axis drag (which DoResize can't do in one call anyway).
+    ResizeEdge HoveredResizeEdge(const Vec2& mouse,
+                                 const Vec2& canvasOrigin,
+                                 const Vec2& canvasSize) const {
+        if (m_map.Width() <= 0) return ResizeEdge::None;
+        if (!IsInside(mouse, canvasOrigin, canvasSize))
+            return ResizeEdge::None;
+        const Vec2 tl = WorldToScreen({0.0f, 0.0f}, canvasOrigin);
+        const Vec2 br = WorldToScreen(
+            {float(m_map.Width()  * m_tileW),
+             float(m_map.Height() * m_tileH)}, canvasOrigin);
+        const float s = kResizeHandleSlop;
+        const bool yInBand = (mouse.y >= tl.y - s && mouse.y <= br.y + s);
+        const bool xInBand = (mouse.x >= tl.x - s && mouse.x <= br.x + s);
+        // Vertical edges (Left/Right) take priority over Top/Bottom for
+        // the corner case so a click at the top-left targets a single
+        // axis predictably.
+        if (yInBand && std::abs(mouse.x - tl.x) <= s) return ResizeEdge::Left;
+        if (yInBand && std::abs(mouse.x - br.x) <= s) return ResizeEdge::Right;
+        if (xInBand && std::abs(mouse.y - tl.y) <= s) return ResizeEdge::Top;
+        if (xInBand && std::abs(mouse.y - br.y) <= s) return ResizeEdge::Bottom;
+        return ResizeEdge::None;
+    }
+
+    // Mouse delta in pixels since drag start -> delta rows/cols on the
+    // dragged edge. Sign convention follows DoResize: positive delta
+    // *grows* the map on that edge (Left grow extends to the left,
+    // Right grow extends to the right). Clamped so the map stays >= 1
+    // tile on each axis.
+    int ComputeResizeDelta(ResizeEdge edge, const Vec2& mouse) const {
+        const float dx = mouse.x - m_resizeMouseOrigin.x;
+        const float dy = mouse.y - m_resizeMouseOrigin.y;
+        const float pxPerCellW = float(m_tileW) * m_zoom;
+        const float pxPerCellH = float(m_tileH) * m_zoom;
+        int delta = 0;
+        switch (edge) {
+            case ResizeEdge::Right:
+                delta =  int(std::round(dx / pxPerCellW)); break;
+            case ResizeEdge::Left:
+                delta = -int(std::round(dx / pxPerCellW)); break;
+            case ResizeEdge::Bottom:
+                delta =  int(std::round(dy / pxPerCellH)); break;
+            case ResizeEdge::Top:
+                delta = -int(std::round(dy / pxPerCellH)); break;
+            case ResizeEdge::None: break;
+        }
+        const int currentDim = (edge == ResizeEdge::Left ||
+                                edge == ResizeEdge::Right)
+                                   ? m_map.Width() : m_map.Height();
+        if (currentDim + delta < 1) delta = 1 - currentDim;
+        return delta;
+    }
 
     void DoResize(ResizeEdge edge, int delta) {
         if (m_map.Width() <= 0 || delta == 0) return;
+        if (edge == ResizeEdge::None) return;
         const int W = m_map.Width();
         const int H = m_map.Height();
         int newW = W, newH = H;
@@ -1806,6 +1928,71 @@ private:
                        {g.vTrackSize.x - kBarPad * 2.0f, g.vThumbH}, c);
         }
 
+        // Resize edge feedback. Hover: thin highlight along the edge under
+        // the cursor, hinting that it's grabbable. Drag: ghost outline of
+        // the prospective new map bounds so the user can size by sight
+        // before releasing. The actual resize commits in OnUpdate on
+        // mouse-up via DoResize().
+        const ResizeEdge visibleEdge = m_resizingMap
+            ? m_resizingEdge : m_resizeHoverEdge;
+        if (visibleEdge != ResizeEdge::None) {
+            const Vec2 tl = WorldToScreen({0.0f, 0.0f}, origin);
+            const Vec2 br = WorldToScreen(
+                {float(m_map.Width()  * m_tileW),
+                 float(m_map.Height() * m_tileH)}, origin);
+            constexpr float kEdgeThickness = 3.0f;
+            const Color cEdge = m_resizingMap
+                ? Color(1.00f, 0.86f, 0.20f, 1.0f)    // active = saturated
+                : Color(1.00f, 0.92f, 0.55f, 0.85f);  // hover = soft yellow
+            switch (visibleEdge) {
+                case ResizeEdge::Left:
+                    r.DrawQuad({tl.x - kEdgeThickness * 0.5f, tl.y},
+                               {kEdgeThickness, br.y - tl.y}, cEdge); break;
+                case ResizeEdge::Right:
+                    r.DrawQuad({br.x - kEdgeThickness * 0.5f, tl.y},
+                               {kEdgeThickness, br.y - tl.y}, cEdge); break;
+                case ResizeEdge::Top:
+                    r.DrawQuad({tl.x, tl.y - kEdgeThickness * 0.5f},
+                               {br.x - tl.x, kEdgeThickness}, cEdge); break;
+                case ResizeEdge::Bottom:
+                    r.DrawQuad({tl.x, br.y - kEdgeThickness * 0.5f},
+                               {br.x - tl.x, kEdgeThickness}, cEdge); break;
+                case ResizeEdge::None: break;
+            }
+        }
+        if (m_resizingMap) {
+            const int delta = ComputeResizeDelta(m_resizingEdge, mouseNow);
+            const int W = m_map.Width(), H = m_map.Height();
+            // Ghost rect = new map bounds expressed in OLD-grid screen
+            // coords so the user sees the boundary move under the cursor
+            // (camera doesn't shift during drag). For Left/Top grows, the
+            // new map's origin moves outward by delta cells from where 0,0
+            // is currently drawn.
+            float gx = 0.0f, gy = 0.0f;
+            float gw = float(W), gh = float(H);
+            switch (m_resizingEdge) {
+                case ResizeEdge::Right:  gw += float(delta); break;
+                case ResizeEdge::Bottom: gh += float(delta); break;
+                case ResizeEdge::Left:
+                    gx -= float(delta); gw += float(delta); break;
+                case ResizeEdge::Top:
+                    gy -= float(delta); gh += float(delta); break;
+                case ResizeEdge::None: break;
+            }
+            const Vec2 ga = WorldToScreen(
+                {gx * float(m_tileW), gy * float(m_tileH)}, origin);
+            DrawRectOutline(r, ga,
+                            {gw * float(m_tileW) * m_zoom,
+                             gh * float(m_tileH) * m_zoom},
+                            2.0f, kSelectHi);
+            // "WxH" hint next to the cursor.
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.0fx%.0f", gw, gh);
+            DrawMicroText(r, buf,
+                          {mouseNow.x + 14.0f, mouseNow.y + 14.0f},
+                          14.0f, kSelectHi);
+        }
+
         // Clip — visually mark the canvas border so it's clear where the
         // panel ends regardless of camera offset.
         DrawRectOutline(r, origin, size, 2.0f, kCanvasOut);
@@ -2002,10 +2189,11 @@ private:
             int         rowCount;
         };
         static const Row kFile[] = {
-            {"Ctrl+O",     "open .ntmap / .tmx"},
-            {"Ctrl+N",     "new map from tileset"},
-            {"Ctrl+S",     "save (.ntmap)"},
-            {"Esc",        "close (or back out)"},
+            {"Ctrl+O",       "open .ntmap / .tmx"},
+            {"Ctrl+N",       "new map from tileset"},
+            {"Ctrl+S",       "save (.ntmap)"},
+            {"Ctrl+Shift+S", "save as / rename"},
+            {"Esc",          "close (or back out)"},
         };
         static const Row kEdit[] = {
             {"Ctrl+Z",       "undo"},
@@ -2044,6 +2232,7 @@ private:
         static const Row kResize[] = {
             {"Ctrl+arrow",       "grow that edge"},
             {"Ctrl+Shift+arrow", "shrink that edge"},
+            {"Drag map edge",    "live resize"},
         };
         static const Section kCol1[] = {
             {"FILE",      kFile,   int(sizeof(kFile)   / sizeof(kFile[0]))},
@@ -2106,6 +2295,39 @@ private:
         };
         DrawColumn(col1X, kCol1, int(sizeof(kCol1) / sizeof(kCol1[0])));
         DrawColumn(col2X, kCol2, int(sizeof(kCol2) / sizeof(kCol2[0])));
+    }
+
+    // Unsaved-changes confirmation. Triggered by Esc when m_dirty is
+    // true; the OnUpdate modal block routes S / D / C keys to save+quit,
+    // discard+quit, or cancel respectively.
+    void DrawQuitConfirm(Renderer2D& r) {
+        r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                   Color(0.0f, 0.0f, 0.0f, 0.70f));
+        constexpr float panelW = 520.0f;
+        constexpr float panelH = 200.0f;
+        const Vec2 p{(kScreenW - panelW) * 0.5f,
+                     (kScreenH - panelH) * 0.5f};
+        r.DrawQuad(p, {panelW, panelH}, kPaneBg);
+        DrawRectOutline(r, p, {panelW, panelH}, 2.0f, kSelectHi);
+        DrawMicroText(r, "Unsaved changes",
+                      {p.x + 24.0f, p.y + 22.0f}, 22.0f, kSelectHi);
+        DrawMicroText(r,
+            "Save before quitting? Your work is not yet on disk.",
+            {p.x + 24.0f, p.y + 62.0f}, 14.0f, kStatusText);
+        // Key rows. Keep colours consistent with the F1 cheatsheet so the
+        // user reads the same "key = light-blue, action = grey" mapping.
+        const Color kKeyText(0.85f, 0.90f, 0.98f, 1.0f);
+        const float rowY = p.y + 110.0f;
+        DrawMicroText(r, "S",        {p.x + 32.0f,  rowY}, 16.0f, kKeyText);
+        DrawMicroText(r, "save then quit",
+                      {p.x + 64.0f,  rowY}, 14.0f, kStatusText);
+        DrawMicroText(r, "D",        {p.x + 32.0f,  rowY + 28.0f}, 16.0f,
+                      kKeyText);
+        DrawMicroText(r, "discard and quit",
+                      {p.x + 64.0f,  rowY + 28.0f}, 14.0f, kStatusText);
+        DrawMicroText(r, "C / Esc",  {p.x + 280.0f, rowY}, 16.0f, kKeyText);
+        DrawMicroText(r, "stay in editor",
+                      {p.x + 360.0f, rowY}, 14.0f, kStatusText);
     }
 
     void DrawToolbar(Renderer2D& r) {
@@ -2199,6 +2421,19 @@ private:
     // F1 keybind cheatsheet. Modal: all other input is suppressed while
     // the overlay is up so the user can read without accidentally editing.
     bool  m_helpOverlay = false;
+
+    // Esc-with-unsaved confirmation. Modal until S/D/C/Esc resolves it.
+    bool  m_quitConfirm = false;
+
+    // Edge-handle map resize. m_resizeHoverEdge highlights the edge under
+    // the cursor (so the user sees the affordance before clicking); a
+    // press on it latches m_resizingMap, and release commits via
+    // DoResize. m_resizeMouseOrigin captures the cursor position at the
+    // press so ComputeResizeDelta() can derive the row/col delta.
+    bool       m_resizingMap     = false;
+    ResizeEdge m_resizingEdge    = ResizeEdge::None;
+    ResizeEdge m_resizeHoverEdge = ResizeEdge::None;
+    Vec2       m_resizeMouseOrigin{0.0f, 0.0f};
 
     // Brush size for single-value paint (Tile single-tile, Collision).
     // Always odd so the brush footprint is centred on the hover cell.
