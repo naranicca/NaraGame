@@ -405,7 +405,8 @@ protected:
                 } else if (m_mode == EditLayer::Collision) {
                     if (i < 3) m_selectedCol = i;
                 } else {
-                    if (i < kObjectSymbolCount) m_selectedSym = kObjectSymbols[i];
+                    if (size_t(i) < m_symbols.size())
+                        m_selectedSym = m_symbols[i].symbol;
                 }
             }
         }
@@ -523,7 +524,8 @@ protected:
                 if (picked >= 0) m_selectedCol = picked;
             } else if (m_mode == EditLayer::Object) {
                 const int picked = ObjectPaletteHit(mouse, paletteOrigin);
-                if (picked >= 0) m_selectedSym = kObjectSymbols[picked];
+                if (picked >= 0 && size_t(picked) < m_symbols.size())
+                    m_selectedSym = m_symbols[picked].symbol;
             }
         }
         // Palette LMB drag (Tile mode): extends the stamp to a rectangle
@@ -1208,6 +1210,11 @@ private:
         m_map        = std::move(asset.map);
         m_collision  = std::move(asset.collision);   // empty if none in file
         m_objects    = std::move(asset.objects);     // empty if none in file
+        // A map that authored its own `symbols` section wins over the editor
+        // default. Maps with no section fall back to the default fill so the
+        // user can still place markers when editing legacy files.
+        m_symbols    = !asset.symbols.empty() ? std::move(asset.symbols)
+                                              : DefaultObjectSymbols();
         // The Tilemap stored a SpriteSheet pointing at the asset's texture
         // before we moved it. Rebind so it points at our owned copy.
         m_tileW = asset.tileWidth;
@@ -1244,6 +1251,7 @@ private:
         m_map.Fill(-1);
         m_collision.clear();
         m_objects.clear();
+        m_symbols = DefaultObjectSymbols();
         m_currentTilesetPath = tilesetPath;
         m_camera = {0.0f, 0.0f};
         m_zoom   = 1.0f;
@@ -1273,7 +1281,7 @@ private:
                                   m_tileW, m_tileH, 0, 0,
                                   m_collision.size() == need ? m_collision
                                                              : emptyCol,
-                                  m_objects);
+                                  m_objects, m_symbols);
         if (ok) {
             m_filePath = out;
             m_dirty = false;
@@ -1597,13 +1605,38 @@ private:
     }
 
     // Object marker palette: a fixed roster of single-character symbols.
+    // Default fallback set when a .ntmap has no `symbols` section. Once a
+    // map is saved, its on-disk symbols list takes precedence over this on
+    // subsequent loads. Each entry: (char, 0xRRGGBB tint, label).
     // P/E/I/C/X are the brawl-style generic set; M/g/!/* belong to the
-    // Mario port (mario spawn, goomba spawn, mushroom block, fire flower
-    // block). A game ignores symbols it doesn't recognise.
-    static constexpr char  kObjectSymbols[]    = { 'P', 'E', 'I', 'C', 'X',
-                                                   'M', 'g', '!', '*' };
-    static constexpr int   kObjectSymbolCount  = sizeof(kObjectSymbols)
-                                                 / sizeof(kObjectSymbols[0]);
+    // Mario port. A game still only consumes the bare char -- the colour
+    // and label are editor-only metadata.
+    static std::vector<SymbolDef> DefaultObjectSymbols() {
+        return {
+            {'P', 0x55b8ffu, "player"},
+            {'E', 0xff5050u, "enemy"},
+            {'I', 0xffd060u, "item"},
+            {'C', 0xffe066u, "coin"},
+            {'X', 0xa0a0a0u, "marker"},
+            {'M', 0xff7030u, "mario"},
+            {'g', 0xa06a3cu, "goomba"},
+            {'!', 0xff9966u, "mushroom"},
+            {'*', 0xff5577u, "fire flower"},
+        };
+    }
+
+    static Color ColorFromHex(uint32_t rgb) {
+        const float r = float((rgb >> 16) & 0xFFu) / 255.0f;
+        const float g = float((rgb >>  8) & 0xFFu) / 255.0f;
+        const float b = float( rgb        & 0xFFu) / 255.0f;
+        return Color(r, g, b, 1.0f);
+    }
+
+    const char* ObjectLabel(char sym) const {
+        for (const auto& s : m_symbols)
+            if (s.symbol == sym) return s.label.c_str();
+        return "marker";
+    }
 
     void DrawObjectPalette(Renderer2D& r, Vec2 origin) {
         DrawMicroText(r, "object layer",
@@ -1612,20 +1645,25 @@ private:
         constexpr float pad   = 12.0f;
         constexpr float cellH = 56.0f;
         constexpr float gap   = 8.0f;
-        for (int i = 0; i < kObjectSymbolCount; ++i) {
-            const float py = origin.y + 32.0f + i * (cellH + gap);
+        for (size_t i = 0; i < m_symbols.size(); ++i) {
+            const SymbolDef& s = m_symbols[i];
+            const float py = origin.y + 32.0f + float(i) * (cellH + gap);
             const Vec2 p{origin.x + pad, py};
             const Vec2 sz{kPaletteW - pad * 2.0f, cellH};
+            // Cell background is the neutral pane tint; a thin coloured
+            // strip on the left identifies the symbol without drowning
+            // the white label text. Matches the rest of the palette UI.
             r.DrawQuad(p, sz, Color(0.20f, 0.22f, 0.30f, 1.0f));
+            r.DrawQuad(p, {6.0f, sz.y}, ColorFromHex(s.color));
             DrawRectOutline(r, p, sz, 1.0f, Color(0.0f, 0.0f, 0.0f, 0.6f));
-            const char text[2] = { kObjectSymbols[i], 0 };
+            const char text[2] = { s.symbol, 0 };
             DrawMicroText(r, text,
-                          {p.x + 12.0f, p.y + cellH * 0.5f - 12.0f},
-                          24.0f, kSelectHi);
-            DrawMicroText(r, ObjectLabel(kObjectSymbols[i]),
-                          {p.x + 50.0f, p.y + cellH * 0.5f - 8.0f},
+                          {p.x + 16.0f, p.y + cellH * 0.5f - 12.0f},
+                          24.0f, ColorFromHex(s.color));
+            DrawMicroText(r, s.label.c_str(),
+                          {p.x + 54.0f, p.y + cellH * 0.5f - 8.0f},
                           14.0f, kStatusText);
-            if (kObjectSymbols[i] == m_selectedSym) {
+            if (s.symbol == m_selectedSym) {
                 DrawRectOutline(r, {p.x - 2.0f, p.y - 2.0f},
                                 {sz.x + 4.0f, sz.y + 4.0f},
                                 2.0f, kSelectHi);
@@ -1637,29 +1675,15 @@ private:
         constexpr float pad   = 12.0f;
         constexpr float cellH = 56.0f;
         constexpr float gap   = 8.0f;
-        for (int i = 0; i < kObjectSymbolCount; ++i) {
-            const float py = origin.y + 32.0f + i * (cellH + gap);
+        for (size_t i = 0; i < m_symbols.size(); ++i) {
+            const float py = origin.y + 32.0f + float(i) * (cellH + gap);
             const float px = origin.x + pad;
             if (mouse.x >= px && mouse.x < px + (kPaletteW - pad * 2.0f) &&
                 mouse.y >= py && mouse.y < py + cellH) {
-                return i;
+                return int(i);
             }
         }
         return -1;
-    }
-
-    static const char* ObjectLabel(char sym) {
-        switch (sym) {
-            case 'P': return "player";
-            case 'E': return "enemy";
-            case 'I': return "item";
-            case 'C': return "coin";
-            case 'M': return "mario";
-            case 'g': return "goomba";
-            case '!': return "mushroom";
-            case '*': return "fire flower";
-            default:  return "marker";
-        }
     }
 
     void DrawToolbar(Renderer2D& r) {
@@ -1772,6 +1796,11 @@ private:
     // `collision` section is loaded.
     std::vector<uint8_t>      m_collision;
     std::vector<ObjectMarker> m_objects;
+    // Object-symbol palette. Initialised to DefaultObjectSymbols() so the
+    // editor has a usable list on first launch; OpenPath() replaces it when
+    // the loaded .ntmap carries its own `symbols` section, and SaveCurrent()
+    // persists whatever the list currently holds.
+    std::vector<SymbolDef>    m_symbols      = DefaultObjectSymbols();
     EditLayer                 m_mode         = EditLayer::Tile;
     int                       m_selectedCol  = 1; // default Wall in collision mode
     char                      m_selectedSym  = 'P'; // default player spawn

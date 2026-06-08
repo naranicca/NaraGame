@@ -5,6 +5,7 @@
 #include "NaraGame/renderer/rhi/RHIDevice.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -47,12 +48,14 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
     std::vector<int>          tiles;
     std::vector<uint8_t>      collision;
     std::vector<ObjectMarker> objects;
+    std::vector<SymbolDef>    symbols;
     bool sawHeader  = false;
     bool sawTileset = false;
     bool sawSize    = false;
     // section tracks which body block subsequent body lines belong to.
     // 0 = none, 1 = layer (tile ids), 2 = collision (uint8 codes),
-    // 3 = objects (symbol + x + y per line).
+    // 3 = objects (symbol + x + y per line),
+    // 4 = symbols (symbol + hex-rgb + label words per line).
     int section = 0;
 
     std::string line;
@@ -83,6 +86,32 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             }
             // Fall through to the directive branch -- this wasn't an object
             // line after all.
+            ls.clear();
+            ls.seekg(0);
+        }
+        if (section == 4) {
+            // Each line: <symbol> <hexcolor> <label words...>. Same shape
+            // detection as the objects section -- single-char first token
+            // means "still in this block", anything else is a new directive.
+            std::string sym;
+            std::string colorTok;
+            if ((ls >> sym >> colorTok) && sym.size() == 1) {
+                SymbolDef d;
+                d.symbol = sym[0];
+                char* endp = nullptr;
+                const unsigned long c = std::strtoul(colorTok.c_str(), &endp, 16);
+                if (endp == colorTok.c_str() + colorTok.size())
+                    d.color = uint32_t(c) & 0xFFFFFFu;
+                // Label is the remainder of the line, whitespace-trimmed.
+                std::string rest;
+                std::getline(ls, rest);
+                const size_t s = rest.find_first_not_of(" \t");
+                const size_t e = rest.find_last_not_of(" \t\r\n");
+                if (s != std::string::npos)
+                    d.label = rest.substr(s, e - s + 1);
+                symbols.push_back(d);
+                continue;
+            }
             ls.clear();
             ls.seekg(0);
         }
@@ -120,6 +149,8 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             section = 2;
         } else if (tok == "objects") {
             section = 3;
+        } else if (tok == "symbols") {
+            section = 4;
         }
     }
 
@@ -171,6 +202,7 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             asset.objects.push_back(m);
         }
     }
+    asset.symbols = std::move(symbols);
 
     asset.tilesetPath = tilesetRel;
     asset.tileWidth   = cellW;
@@ -183,7 +215,8 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                const std::string& tilesetPath, int tileWidth, int tileHeight,
                int margin, int spacing,
                const std::vector<uint8_t>& collision,
-               const std::vector<ObjectMarker>& objects) {
+               const std::vector<ObjectMarker>& objects,
+               const std::vector<SymbolDef>& symbols) {
     std::ofstream out(path, std::ios::binary);
     if (!out.is_open()) {
         NARAGAME_ERROR("SaveNtmap: cannot open '%s' for write", path.c_str());
@@ -224,6 +257,16 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
             if (m.x < 0 || m.y < 0 ||
                 m.x >= map.Width() || m.y >= map.Height()) continue;
             out << m.symbol << ' ' << m.x << ' ' << m.y << '\n';
+        }
+    }
+    if (!symbols.empty()) {
+        out << "symbols\n";
+        char hex[8];
+        for (const auto& s : symbols) {
+            if (s.symbol == 0) continue;
+            std::snprintf(hex, sizeof(hex), "%06x",
+                          unsigned(s.color & 0xFFFFFFu));
+            out << s.symbol << ' ' << hex << ' ' << s.label << '\n';
         }
     }
     return out.good();

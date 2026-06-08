@@ -33,6 +33,17 @@ struct ObjectMarker {
     int  y = 0;
 };
 
+// Per-character metadata for the `objects` palette: human-readable label and
+// a colour the editor tints the palette cell with. Lives in an optional
+// `symbols` section in the .ntmap so each map can define its own marker set
+// (mario M/g/!/* vs brawl P/E/I/C/X) without recompiling the editor. Games
+// ignore this section entirely -- they only consume the bare `symbol` char.
+struct SymbolDef {
+    char        symbol = 0;
+    uint32_t    color  = 0xFFFFFFu;   // 0xRRGGBB; alpha implied opaque
+    std::string label;
+};
+
 // Bundle a Tilemap + the texture its SpriteSheet samples from. The texture
 // lives inside the asset because the SpriteSheet inside `map.SetTileset(...)`
 // only stores a raw pointer -- if the texture goes out of scope the tilemap's
@@ -47,6 +58,7 @@ struct TilemapAsset {
     Tilemap                     map;
     std::vector<uint8_t>        collision;     // mapW * mapH; empty if absent
     std::vector<ObjectMarker>   objects;       // empty if absent
+    std::vector<SymbolDef>      symbols;       // empty if absent
     std::string                 tilesetPath;   // relative path saved in the file
     int                         tileWidth  = 0;
     int                         tileHeight = 0;
@@ -82,6 +94,7 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                const std::string& tilesetPath, int tileWidth, int tileHeight,
                int margin = 0, int spacing = 0,
                const std::vector<uint8_t>& collision = {},
-               const std::vector<ObjectMarker>& objects = {});
+               const std::vector<ObjectMarker>& objects = {},
+               const std::vector<SymbolDef>& symbols = {});
 
 } // namespace NaraGame

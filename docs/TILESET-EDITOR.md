@@ -58,21 +58,28 @@ mushroom block (`!`) 은 **Tile=QUESTION + Object=!** 두 레이어가
 
 ### 객체 심볼 팔레트
 
-| 심볼 | 의미 | 사용 게임 |
-|------|------|-----------|
-| `P` | 플레이어 스폰 | brawl |
-| `E` | 적 스폰      | brawl |
-| `I` | 아이템       | brawl |
-| `C` | 코인         | brawl |
-| `X` | 일반 마커    | brawl |
-| `M` | 마리오 스폰  | mario |
-| `g` | 굼바 스폰    | mario |
-| `!` | 버섯 블록    | mario |
-| `*` | 파이어 플라워 블록 | mario |
+팔레트의 심볼 세트는 `.ntmap` 의 옵션 `symbols` 섹션이 정의합니다 — 맵마다
+자기 심볼을 들고 다닙니다. 섹션이 없으면 에디터의 기본 fallback (아래
+9개) 이 적용되고, 새로 저장하면 그 fallback 이 그대로 파일에 기록됩니다.
 
-게임은 자기가 모르는 심볼은 그냥 무시합니다. 새 심볼을 추가하려면
-`tools/tileset-editor/src/EditorApp.cpp` 의 `kObjectSymbols[]` 와
-`ObjectLabel(char)` 에 한 줄씩 더하면 됩니다.
+기본 fallback:
+
+| 심볼 | 의미 | 사용 게임 | 색 |
+|------|------|-----------|-----|
+| `P` | 플레이어 스폰 | brawl | 푸른 |
+| `E` | 적 스폰      | brawl | 빨강 |
+| `I` | 아이템       | brawl | 노랑 |
+| `C` | 코인         | brawl | 노랑 |
+| `X` | 일반 마커    | brawl | 회색 |
+| `M` | 마리오 스폰  | mario | 주황 |
+| `g` | 굼바 스폰    | mario | 갈색 |
+| `!` | 버섯 블록    | mario | 살구 |
+| `*` | 파이어 플라워 블록 | mario | 핑크 |
+
+게임은 자기가 모르는 심볼은 그냥 무시합니다. 새 게임이 자기 심볼 세트를
+쓰려면 `.ntmap` 에 `symbols` 섹션을 손으로 한 번 채우거나, 에디터의
+기본 fallback (`tools/tileset-editor/src/EditorApp.cpp`
+의 `DefaultObjectSymbols()`) 에 추가하면 됩니다.
 
 ## 키바인드
 
@@ -181,6 +188,9 @@ collision                  # 선택 — 없어도 됨
 objects                    # 선택
 <symbol> <x> <y>           # 한 줄에 하나, x/y 는 셀 좌표
 ...
+symbols                    # 선택 — 객체 팔레트 정의
+<symbol> <rrggbb> <label>  # 한 줄에 하나, label 은 줄 끝까지 (공백 OK)
+...
 ```
 
 규칙:
@@ -190,6 +200,9 @@ objects                    # 선택
 - `collision` 의 크기가 `mapW × mapH` 와 다르면 로더가 무시하고
   경고합니다.
 - `objects` 의 좌표가 맵 범위 밖이면 로드 시 자동 클리핑.
+- `symbols` 는 에디터 전용 메타데이터. 게임 코드는 `ObjectMarker.symbol`
+  (단일 char) 만 소비하므로 색·라벨을 무시합니다. 섹션이 없으면 에디터가
+  내장 fallback (P/E/I/C/X/M/g/!/`*`) 을 보여줍니다.
 
 ## 게임 통합
 
@@ -249,5 +262,3 @@ m_watcher.Watch(assetsDir, [this](const std::string& rel) {
 - 객체 마커는 셀당 하나. 한 셀에 두 종류의 마커는 불가.
 - `.tmx` 는 읽기 전용 + 단일 inline 타일셋 + CSV 레이어만 지원.
   flip/rotate 비트, 외부 TSX, base64/zlib 는 거부.
-- 객체 심볼 세트는 컴파일 타임 상수. 게임별 필터링 옵션 (`--symbols`)
-  은 미구현.
