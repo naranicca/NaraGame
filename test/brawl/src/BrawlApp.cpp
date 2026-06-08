@@ -61,8 +61,8 @@ constexpr float kYCompress = kTileH / kTileW;   // 0.75 — for world->screen di
 // Walls extrude upward on screen by this many pixels.
 constexpr float kWallScreenH = 36.0f;
 
-constexpr int   kArenaW = 26;
-constexpr int   kArenaH = 18;
+constexpr int   kArenaW = 52;
+constexpr int   kArenaH = 36;
 
 // Player.
 constexpr float kPlayerR     = 0.36f;
@@ -206,9 +206,9 @@ inline ItemKind RandomItemKind(std::mt19937& rng) {
 }
 
 // Waves.
-constexpr int   kFirstWaveSize = 3;
-constexpr int   kWaveIncrement = 2;
-constexpr int   kMaxWaveSize   = 12;
+constexpr int   kFirstWaveSize = 6;
+constexpr int   kWaveIncrement = 4;
+constexpr int   kMaxWaveSize   = 24;
 constexpr float kBetweenWaves  = 5.0f;
 constexpr int   kScorePerKill  = 10;
 
@@ -1463,6 +1463,33 @@ public:
         td.pixels = m_shadowPixels.data();
         if (m_ctx->device)
             m_shadowTex = m_ctx->device->CreateTexture(td);
+        FillShadowBaseline();
+    }
+
+    // No-light baseline for every texel: walls=1.0, floor/water=ambient.
+    // UpdateShadows() only re-touches the bbox around the player, so the
+    // rest of the texture depends on this fill staying valid. Re-run after
+    // anything that moves walls (Rebuild / bg reload).
+    void FillShadowBaseline() {
+        if (m_shadowPixels.empty()) return;
+        const float inv = 1.0f / float(kShadowSubdiv);
+        for (int sy = 0; sy < m_shadowH; ++sy) {
+            for (int sx = 0; sx < m_shadowW; ++sx) {
+                const float wx = (sx + 0.5f) * inv;
+                const float wy = (sy + 0.5f) * inv;
+                const float light =
+                    (m_grid.At(int(wx), int(wy)) == Tile::Wall) ? 1.0f
+                                                                : kAmbient;
+                const uint8_t v = uint8_t(light * 255.0f + 0.5f);
+                const size_t idx = (size_t(sy) * m_shadowW + sx) * 4;
+                m_shadowPixels[idx + 0] = v;
+                m_shadowPixels[idx + 1] = v;
+                m_shadowPixels[idx + 2] = v;
+                m_shadowPixels[idx + 3] = 255;
+            }
+        }
+        if (m_shadowTex) m_shadowTex->UpdatePixels(m_shadowPixels.data());
+        m_lastShadowSrc = {1e9f, 1e9f};
     }
 
     void OnUpdate(float dt) override {
@@ -1634,6 +1661,9 @@ private:
             }
         }
         m_player = m_playerSpawn;
+        // Wall placement just changed; UpdateShadows only refreshes a bbox
+        // around the player, so reseed the rest of the texture to baseline.
+        FillShadowBaseline();
     }
 
     // The camera origin is the screen position of world (0,0). We want the
@@ -1655,6 +1685,11 @@ private:
         if (arenaPxH < kScreenH - 60.0f) { minY = (kScreenH - arenaPxH) * 0.5f; maxY = minY; }
         m_camOrigin.x = std::max(minX, std::min(maxX, wantedOrigin.x));
         m_camOrigin.y = std::max(minY, std::min(maxY, wantedOrigin.y));
+        // Snap to integer screen pixels so Point-filtered bg tile draws don't
+        // straddle texel boundaries -- subpixel origins produce a 1 px seam
+        // at every tile edge that flickers as the camera scrolls.
+        m_camOrigin.x = std::floor(m_camOrigin.x);
+        m_camOrigin.y = std::floor(m_camOrigin.y);
     }
 
     // Read the shadow texture on the CPU at a single world point. Entities
@@ -1737,8 +1772,23 @@ private:
         const bool  hasLight = R > 0.001f;
         const float invR2 = hasLight ? 1.0f / (R * R) : 0.0f;
         const float inv   = 1.0f / float(kShadowSubdiv);
-        for (int sy = 0; sy < m_shadowH; ++sy) {
-            for (int sx = 0; sx < m_shadowW; ++sx) {
+
+        // Outside the lit disc every texel sits at its FillShadowBaseline
+        // value (walls=1.0 / floor=ambient) and won't change this frame.
+        // Re-evaluate a bbox slightly bigger than R so any texel that *just*
+        // left the disc gets reset to baseline by the (d2 >= R*R) branch.
+        const float bbR = R + 1.0f;
+        const int sx0 = std::max(0,
+            int((src.x - bbR) * kShadowSubdiv));
+        const int sx1 = std::min(m_shadowW,
+            int((src.x + bbR) * kShadowSubdiv) + 1);
+        const int sy0 = std::max(0,
+            int((src.y - bbR) * kShadowSubdiv));
+        const int sy1 = std::min(m_shadowH,
+            int((src.y + bbR) * kShadowSubdiv) + 1);
+
+        for (int sy = sy0; sy < sy1; ++sy) {
+            for (int sx = sx0; sx < sx1; ++sx) {
                 const float wx = (sx + 0.5f) * inv;
                 const float wy = (sy + 0.5f) * inv;
                 float light;
