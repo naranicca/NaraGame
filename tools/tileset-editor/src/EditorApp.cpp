@@ -21,8 +21,10 @@
 //       start a fresh map with the given tileset and dimensions; --out is
 //       where Ctrl+S writes (default: a sibling .ntmap next to the tileset).
 
+#include <NaraGame/assets/MSDFFontLoader.h>
 #include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/assets/TilemapLoader.h>
+#include <NaraGame/renderer/MSDFFont.h>
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
 #include <NaraGame/core/Log.h>
@@ -48,6 +50,12 @@
 #  include <windows.h>
 #  include <commdlg.h>
 #  pragma comment(lib, "comdlg32.lib")
+// windows.h pulls in a DrawText macro (mapped to DrawTextW/A by the UNICODE
+// switch) that collides with Renderer2D::DrawText. Drop it -- the editor
+// doesn't use the Win32 GDI DrawText anywhere.
+#  ifdef DrawText
+#    undef DrawText
+#  endif
 #endif
 
 using namespace NaraGame;
@@ -190,8 +198,42 @@ struct MicroFont {
     }
 };
 
+// Module-level handle to the MSDF font owned by EditorApp. Lets the free
+// DrawMicroText/MeasureMicroText helpers below delegate to MSDF without
+// threading a font pointer through every call site. Set in OnStart() once
+// the font is loaded; left null while loading fails so the procedural
+// 3x5 MicroFont path stays as a fallback.
+static const MSDFFont* g_editorFont = nullptr;
+
+// MSDF caps land roughly mid-em-box, so passing pixelSize through unchanged
+// renders smaller-looking text than the old MicroFont (whose "pixelSize"
+// was exactly the glyph height). Scale up so the new text occupies roughly
+// the same vertical band the legacy 3x5 cells used to take.
+constexpr float kMsdfScale = 1.35f;
+
+// Draw small UI text. The editor calls this with `pos` as the top-left of
+// the visible glyph box and `pixelSize` as the desired glyph height (sized
+// for the legacy 3x5 MicroFont). MSDF path scales by kMsdfScale so the
+// switchover doesn't shrink every label.
 void DrawMicroText(Renderer2D& r, const std::string& text, Vec2 pos,
                    float pixelSize, const Color& color) {
+    if (g_editorFont && g_editorFont->Valid()) {
+        // Renderer2D::DrawText positions `pos.y` at the ascender line, not
+        // at the visible cap top. For Inter (ascender 0.97em, cap height
+        // ~0.72em) the cap top lands ~0.25 em below `pos.y`, which reads
+        // as "text drifts low" compared to the legacy MicroFont where the
+        // first pixel row sat exactly at `pos.y`. Pull pos.y up so the cap
+        // top aligns with the original MicroFont top edge.
+        const float effective = pixelSize * kMsdfScale;
+        constexpr float kCapTopAdjust = 0.25f;
+        Vec2 capPos = pos;
+        capPos.y -= kCapTopAdjust * effective;
+        r.DrawText(*g_editorFont, text, capPos, color, effective);
+        return;
+    }
+    // Fallback: procedural 3x5 pixel font, used only if msdf-inter.json
+    // failed to load. Identical behaviour to the original editor before
+    // the font swap.
     const float px = std::max(1.0f, std::floor(pixelSize / 5.0f));
     const float cellW = 3.0f * px;
     const float cellH = 5.0f * px;
@@ -215,6 +257,9 @@ void DrawMicroText(Renderer2D& r, const std::string& text, Vec2 pos,
 }
 
 float MeasureMicroText(const std::string& text, float pixelSize) {
+    if (g_editorFont && g_editorFont->Valid()) {
+        return g_editorFont->Measure(text, pixelSize * kMsdfScale).x;
+    }
     const float px = std::max(1.0f, std::floor(pixelSize / 5.0f));
     const float advance = 3.0f * px + px;
     return advance * float(text.size()) - px;
@@ -322,6 +367,14 @@ public:
 protected:
     void OnStart() override {
         m_renderer.Init(GetDevice());
+        const std::string assets = NARAGAME_ASSETS_DIR;
+        m_font = LoadMSDFFont(GetDevice(), assets + "/msdf-inter.json");
+        if (m_font.Valid()) {
+            g_editorFont = &m_font;
+        } else {
+            NARAGAME_WARN("editor: MSDF font load failed; falling back to "
+                          "3x5 MicroFont.");
+        }
 
         if (!m_args.mapPath.empty()) {
             OpenPath(m_args.mapPath);
@@ -554,8 +607,66 @@ protected:
             }
         }
 
+        // ----- Scrollbar drag -----
+        // Resolved before the paint block so latching the thumb suppresses
+        // canvas painting for the duration of the drag. Anchor the scroll
+        // bounds (hCamMin/Max etc.) and the camera->mouse scale at drag
+        // start so the thumb tracks the cursor linearly through the drag,
+        // even though the live ScrollGeo would shift as m_camera moves.
+        // Track-click (page-step) is not implemented; wheel/middle-drag
+        // covers that.
+        {
+            const ScrollGeo geo = ComputeScrollGeo();
+            if (m_scrollDrag == 0 &&
+                Input::IsMousePressed(MouseButton::Left)) {
+                if (geo.hActive &&
+                    mouse.x >= geo.hThumbX &&
+                    mouse.x <  geo.hThumbX + geo.hThumbW &&
+                    mouse.y >= geo.hTrack0.y &&
+                    mouse.y <  geo.hTrack0.y + geo.hTrackSize.y) {
+                    m_scrollDrag         = 1;
+                    m_scrollAnchorMouse  = mouse.x;
+                    m_scrollAnchorCam    = m_camera.x;
+                    m_scrollAnchorCamMin = geo.hCamMin;
+                    m_scrollAnchorCamMax = geo.hCamMax;
+                    m_scrollAnchorScale  =
+                        (geo.hCamMax - geo.hCamMin) /
+                        std::max(1.0f, geo.hTrackRange);
+                } else if (geo.vActive &&
+                           mouse.y >= geo.vThumbY &&
+                           mouse.y <  geo.vThumbY + geo.vThumbH &&
+                           mouse.x >= geo.vTrack0.x &&
+                           mouse.x <  geo.vTrack0.x + geo.vTrackSize.x) {
+                    m_scrollDrag         = 2;
+                    m_scrollAnchorMouse  = mouse.y;
+                    m_scrollAnchorCam    = m_camera.y;
+                    m_scrollAnchorCamMin = geo.vCamMin;
+                    m_scrollAnchorCamMax = geo.vCamMax;
+                    m_scrollAnchorScale  =
+                        (geo.vCamMax - geo.vCamMin) /
+                        std::max(1.0f, geo.vTrackRange);
+                }
+            }
+            if (m_scrollDrag != 0) {
+                if (!Input::IsMouseDown(MouseButton::Left)) {
+                    m_scrollDrag = 0;
+                } else {
+                    const float axisMouse =
+                        (m_scrollDrag == 1) ? mouse.x : mouse.y;
+                    const float target = std::clamp(
+                        m_scrollAnchorCam +
+                            (axisMouse - m_scrollAnchorMouse) *
+                                m_scrollAnchorScale,
+                        m_scrollAnchorCamMin, m_scrollAnchorCamMax);
+                    if (m_scrollDrag == 1) m_camera.x = target;
+                    else                   m_camera.y = target;
+                }
+            }
+        }
+
         // ----- Canvas paint / erase / fill / rect -----
-        if (m_inCanvas && m_map.Width() > 0 && !m_panning) {
+        if (m_inCanvas && m_map.Width() > 0 && !m_panning &&
+            m_scrollDrag == 0) {
             const Vec2 world = ScreenToWorld(mouse, canvasOrigin, m_zoom);
             const int tx = int(std::floor(world.x / float(m_tileW)));
             const int ty = int(std::floor(world.y / float(m_tileH)));
@@ -1330,6 +1441,85 @@ private:
         return idx;
     }
 
+    // Scrollbar layout shared by DrawCanvasPanel (renders the bars) and
+    // OnUpdate (drives the drag interaction). Scroll extent is the bbox of
+    // {map rect, current viewport rect} in world units, so the bar appears
+    // whenever there is map outside the canvas -- including the case where
+    // the map is smaller than the canvas but the camera has shifted it
+    // off-screen. {h,v}Cam{Min,Max} bracket the camera positions that keep
+    // the thumb fully on the track.
+    struct ScrollGeo {
+        bool  hActive = false, vActive = false;
+        Vec2  hTrack0{}, hTrackSize{};
+        Vec2  vTrack0{}, vTrackSize{};
+        float hThumbX = 0.0f, hThumbW = 0.0f;
+        float vThumbY = 0.0f, vThumbH = 0.0f;
+        float hTrackRange = 0.0f, vTrackRange = 0.0f;  // px the thumb can travel
+        float hCamMin = 0.0f, hCamMax = 0.0f;          // camera.x bounds (world)
+        float vCamMin = 0.0f, vCamMax = 0.0f;          // camera.y bounds (world)
+    };
+
+    ScrollGeo ComputeScrollGeo() const {
+        ScrollGeo g;
+        if (m_map.Width() <= 0) return g;
+        const Vec2 origin{kPaletteW, kToolbarH};
+        const Vec2 size  {kScreenW - kPaletteW,
+                          kScreenH - kToolbarH - kStatusH};
+        constexpr float kBarT     = 8.0f;
+        constexpr float kThumbMin = 24.0f;
+        constexpr float kEps      = 0.5f;
+
+        // Viewport rect in world units, map rect in world units, and the
+        // bbox of the two. The bbox is the "reachable" world area; the
+        // scrollbar is visible iff that area is bigger than the viewport.
+        const float viewW = size.x / m_zoom;
+        const float viewH = size.y / m_zoom;
+        const float mapRightW  = float(m_map.Width()  * m_tileW);
+        const float mapBottomW = float(m_map.Height() * m_tileH);
+        const float hScrollMin = std::min(0.0f, m_camera.x);
+        const float hScrollMax = std::max(mapRightW,  m_camera.x + viewW);
+        const float vScrollMin = std::min(0.0f, m_camera.y);
+        const float vScrollMax = std::max(mapBottomW, m_camera.y + viewH);
+        const float hExtent = hScrollMax - hScrollMin;
+        const float vExtent = vScrollMax - vScrollMin;
+
+        const bool needH = hExtent > viewW + kEps;
+        const bool needV = vExtent > viewH + kEps;
+        const float barW = size.x - (needV ? kBarT : 0.0f);
+        const float barH = size.y - (needH ? kBarT : 0.0f);
+        if (needH) {
+            const float by = origin.y + size.y - kBarT;
+            g.hActive    = true;
+            g.hTrack0    = {origin.x, by};
+            g.hTrackSize = {barW, kBarT};
+            g.hThumbW    = std::max(kThumbMin, viewW / hExtent * barW);
+            g.hTrackRange = barW - g.hThumbW;
+            g.hCamMin    = hScrollMin;
+            g.hCamMax    = hScrollMax - viewW;
+            const float camRange = g.hCamMax - g.hCamMin;
+            const float t = camRange > 0.0f
+                ? std::clamp((m_camera.x - g.hCamMin) / camRange, 0.0f, 1.0f)
+                : 0.0f;
+            g.hThumbX = origin.x + t * g.hTrackRange;
+        }
+        if (needV) {
+            const float bx = origin.x + size.x - kBarT;
+            g.vActive    = true;
+            g.vTrack0    = {bx, origin.y};
+            g.vTrackSize = {kBarT, barH};
+            g.vThumbH    = std::max(kThumbMin, viewH / vExtent * barH);
+            g.vTrackRange = barH - g.vThumbH;
+            g.vCamMin    = vScrollMin;
+            g.vCamMax    = vScrollMax - viewH;
+            const float camRange = g.vCamMax - g.vCamMin;
+            const float t = camRange > 0.0f
+                ? std::clamp((m_camera.y - g.vCamMin) / camRange, 0.0f, 1.0f)
+                : 0.0f;
+            g.vThumbY = origin.y + t * g.vTrackRange;
+        }
+        return g;
+    }
+
     // ----- Drawing -----
     void DrawCanvasPanel(Renderer2D& r) {
         const Vec2 origin{kPaletteW, kToolbarH};
@@ -1502,6 +1692,51 @@ private:
             const Vec2 sz{b.x - a.x, b.y - a.y};
             r.DrawQuad(a, sz, Color(1.0f, 0.86f, 0.20f, 0.20f));
             DrawRectOutline(r, a, sz, 2.0f, kSelectHi);
+        }
+
+        // Scrollbar overlay. Visible only when the canvas can't show the
+        // full map -- either because the map is bigger than the canvas or
+        // the camera has shifted some of it off-screen. Bars sit flush
+        // against the right/bottom edges of the canvas; thumb width and
+        // position mirror the visible window over the reachable world,
+        // so the user can tell at a glance where they are in a big map.
+        // Drag handled in OnUpdate via the same ComputeScrollGeo() result.
+        constexpr float kBarPad = 1.0f;
+        const Color trackC(1.0f, 1.0f, 1.0f, 0.10f);
+        // Idle thumb sits dim against the dark canvas so it doesn't compete
+        // with painted tiles; hover bumps to near-white + bright yellow tint
+        // to telegraph "this is grabbable"; active drag locks at full
+        // yellow so the user can see the bar is following the cursor.
+        const Color thumbBaseC  (0.70f, 0.74f, 0.84f, 0.75f);
+        const Color thumbHoverC (1.00f, 0.92f, 0.55f, 1.00f);
+        const Color thumbActiveC(1.00f, 0.86f, 0.20f, 1.00f);
+        const ScrollGeo g = ComputeScrollGeo();
+        const Vec2 mouseNow = Input::MousePosition();
+        if (g.hActive) {
+            r.DrawQuad(g.hTrack0, g.hTrackSize, trackC);
+            const bool hover =
+                mouseNow.x >= g.hThumbX &&
+                mouseNow.x <  g.hThumbX + g.hThumbW &&
+                mouseNow.y >= g.hTrack0.y &&
+                mouseNow.y <  g.hTrack0.y + g.hTrackSize.y;
+            const Color& c = (m_scrollDrag == 1) ? thumbActiveC
+                          : (hover            ) ? thumbHoverC
+                                                : thumbBaseC;
+            r.DrawQuad({g.hThumbX, g.hTrack0.y + kBarPad},
+                       {g.hThumbW, g.hTrackSize.y - kBarPad * 2.0f}, c);
+        }
+        if (g.vActive) {
+            r.DrawQuad(g.vTrack0, g.vTrackSize, trackC);
+            const bool hover =
+                mouseNow.y >= g.vThumbY &&
+                mouseNow.y <  g.vThumbY + g.vThumbH &&
+                mouseNow.x >= g.vTrack0.x &&
+                mouseNow.x <  g.vTrack0.x + g.vTrackSize.x;
+            const Color& c = (m_scrollDrag == 2) ? thumbActiveC
+                          : (hover            ) ? thumbHoverC
+                                                : thumbBaseC;
+            r.DrawQuad({g.vTrack0.x + kBarPad, g.vThumbY},
+                       {g.vTrackSize.x - kBarPad * 2.0f, g.vThumbH}, c);
         }
 
         // Clip — visually mark the canvas border so it's clear where the
@@ -1738,6 +1973,7 @@ private:
 
     // ----- State -----
     Renderer2D                  m_renderer;
+    MSDFFont                    m_font;
     EditorArgs                  m_args;
     std::unique_ptr<RHITexture> m_tilesetTex;
     SpriteSheet                 m_sheet;
@@ -1759,6 +1995,19 @@ private:
     Vec2  m_panAnchor{0.0f, 0.0f};
     Vec2  m_camAnchor{0.0f, 0.0f};
     bool  m_panning = false;
+
+    // Scrollbar thumb drag. 0 = idle, 1 = horizontal thumb, 2 = vertical
+    // thumb. ScrollGeo's CamMin/Max bounds and the (camRange/trackRange)
+    // scale are snapshotted at drag start so the drag math stays linear
+    // while m_camera moves -- otherwise the live ScrollGeo recomputes its
+    // extent from the camera each frame and the thumb drifts under the
+    // cursor.
+    int   m_scrollDrag         = 0;
+    float m_scrollAnchorMouse  = 0.0f;
+    float m_scrollAnchorCam    = 0.0f;
+    float m_scrollAnchorCamMin = 0.0f;
+    float m_scrollAnchorCamMax = 0.0f;
+    float m_scrollAnchorScale  = 0.0f;
 
     float m_paletteScroll = 0.0f;
     int   m_selectedTile = 0;
