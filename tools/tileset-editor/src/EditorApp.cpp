@@ -402,6 +402,16 @@ protected:
         const float wheel = Input::MouseWheelDelta();
         const bool ctrl = Input::IsKeyDown(Key::LeftCtrl);
 
+        // F1: toggle the keybind cheatsheet overlay. When it's up we treat
+        // the editor as modal -- only F1/Esc clear it; paint / palette /
+        // scrollbar are all suppressed so the user can read without
+        // accidentally editing the map.
+        if (Input::IsKeyPressed(Key::F1)) m_helpOverlay = !m_helpOverlay;
+        if (m_helpOverlay) {
+            if (Input::IsKeyPressed(Key::Escape)) m_helpOverlay = false;
+            return;
+        }
+
         // Esc: clear an active selection first, only close the app when
         // there's nothing to dismiss. Lets the user back out of a marquee
         // without accidentally killing the editor.
@@ -843,6 +853,7 @@ protected:
         DrawPalettePanel(r);
         DrawToolbar(r);
         DrawStatusBar(r);
+        if (m_helpOverlay) DrawHelpOverlay(r);
 
         r.End();
     }
@@ -1921,6 +1932,126 @@ private:
         return -1;
     }
 
+    // Modal cheatsheet panel. Trigger from F1, dismiss with F1/Esc. All
+    // other input is suppressed in OnUpdate while m_helpOverlay is true,
+    // so the cheatsheet doubles as a "pause and read" surface. Content is
+    // grouped by purpose (FILE / EDIT / PAINT / SELECTION on the left;
+    // CAMERA / VIEW / PALETTE / RESIZE on the right) instead of by key
+    // family because users look up "how do I do X?" not "what does ctrl-X
+    // do?".
+    void DrawHelpOverlay(Renderer2D& r) {
+        struct Row { const char* key; const char* desc; };
+        struct Section {
+            const char* title;
+            const Row*  rows;
+            int         rowCount;
+        };
+        static const Row kFile[] = {
+            {"Ctrl+O",     "open .ntmap / .tmx"},
+            {"Ctrl+N",     "new map from tileset"},
+            {"Ctrl+S",     "save (.ntmap)"},
+            {"Esc",        "close (or back out)"},
+        };
+        static const Row kEdit[] = {
+            {"Ctrl+Z",       "undo"},
+            {"Ctrl+Y",       "redo"},
+            {"Ctrl+Shift+Z", "redo"},
+        };
+        static const Row kPaint[] = {
+            {"LMB",         "paint with current value"},
+            {"RMB",         "erase / reset"},
+            {"Shift+drag",  "fill rectangle"},
+            {"Alt+LMB",     "eyedropper"},
+            {"F",           "flood fill same value"},
+        };
+        static const Row kSelect[] = {
+            {"Ctrl+drag",  "marquee select"},
+            {"Ctrl+C/X/V", "copy / cut / paste"},
+            {"Esc",        "clear selection"},
+        };
+        static const Row kCamera[] = {
+            {"Arrows",      "pan"},
+            {"Middle drag", "pan"},
+            {"Wheel, +/-",  "zoom at cursor"},
+            {"Home",        "reset camera and zoom"},
+            {"Scroll drag", "drag thumb to scroll"},
+        };
+        static const Row kView[] = {
+            {"G",         "toggle grid"},
+            {"H",         "toggle non-active overlays"},
+            {"Tab or L",  "cycle Tile / Collision / Object"},
+        };
+        static const Row kPalette[] = {
+            {"1..9",       "pick first 9 entries"},
+            {"Drag (Tile)", "build multi-cell stamp"},
+        };
+        static const Row kResize[] = {
+            {"Ctrl+arrow",       "grow that edge"},
+            {"Ctrl+Shift+arrow", "shrink that edge"},
+        };
+        static const Section kCol1[] = {
+            {"FILE",      kFile,   int(sizeof(kFile)   / sizeof(kFile[0]))},
+            {"EDIT",      kEdit,   int(sizeof(kEdit)   / sizeof(kEdit[0]))},
+            {"PAINT",     kPaint,  int(sizeof(kPaint)  / sizeof(kPaint[0]))},
+            {"SELECTION", kSelect, int(sizeof(kSelect) / sizeof(kSelect[0]))},
+        };
+        static const Section kCol2[] = {
+            {"CAMERA",  kCamera,  int(sizeof(kCamera)  / sizeof(kCamera[0]))},
+            {"VIEW",    kView,    int(sizeof(kView)    / sizeof(kView[0]))},
+            {"PALETTE", kPalette, int(sizeof(kPalette) / sizeof(kPalette[0]))},
+            {"RESIZE",  kResize,  int(sizeof(kResize)  / sizeof(kResize[0]))},
+        };
+
+        r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                   Color(0.0f, 0.0f, 0.0f, 0.65f));
+        constexpr float panelW = 880.0f;
+        constexpr float panelH = 620.0f;
+        const Vec2 panel{(kScreenW - panelW) * 0.5f,
+                         (kScreenH - panelH) * 0.5f};
+        r.DrawQuad(panel, {panelW, panelH}, kPaneBg);
+        DrawRectOutline(r, panel, {panelW, panelH}, 2.0f, kSelectHi);
+
+        DrawMicroText(r, "KEYBINDS",
+                      {panel.x + 32.0f, panel.y + 24.0f},
+                      28.0f, kSelectHi);
+        const std::string hint = "F1 or Esc to close";
+        const float hintW = MeasureMicroText(hint, 14.0f);
+        DrawMicroText(r, hint,
+                      {panel.x + panelW - hintW - 32.0f,
+                       panel.y + 36.0f},
+                      14.0f, kStatusText);
+
+        constexpr float colY0   = 80.0f;     // from panel.y
+        constexpr float colW    = (panelW - 64.0f) * 0.5f;
+        const float col1X = panel.x + 32.0f;
+        const float col2X = panel.x + 32.0f + colW;
+        constexpr float rowH    = 20.0f;
+        constexpr float headRowH = 24.0f;
+        constexpr float sectionGap = 14.0f;
+        constexpr float keyColW = 178.0f;
+        const Color kKeyText (0.85f, 0.90f, 0.98f, 1.0f);
+
+        auto DrawColumn = [&](float colX, const Section* secs, int n) {
+            float y = panel.y + colY0;
+            for (int i = 0; i < n; ++i) {
+                DrawMicroText(r, secs[i].title, {colX, y}, 16.0f, kSelectHi);
+                y += headRowH;
+                for (int rIdx = 0; rIdx < secs[i].rowCount; ++rIdx) {
+                    const Row& row = secs[i].rows[rIdx];
+                    DrawMicroText(r, row.key,
+                                  {colX + 8.0f, y}, 13.0f, kKeyText);
+                    DrawMicroText(r, row.desc,
+                                  {colX + 8.0f + keyColW, y}, 13.0f,
+                                  kStatusText);
+                    y += rowH;
+                }
+                y += sectionGap;
+            }
+        };
+        DrawColumn(col1X, kCol1, int(sizeof(kCol1) / sizeof(kCol1[0])));
+        DrawColumn(col2X, kCol2, int(sizeof(kCol2) / sizeof(kCol2[0])));
+    }
+
     void DrawToolbar(Renderer2D& r) {
         r.DrawQuad({0.0f, 0.0f}, {kScreenW, kToolbarH}, kToolbarBg);
 
@@ -1956,14 +2087,7 @@ private:
                       "MAP: %dx%d   TILE: %dx%d   ZOOM: %.0f%%   "
                       "MODE: %s   SEL: %s   HOVER: %d,%d   "
                       "UNDO: %zu/%zu   %s   "
-                      "LMB paint  RMB erase  ALT+click pick  "
-                      "SHIFT+drag rect  CTRL+drag select  F fill  "
-                      "MMB pan  WHEEL zoom  HOME reset view  "
-                      "1-9 quick select  G grid  TAB/L mode  ESC clear sel  "
-                      "CTRL+ARROW grow  CTRL+SHIFT+ARROW shrink  "
-                      "CTRL+C copy  CTRL+V paste  CTRL+X cut  "
-                      "CTRL+Z undo  CTRL+Y redo  CTRL+S save  "
-                      "CTRL+N new  CTRL+O open",
+                      "F1 help",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
                       m_zoom * 100.0f, modeName, selBuf,
                       hx, hy, m_undoStack.size(), m_redoStack.size(),
@@ -2008,6 +2132,10 @@ private:
     float m_scrollAnchorCamMin = 0.0f;
     float m_scrollAnchorCamMax = 0.0f;
     float m_scrollAnchorScale  = 0.0f;
+
+    // F1 keybind cheatsheet. Modal: all other input is suppressed while
+    // the overlay is up so the user can read without accidentally editing.
+    bool  m_helpOverlay = false;
 
     float m_paletteScroll = 0.0f;
     int   m_selectedTile = 0;
