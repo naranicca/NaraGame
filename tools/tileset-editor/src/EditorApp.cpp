@@ -397,7 +397,7 @@ protected:
             for (int i = 0; i < 9; ++i) {
                 if (!Input::IsKeyPressed(digits[i])) continue;
                 if (m_mode == EditLayer::Tile) {
-                    if (i < m_sheet.Count()) m_selectedTile = i;
+                    if (i < m_sheet.Count()) SetStampSingle(i);
                 } else if (m_mode == EditLayer::Collision) {
                     if (i < 3) m_selectedCol = i;
                 } else {
@@ -503,13 +503,48 @@ protected:
         if (m_inPalette && Input::IsMousePressed(MouseButton::Left)) {
             if (m_mode == EditLayer::Tile && m_currentTilesetPath.size()) {
                 const int picked = PaletteHit(mouse, paletteOrigin, paletteSize);
-                if (picked >= 0) m_selectedTile = picked;
+                if (picked >= 0) {
+                    float cellPx; int cols, rows;
+                    PaletteLayout(paletteOrigin, paletteSize,
+                                  cellPx, cols, rows);
+                    if (cols > 0) {
+                        m_palDragging = true;
+                        m_palAnchorX  = picked % cols;
+                        m_palAnchorY  = picked / cols;
+                        SetStampSingle(picked);
+                    }
+                }
             } else if (m_mode == EditLayer::Collision) {
                 const int picked = CollisionPaletteHit(mouse, paletteOrigin);
                 if (picked >= 0) m_selectedCol = picked;
             } else if (m_mode == EditLayer::Object) {
                 const int picked = ObjectPaletteHit(mouse, paletteOrigin);
                 if (picked >= 0) m_selectedSym = kObjectSymbols[picked];
+            }
+        }
+        // Palette LMB drag (Tile mode): extends the stamp to a rectangle
+        // anchored at the press cell. Release ends the drag with whatever
+        // rect was last under the cursor.
+        if (m_palDragging) {
+            if (!Input::IsMouseDown(MouseButton::Left)) {
+                m_palDragging = false;
+            } else if (m_mode == EditLayer::Tile) {
+                const int cur = PaletteHit(mouse, paletteOrigin, paletteSize);
+                if (cur >= 0) {
+                    float cellPx; int cols, rows;
+                    PaletteLayout(paletteOrigin, paletteSize,
+                                  cellPx, cols, rows);
+                    if (cols > 0) {
+                        const int cx = cur % cols;
+                        const int cy = cur / cols;
+                        if (cx != m_palAnchorX || cy != m_palAnchorY ||
+                            m_stampW != 1 || m_stampH != 1) {
+                            BuildStampFromPaletteRect(m_palAnchorX,
+                                                      m_palAnchorY,
+                                                      cx, cy, cols);
+                        }
+                    }
+                }
             }
         }
 
@@ -547,7 +582,7 @@ protected:
                 if (inMap && Input::IsMousePressed(MouseButton::Left)) {
                     if (m_mode == EditLayer::Tile) {
                         const int id = m_map.GetTile(tx, ty);
-                        if (id >= 0) m_selectedTile = id;
+                        if (id >= 0) SetStampSingle(id);
                     } else if (!m_collision.empty()) {
                         m_selectedCol = int(
                             m_collision[size_t(ty) * m_map.Width()
@@ -618,16 +653,36 @@ protected:
                         const int x1 = std::max(m_rectAnchorX, ex);
                         const int y0 = std::min(m_rectAnchorY, ey);
                         const int y1 = std::max(m_rectAnchorY, ey);
-                        const int v  = (m_rectLastButton == 0) ? leftVal : rightVal;
-                        for (int yy = y0; yy <= y1; ++yy)
-                            for (int xx = x0; xx <= x1; ++xx)
-                                PaintCell(xx, yy, v);
+                        // LMB rect in Tile mode tiles the stamp across the
+                        // rectangle (so a 2x2 stamp paints a clean checker
+                        // pattern). RMB rect, and non-Tile modes, fall
+                        // back to single-value fill.
+                        const bool stampTile =
+                            (m_rectLastButton == 0 &&
+                             m_mode == EditLayer::Tile &&
+                             !m_stampTiles.empty());
+                        const int v = (m_rectLastButton == 0)
+                                          ? leftVal : rightVal;
+                        for (int yy = y0; yy <= y1; ++yy) {
+                            for (int xx = x0; xx <= x1; ++xx) {
+                                if (stampTile) {
+                                    const int sx = (xx - x0) % m_stampW;
+                                    const int sy = (yy - y0) % m_stampH;
+                                    const int sv = m_stampTiles[
+                                        size_t(sy) * m_stampW + sx];
+                                    if (sv >= 0) PaintCell(xx, yy, sv);
+                                } else {
+                                    PaintCell(xx, yy, v);
+                                }
+                            }
+                        }
                         EndStroke();
                         m_rectActive = false;
                     }
                 } else if (inMap) {
                     if (Input::IsMouseDown(MouseButton::Left)) {
-                        PaintCell(tx, ty, leftVal);
+                        if (m_mode == EditLayer::Tile) PaintStampAt(tx, ty);
+                        else                          PaintCell(tx, ty, leftVal);
                     } else if (Input::IsMouseDown(MouseButton::Right)) {
                         PaintCell(tx, ty, rightVal);
                     }
@@ -728,6 +783,47 @@ private:
         std::unique_ptr<ResizeSnapshot> resize;   // null for normal strokes
     };
     static constexpr size_t kUndoLimit = 200;
+
+    // Stamp helpers. m_selectedTile mirrors the stamp's top-left palette
+    // index so existing call sites that look at "the selected tile" stay
+    // correct for the common 1x1 case.
+    void SetStampSingle(int paletteIdx) {
+        m_selectedTile = paletteIdx;
+        m_stampW = 1;
+        m_stampH = 1;
+        m_stampTiles = {paletteIdx};
+    }
+    void BuildStampFromPaletteRect(int ax, int ay, int bx, int by,
+                                   int palCols) {
+        if (palCols <= 0) { SetStampSingle(m_selectedTile); return; }
+        if (ax > bx) std::swap(ax, bx);
+        if (ay > by) std::swap(ay, by);
+        m_stampW = bx - ax + 1;
+        m_stampH = by - ay + 1;
+        m_stampTiles.clear();
+        m_stampTiles.reserve(size_t(m_stampW) * size_t(m_stampH));
+        const int total = m_sheet.Count();
+        for (int y = ay; y <= by; ++y) {
+            for (int x = ax; x <= bx; ++x) {
+                const int idx = y * palCols + x;
+                m_stampTiles.push_back(idx < total ? idx : -1);
+            }
+        }
+        m_selectedTile = ay * palCols + ax;
+    }
+    // Paint the stamp at canvas (tx, ty) — top-left aligned. Cells with
+    // a sentinel -1 (palette rect overhanging the tileset end) are
+    // skipped so the user doesn't unintentionally erase tiles.
+    void PaintStampAt(int tx, int ty) {
+        if (m_stampTiles.empty()) return;
+        for (int sy = 0; sy < m_stampH; ++sy) {
+            for (int sx = 0; sx < m_stampW; ++sx) {
+                const int v = m_stampTiles[size_t(sy) * m_stampW + sx];
+                if (v < 0) continue;
+                PaintCell(tx + sx, ty + sy, v);
+            }
+        }
+    }
 
     // Paint to the currently active layer. Routes to either the visual
     // Tilemap, the parallel collision grid, or the object marker list
@@ -1120,7 +1216,7 @@ private:
         m_camera    = {0.0f, 0.0f};
         m_zoom      = 1.0f;
         m_paletteScroll = 0.0f;
-        m_selectedTile  = 0;
+        SetStampSingle(0);
         ClearHistory();
         NARAGAME_INFO("editor: opened '%s' (%dx%d, tile %dx%d)",
                       path.c_str(), m_map.Width(), m_map.Height(),
@@ -1148,7 +1244,7 @@ private:
         m_camera = {0.0f, 0.0f};
         m_zoom   = 1.0f;
         m_paletteScroll = 0.0f;
-        m_selectedTile  = 0;
+        SetStampSingle(0);
         ClearHistory();
         NARAGAME_INFO("editor: new map %dx%d, tile %dx%d, tileset '%s'",
                       mapW, mapH, tileW, tileH, tilesetPath.c_str());
@@ -1396,11 +1492,19 @@ private:
             if (py + cellPx < origin.y || py > origin.y + size.y) continue;
             const TextureRegion region = m_sheet.At(i);
             r.DrawQuad({px, py}, {cellPx, cellPx}, region);
-            if (i == m_selectedTile) {
-                DrawRectOutline(r, {px - 1.0f, py - 1.0f},
-                                {cellPx + 2.0f, cellPx + 2.0f},
-                                2.0f, kSelectHi);
-            }
+        }
+        // Single outline around the whole stamp rect (1x1 = the current
+        // selected tile; >1x1 = the rectangle dragged in the palette).
+        if (cols > 0 && m_selectedTile >= 0 && m_selectedTile < total) {
+            const int tlX = m_selectedTile % cols;
+            const int tlY = m_selectedTile / cols;
+            const float px = origin.x + pad + tlX * pitch;
+            const float py = origin.y + pad + tlY * pitch - m_paletteScroll;
+            const float w  = pitch * m_stampW - 4.0f;
+            const float h  = pitch * m_stampH - 4.0f;
+            DrawRectOutline(r, {px - 1.0f, py - 1.0f},
+                            {w + 2.0f, h + 2.0f},
+                            2.0f, kSelectHi);
         }
     }
 
@@ -1539,9 +1643,16 @@ private:
         const int   selVal   = (m_mode == EditLayer::Tile)      ? m_selectedTile
                              : (m_mode == EditLayer::Collision) ? m_selectedCol
                                                                 : int(m_selectedSym);
+        char selBuf[32];
+        if (m_mode == EditLayer::Tile && (m_stampW > 1 || m_stampH > 1)) {
+            std::snprintf(selBuf, sizeof(selBuf), "%d (%dx%d)",
+                          selVal, m_stampW, m_stampH);
+        } else {
+            std::snprintf(selBuf, sizeof(selBuf), "%d", selVal);
+        }
         std::snprintf(buf, sizeof(buf),
                       "MAP: %dx%d   TILE: %dx%d   ZOOM: %.0f%%   "
-                      "MODE: %s   SEL: %d   HOVER: %d,%d   "
+                      "MODE: %s   SEL: %s   HOVER: %d,%d   "
                       "UNDO: %zu/%zu   %s   "
                       "LMB paint  RMB erase  ALT+click pick  "
                       "SHIFT+drag rect  CTRL+drag select  F fill  "
@@ -1552,7 +1663,7 @@ private:
                       "CTRL+Z undo  CTRL+Y redo  CTRL+S save  "
                       "CTRL+N new  CTRL+O open",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
-                      m_zoom * 100.0f, modeName, selVal,
+                      m_zoom * 100.0f, modeName, selBuf,
                       hx, hy, m_undoStack.size(), m_redoStack.size(),
                       m_dirty ? "MODIFIED" : "SAVED");
         DrawMicroText(r, buf, {12.0f, y + 8.0f}, 12.0f, kStatusText);
@@ -1579,6 +1690,18 @@ private:
 
     float m_paletteScroll = 0.0f;
     int   m_selectedTile = 0;
+
+    // Stamp brush. m_selectedTile is the stamp's top-left palette index;
+    // m_stampW/H + m_stampTiles describe the WxH block sampled from the
+    // palette (row-major). A drag in the palette extends the rectangle;
+    // single-click / eyedropper / 1-9 reset to 1x1. -1 in m_stampTiles
+    // means "skip this cell" (the rect overhangs the end of the tileset).
+    int               m_stampW = 1;
+    int               m_stampH = 1;
+    std::vector<int>  m_stampTiles = {0};
+    bool              m_palDragging = false;
+    int               m_palAnchorX = 0;
+    int               m_palAnchorY = 0;
     int   m_hoverTx = -1;
     int   m_hoverTy = -1;
     bool  m_inCanvas = false;
