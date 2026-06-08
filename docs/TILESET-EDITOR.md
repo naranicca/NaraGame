@@ -64,17 +64,16 @@ mushroom block (`!`) 은 **Tile=QUESTION + Object=!** 두 레이어가
 
 기본 fallback:
 
-| 심볼 | 의미 | 사용 게임 | 색 |
-|------|------|-----------|-----|
-| `P` | 플레이어 스폰 | brawl | 푸른 |
-| `E` | 적 스폰      | brawl | 빨강 |
-| `I` | 아이템       | brawl | 노랑 |
-| `C` | 코인         | brawl | 노랑 |
-| `X` | 일반 마커    | brawl | 회색 |
-| `M` | 마리오 스폰  | mario | 주황 |
-| `g` | 굼바 스폰    | mario | 갈색 |
-| `!` | 버섯 블록    | mario | 살구 |
-| `*` | 파이어 플라워 블록 | mario | 핑크 |
+| 심볼 | 의미 | 색 |
+|------|------|-----|
+| `P` | 플레이어 스폰 (마리오·브롤 공용) | 푸른 |
+| `E` | 적 스폰      | 빨강 |
+| `I` | 아이템       | 노랑 |
+| `C` | 코인         | 노랑 |
+| `X` | 일반 마커    | 회색 |
+| `g` | 굼바 스폰    | 갈색 |
+| `!` | 버섯 블록    | 살구 |
+| `*` | 파이어 플라워 블록 | 핑크 |
 
 게임은 자기가 모르는 심볼은 그냥 무시합니다. 새 게임이 자기 심볼 세트를
 쓰려면 `.ntmap` 에 `symbols` 섹션을 손으로 한 번 채우거나, 에디터의
@@ -222,7 +221,7 @@ if (!asset.valid) { /* 에러 처리 */ }
 asset.map.Draw(renderer, camera.VisibleBounds());
 
 for (const ObjectMarker& m : asset.objects) {
-    if (m.symbol == 'M') player.spawn = {m.x, m.y};
+    if (m.symbol == 'P') player.spawn = {m.x, m.y};
     ...
 }
 ```
@@ -256,7 +255,7 @@ m_watcher.Watch(assetsDir, [this](const std::string& rel) {
 
 1. `tileset-editor.exe --tileset assets/tiles.png --tilesize 32`
 2. 좌측 팔레트에서 타일 클릭 → 캔버스에 `LMB` 로 페인트
-3. `Tab` 으로 Object 레이어 진입 → `M` (마리오 스폰) 등 배치
+3. `Tab` 으로 Object 레이어 진입 → `P` (플레이어 스폰) 등 배치
 4. `Ctrl+S` → 처음에는 Save As 다이얼로그가 뜸. `.ntmap` 확장자로 저장
 5. 게임 코드에서 같은 경로를 `LoadNtmap` 으로 읽음
 6. 게임 실행 중이면 `Ctrl+S` 만으로 자동 리로드

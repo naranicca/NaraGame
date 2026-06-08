@@ -1864,7 +1864,6 @@ private:
             {'I', 0xffd060u, "item"},
             {'C', 0xffe066u, "coin"},
             {'X', 0xa0a0a0u, "marker"},
-            {'M', 0xff7030u, "mario"},
             {'g', 0xa06a3cu, "goomba"},
             {'!', 0xff9966u, "mushroom"},
             {'*', 0xff5577u, "fire flower"},

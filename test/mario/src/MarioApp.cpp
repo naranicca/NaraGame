@@ -353,7 +353,7 @@ public:
         // Second pass: spawn points and dynamic actors.
         for (const ObjectMarker& obj : m_levelAsset.objects) {
             const float px = obj.x * kT;
-            if (obj.symbol == 'M') {
+            if (obj.symbol == 'P') {
                 m_spawn = {px, (obj.y + 1) * kT - kPlayerSmallH};
             } else if (obj.symbol == 'g') {
                 Body gb;
