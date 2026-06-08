@@ -61,14 +61,13 @@ for ($i = 0; $i -lt $bases.Length; $i++) {
     $x = $col * $tileW
     $y = $row * $tileH
     $base = $bases[$i]
-    $border = [System.Drawing.Color]::FromArgb(255,
-        [math]::Max(0, $base.R - 40),
-        [math]::Max(0, $base.G - 40),
-        [math]::Max(0, $base.B - 40))
-    $g.FillRectangle((New-Object System.Drawing.SolidBrush($border)),
-                     $x, $y, $tileW, $tileH)
+    # No darker border: that was a per-tile visual cue inside the editor
+    # palette, but when the tileset is laid down in a game the borders
+    # accumulate into hard grid lines between cells. Just fill the whole
+    # cell with the base colour and rely on the speckle highlights for
+    # texture variation.
     $g.FillRectangle((New-Object System.Drawing.SolidBrush($base)),
-                     $x + 1, $y + 1, $tileW - 2, $tileH - 2)
+                     $x, $y, $tileW, $tileH)
     $hi = [System.Drawing.Color]::FromArgb(255,
         [math]::Min(255, $base.R + 60),
         [math]::Min(255, $base.G + 60),
