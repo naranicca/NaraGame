@@ -25,6 +25,7 @@
 #include <NaraGame/assets/MSDFFontLoader.h>
 #include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/assets/TilemapLoader.h>
+#include <NaraGame/io/ConfigFile.h>
 #include <NaraGame/renderer/MSDFFont.h>
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
@@ -380,6 +381,7 @@ protected:
             NARAGAME_WARN("editor: MSDF font load failed; falling back to "
                           "3x5 MicroFont.");
         }
+        LoadRecentFiles();
 
         if (!m_args.mapPath.empty()) {
             OpenPath(m_args.mapPath);
@@ -502,6 +504,29 @@ protected:
             return;
         }
 
+        // Recent-files overlay. Number keys pick an entry; Esc or
+        // Ctrl+R again closes. Modal so a typo in the list doesn't
+        // splat the canvas.
+        if (m_recentOverlay) {
+            if (Input::IsKeyPressed(Key::Escape)) {
+                m_recentOverlay = false;
+                return;
+            }
+            const Key digits[5] = {
+                Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
+            };
+            for (int i = 0; i < kMaxRecent; ++i) {
+                if (size_t(i) >= m_recent.size()) break;
+                if (Input::IsKeyPressed(digits[i])) {
+                    const std::string p = m_recent[size_t(i)];
+                    m_recentOverlay = false;
+                    OpenPath(p);
+                    return;
+                }
+            }
+            return;
+        }
+
         // Esc: clear an active selection first, then prompt to save if the
         // map is dirty, then close. Lets the user back out of a marquee
         // without accidentally killing the editor, and prevents a one-tap
@@ -600,6 +625,9 @@ protected:
                 L"All files\0*.*\0",
                 L"Open tilemap");
             if (!p.empty()) OpenPath(p);
+        }
+        if (ctrl && Input::IsKeyPressed(Key::R)) {
+            m_recentOverlay = !m_recentOverlay;
         }
         if (ctrl && Input::IsKeyPressed(Key::N)) {
             // Pop a PNG picker for the tileset. The result starts a blank
@@ -1059,6 +1087,7 @@ protected:
         if (m_quitConfirm) DrawQuitConfirm(r);
         if (m_deleteSymbolIdx >= 0) DrawDeleteSymbolModal(r);
         if (m_addSymbolModal) DrawAddSymbolModal(r);
+        if (m_recentOverlay) DrawRecentOverlay(r);
 
         r.End();
     }
@@ -1630,6 +1659,79 @@ private:
         }
     }
 
+    // Resolve %APPDATA%/NaraGame/editor-recent.cfg. Falls back to a
+    // relative path next to the editor binary if APPDATA isn't set
+    // (shouldn't happen on stock Windows, but the fall-through keeps
+    // the feature from silently losing the list).
+    static std::string RecentConfigPath() {
+#if defined(_WIN32)
+        wchar_t buf[MAX_PATH];
+        const DWORD n = GetEnvironmentVariableW(L"APPDATA", buf,
+                                                MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            // Wide → UTF-8.
+            const int len = WideCharToMultiByte(CP_UTF8, 0, buf, -1,
+                nullptr, 0, nullptr, nullptr);
+            std::string base(len > 0 ? size_t(len) - 1 : 0, '\0');
+            if (len > 0)
+                WideCharToMultiByte(CP_UTF8, 0, buf, -1, base.data(),
+                                    len, nullptr, nullptr);
+            // CreateDirectoryW ignores ALREADY_EXISTS so the call is
+            // safe whether the folder is new or not.
+            const std::wstring naraDir = std::wstring(buf) +
+                                         L"\\NaraGame";
+            CreateDirectoryW(naraDir.c_str(), nullptr);
+            return base + "\\NaraGame\\editor-recent.cfg";
+        }
+#endif
+        return "editor-recent.cfg";
+    }
+
+    void LoadRecentFiles() {
+        ConfigFile cfg;
+        cfg.Load(RecentConfigPath());
+        m_recent.clear();
+        for (int i = 0; i < kMaxRecent; ++i) {
+            char key[32];
+            std::snprintf(key, sizeof(key), "recent%d", i);
+            const std::string v = cfg.GetString(key, "");
+            if (!v.empty()) m_recent.push_back(v);
+        }
+    }
+
+    void SaveRecentFiles() const {
+        ConfigFile cfg;
+        for (int i = 0; i < int(m_recent.size()) && i < kMaxRecent; ++i) {
+            char key[32];
+            std::snprintf(key, sizeof(key), "recent%d", i);
+            cfg.SetString(key, m_recent[size_t(i)]);
+        }
+        cfg.Save(RecentConfigPath());
+    }
+
+    // Push to most-recent; dedup case-insensitively (Windows paths) and
+    // trim to kMaxRecent. Saved immediately so an editor crash mid-edit
+    // doesn't lose the list.
+    void PushRecent(const std::string& path) {
+        if (path.empty()) return;
+        auto sameFile = [&](const std::string& a) {
+            if (a.size() != path.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i) {
+                const char ca = char(std::tolower(uint8_t(a[i])));
+                const char cb = char(std::tolower(uint8_t(path[i])));
+                if (ca != cb) return false;
+            }
+            return true;
+        };
+        m_recent.erase(
+            std::remove_if(m_recent.begin(), m_recent.end(), sameFile),
+            m_recent.end());
+        m_recent.insert(m_recent.begin(), path);
+        if (int(m_recent.size()) > kMaxRecent)
+            m_recent.resize(kMaxRecent);
+        SaveRecentFiles();
+    }
+
     static std::string DirComponent(const std::string& path) {
         const size_t slash = path.find_last_of("/\\");
         if (slash == std::string::npos) return {};
@@ -1720,6 +1822,7 @@ private:
         SetStampSingle(0);
         ClearHistory();
         StartTilesetWatcher();
+        PushRecent(path);
         NARAGAME_INFO("editor: opened '%s' (%dx%d, tile %dx%d)",
                       path.c_str(), m_map.Width(), m_map.Height(),
                       m_tileW, m_tileH);
@@ -2720,6 +2823,7 @@ private:
         static const Row kFile[] = {
             {"Ctrl+O",       "open .ntmap / .tmx"},
             {"Ctrl+N",       "new map from tileset"},
+            {"Ctrl+R",       "recent files (1..5)"},
             {"Ctrl+S",       "save (.ntmap)"},
             {"Ctrl+Shift+S", "save as / rename"},
             {"Esc",          "close (or back out)"},
@@ -2825,6 +2929,53 @@ private:
         };
         DrawColumn(col1X, kCol1, int(sizeof(kCol1) / sizeof(kCol1[0])));
         DrawColumn(col2X, kCol2, int(sizeof(kCol2) / sizeof(kCol2[0])));
+    }
+
+    // Recent-files overlay. Lists what PushRecent() has captured -- most
+    // recent first -- prefixed with 1..N so the user can pick by number
+    // without reaching for the mouse. Empty list shows a short hint
+    // instead of a dead panel so first-launch isn't confusing.
+    void DrawRecentOverlay(Renderer2D& r) {
+        constexpr float panelW = 720.0f;
+        constexpr float panelH = 360.0f;
+        const Vec2 p{(kScreenW - panelW) * 0.5f,
+                     (kScreenH - panelH) * 0.5f};
+        r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                   Color(0.0f, 0.0f, 0.0f, 0.65f));
+        r.DrawQuad(p, {panelW, panelH}, kPaneBg);
+        DrawRectOutline(r, p, {panelW, panelH}, 2.0f, kSelectHi);
+        DrawMicroText(r, "Recent files",
+                      {p.x + 24.0f, p.y + 22.0f}, 22.0f, kSelectHi);
+        DrawMicroText(r, "Ctrl+R or Esc to close",
+                      {p.x + panelW - 230.0f, p.y + 32.0f},
+                      14.0f, kStatusText);
+
+        const Color kKeyText(0.85f, 0.90f, 0.98f, 1.0f);
+        const float rowY0 = p.y + 76.0f;
+        const float rowH  = 36.0f;
+        if (m_recent.empty()) {
+            DrawMicroText(r,
+                "No recent files yet. Open something with Ctrl+O.",
+                {p.x + 32.0f, rowY0},
+                14.0f, kStatusText);
+            return;
+        }
+        for (size_t i = 0; i < m_recent.size(); ++i) {
+            const float y = rowY0 + float(i) * rowH;
+            char key[4];
+            std::snprintf(key, sizeof(key), "%zu", i + 1);
+            DrawMicroText(r, key, {p.x + 32.0f, y}, 18.0f, kKeyText);
+            // Truncate long paths from the LEFT so the leaf filename
+            // (the part the user actually recognises) is always
+            // visible at the right edge of the row.
+            const std::string& full = m_recent[i];
+            constexpr size_t kMax = 86;
+            const std::string shown = full.size() > kMax
+                ? "..." + full.substr(full.size() - kMax + 3)
+                : full;
+            DrawMicroText(r, shown, {p.x + 68.0f, y + 2.0f},
+                          14.0f, kStatusText);
+        }
     }
 
     // Delete-symbol confirm panel. Spells out the consequences (how many
@@ -3097,6 +3248,12 @@ private:
     AssetWatcher m_tilesetWatcher;
     bool         m_tilesetReloadPending = false;
     std::string  m_currentTilesetAbsPath;
+
+    // Recent files (most-recent first), persisted to %APPDATA%/NaraGame/
+    // editor-recent.cfg. Ctrl+R opens the overlay; 1..N pick an entry.
+    static constexpr int kMaxRecent = 5;
+    std::vector<std::string> m_recent;
+    bool                     m_recentOverlay = false;
 
     // Object-palette symbol management. Both modals are modal: when up,
     // OnUpdate returns early after running their own input so no canvas
