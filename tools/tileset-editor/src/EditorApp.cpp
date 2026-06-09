@@ -546,6 +546,24 @@ protected:
             return;
         }
 
+        // ----- Auto-backup timer -----
+        // Runs only when there's something worth backing up: a path is
+        // set (so the .bak target is well-defined) AND m_dirty is true.
+        // Clearing m_dirty (after a successful Ctrl+S) resets the
+        // timer in SaveCurrent(), so a "Ctrl+S then keep editing"
+        // workflow gets the full kBackupInterval window before the
+        // first auto-backup -- no surprise writes immediately after a
+        // manual save.
+        if (m_dirty && !m_filePath.empty()) {
+            m_backupTimer += dt;
+            if (m_backupTimer >= kBackupInterval) {
+                m_backupTimer = 0.0f;
+                WriteBackup();
+            }
+        } else {
+            m_backupTimer = 0.0f;
+        }
+
         // Esc: clear an active selection first, then prompt to save if the
         // map is dirty, then close. Lets the user back out of a marquee
         // without accidentally killing the editor, and prevents a one-tap
@@ -1930,8 +1948,32 @@ private:
         if (ok) {
             m_filePath = out;
             m_dirty = false;
+            // Explicit save invalidates the in-flight backup window --
+            // the user's "real" copy on disk is now current.
+            m_backupTimer = 0.0f;
             NARAGAME_INFO("editor: saved '%s'", out.c_str());
         }
+    }
+
+    // Sibling .bak write, fired by the periodic timer in OnUpdate while
+    // m_dirty is true. Uses the same SaveNtmap path as Ctrl+S but writes
+    // to "<m_filePath>.bak" and leaves m_dirty alone -- the user's
+    // working state is untouched.
+    void WriteBackup() {
+        if (m_filePath.empty() || m_map.Width() <= 0) return;
+        const std::string bak = m_filePath + ".bak";
+        const size_t need = size_t(m_map.Width()) *
+                            size_t(m_map.Height());
+        const std::vector<uint8_t> emptyCol;
+        const bool ok = SaveNtmap(bak, m_map, m_currentTilesetPath,
+                                  m_tileW, m_tileH, 0, 0,
+                                  m_collision.size() == need ? m_collision
+                                                             : emptyCol,
+                                  m_objects, m_symbols);
+        if (ok)
+            NARAGAME_INFO("editor: backup '%s'", bak.c_str());
+        else
+            NARAGAME_WARN("editor: backup failed for '%s'", bak.c_str());
     }
 
     // Layout the tileset palette as a grid of cells. Returns the picked tile
@@ -3386,6 +3428,13 @@ private:
     static constexpr int kMaxRecent = 5;
     std::vector<std::string> m_recent;
     bool                     m_recentOverlay = false;
+
+    // Periodic safety-net: while the map is dirty, every kBackupInterval
+    // seconds the editor writes a sibling "<path>.bak" copy. The user's
+    // m_dirty state is untouched -- this is purely a side-write so a
+    // crash mid-edit doesn't lose work since the last explicit Ctrl+S.
+    static constexpr float kBackupInterval = 300.0f;   // 5 minutes
+    float m_backupTimer = 0.0f;
 
     // Object-palette symbol management. Both modals are modal: when up,
     // OnUpdate returns early after running their own input so no canvas
