@@ -67,6 +67,10 @@ constexpr float kScreenH   = 800.0f;
 constexpr float kToolbarH  = 36.0f;
 constexpr float kPaletteW  = 256.0f;
 constexpr float kStatusH   = 24.0f;
+// Tab strip at the top of the left palette so the user can click between
+// Tile / Collision / Object modes without remembering Tab/L. Sits under
+// the toolbar; the per-mode palette content begins below it.
+constexpr float kTabStripH = 32.0f;
 
 constexpr int   kDefaultMapW    = 32;
 constexpr int   kDefaultMapH    = 24;
@@ -599,16 +603,32 @@ protected:
             m_camera.y += worldBefore.y - worldAfter.y;
         }
         // ----- Palette interaction -----
+        // Tab strip sits at the top of the panel; per-mode palette content
+        // begins below it. The hit tests use the content rect so a click
+        // on a tab never falls through to a palette entry.
+        const Vec2 paletteContentOrigin{0.0f, kToolbarH + kTabStripH};
+        const Vec2 paletteContentSize{kPaletteW,
+            kScreenH - kToolbarH - kStatusH - kTabStripH};
+        const int tabHit = TabIndexAt(mouse);
+        if (tabHit >= 0 && Input::IsMousePressed(MouseButton::Left)) {
+            const EditLayer next = static_cast<EditLayer>(tabHit);
+            if (m_mode != next) {
+                m_mode = next;
+                if (m_mode == EditLayer::Collision) EnsureCollisionGrid();
+            }
+        }
         if (m_inPalette && wheel != 0.0f) {
             m_paletteScroll = std::max(0.0f,
                 m_paletteScroll - wheel * float(m_tileH) * 2.0f);
         }
-        if (m_inPalette && Input::IsMousePressed(MouseButton::Left)) {
+        if (m_inPalette && tabHit < 0 &&
+            Input::IsMousePressed(MouseButton::Left)) {
             if (m_mode == EditLayer::Tile && m_currentTilesetPath.size()) {
-                const int picked = PaletteHit(mouse, paletteOrigin, paletteSize);
+                const int picked = PaletteHit(mouse,
+                    paletteContentOrigin, paletteContentSize);
                 if (picked >= 0) {
                     float cellPx; int cols, rows;
-                    PaletteLayout(paletteOrigin, paletteSize,
+                    PaletteLayout(paletteContentOrigin, paletteContentSize,
                                   cellPx, cols, rows);
                     if (cols > 0) {
                         m_palDragging = true;
@@ -618,10 +638,12 @@ protected:
                     }
                 }
             } else if (m_mode == EditLayer::Collision) {
-                const int picked = CollisionPaletteHit(mouse, paletteOrigin);
+                const int picked = CollisionPaletteHit(mouse,
+                    paletteContentOrigin);
                 if (picked >= 0) m_selectedCol = picked;
             } else if (m_mode == EditLayer::Object) {
-                const int picked = ObjectPaletteHit(mouse, paletteOrigin);
+                const int picked = ObjectPaletteHit(mouse,
+                    paletteContentOrigin);
                 if (picked >= 0 && size_t(picked) < m_symbols.size())
                     m_selectedSym = m_symbols[picked].symbol;
             }
@@ -633,10 +655,11 @@ protected:
             if (!Input::IsMouseDown(MouseButton::Left)) {
                 m_palDragging = false;
             } else if (m_mode == EditLayer::Tile) {
-                const int cur = PaletteHit(mouse, paletteOrigin, paletteSize);
+                const int cur = PaletteHit(mouse,
+                    paletteContentOrigin, paletteContentSize);
                 if (cur >= 0) {
                     float cellPx; int cols, rows;
-                    PaletteLayout(paletteOrigin, paletteSize,
+                    PaletteLayout(paletteContentOrigin, paletteContentSize,
                                   cellPx, cols, rows);
                     if (cols > 0) {
                         const int cx = cur % cols;
@@ -709,12 +732,56 @@ protected:
             }
         }
 
+        // ----- Minimap click / drag -----
+        // LMB inside the minimap centres the camera on the clicked world
+        // position. Holding drag lets the user track-pad around the map
+        // while keeping the cursor inside the panel. Sets m_minimapDrag
+        // so the canvas paint / edge resize / scrollbar blocks below all
+        // skip this frame -- otherwise a click on the corner of the
+        // minimap would also paint into a stray bottom-right tile.
+        {
+            const MinimapGeo mg = ComputeMinimap();
+            const bool overMm = mg.active &&
+                IsInside(mouse, mg.origin, mg.size);
+            if (!m_minimapDrag && overMm &&
+                Input::IsMousePressed(MouseButton::Left)) {
+                m_minimapDrag = true;
+            }
+            if (m_minimapDrag) {
+                if (!Input::IsMouseDown(MouseButton::Left) || !mg.active) {
+                    m_minimapDrag = false;
+                } else {
+                    const float fx = std::clamp(
+                        (mouse.x - mg.origin.x) / mg.size.x, 0.0f, 1.0f);
+                    const float fy = std::clamp(
+                        (mouse.y - mg.origin.y) / mg.size.y, 0.0f, 1.0f);
+                    const float worldX = fx *
+                        float(m_map.Width()  * m_tileW);
+                    const float worldY = fy *
+                        float(m_map.Height() * m_tileH);
+                    const float viewW = (kScreenW - kPaletteW) / m_zoom;
+                    const float viewH = (kScreenH - kToolbarH - kStatusH)
+                                       / m_zoom;
+                    m_camera.x = worldX - viewW * 0.5f;
+                    m_camera.y = worldY - viewH * 0.5f;
+                }
+            }
+            if (overMm && !m_minimapDrag) {
+                // Suppress the canvas paint hover that sits behind so a
+                // hover over the minimap doesn't keep painting an
+                // outline on the tile underneath it.
+                m_hoverTx = -1;
+                m_hoverTy = -1;
+            }
+        }
+
         // ----- Map edge resize drag -----
         // Hover within a few pixels of a visible map edge -> highlight it
         // and capture LMB press to drag that edge in/out. Suppresses the
         // canvas paint block below for the duration so a missed grab
         // doesn't paint a stripe along the boundary.
-        if (m_scrollDrag == 0 && !ctrl && m_map.Width() > 0) {
+        if (m_scrollDrag == 0 && !ctrl && !m_minimapDrag &&
+            m_map.Width() > 0) {
             if (!m_resizingMap) {
                 const ResizeEdge edge = HoveredResizeEdge(
                     mouse, canvasOrigin, canvasSize);
@@ -740,7 +807,7 @@ protected:
 
         // ----- Canvas paint / erase / fill / rect -----
         if (m_inCanvas && m_map.Width() > 0 && !m_panning &&
-            m_scrollDrag == 0 && !m_resizingMap) {
+            m_scrollDrag == 0 && !m_resizingMap && !m_minimapDrag) {
             const Vec2 world = ScreenToWorld(mouse, canvasOrigin, m_zoom);
             const int tx = int(std::floor(world.x / float(m_tileW)));
             const int ty = int(std::floor(world.y / float(m_tileH)));
@@ -1624,6 +1691,53 @@ private:
         return idx;
     }
 
+    // Minimap layout shared by DrawCanvasPanel (renders the panel + tiles
+    // + viewport box) and OnUpdate (LMB press/drag jumps the camera).
+    // Sits in the canvas's top-right corner; cell size adapts to the map
+    // aspect so a wide map (mario level1) reads as a short strip and a
+    // square map (brawl arena) fills out the panel. Inactive when the
+    // map is small enough that the minimap would just duplicate the
+    // canvas at the same scale.
+    struct MinimapGeo {
+        bool  active = false;
+        Vec2  origin{};
+        Vec2  size{};
+        float cellSize = 0.0f;
+    };
+
+    MinimapGeo ComputeMinimap() const {
+        MinimapGeo g;
+        if (m_map.Width() <= 0) return g;
+        constexpr float kMargin = 12.0f;
+        constexpr float kMaxW   = 240.0f;
+        constexpr float kMaxH   = 180.0f;
+        const float maxW = kMaxW;
+        const float maxH = kMaxH;
+        const float byW = maxW / float(m_map.Width());
+        const float byH = maxH / float(m_map.Height());
+        // Floor to whole pixels so tiles align cleanly; cap at 6 px so a
+        // tiny map doesn't blow the panel up larger than necessary.
+        float cell = std::min(byW, byH);
+        if (cell > 6.0f) cell = 6.0f;
+        if (cell < 1.0f) cell = 1.0f;
+        cell = std::floor(cell);
+        const float mmW = cell * float(m_map.Width());
+        const float mmH = cell * float(m_map.Height());
+        // Hide when the canvas already shows the whole map comfortably
+        // (avoids visual clutter on tiny maps + zoom out).
+        const float canvasW = kScreenW - kPaletteW;
+        const float canvasH = kScreenH - kToolbarH - kStatusH;
+        const float visibleW = float(m_map.Width()  * m_tileW) * m_zoom;
+        const float visibleH = float(m_map.Height() * m_tileH) * m_zoom;
+        if (visibleW <= canvasW && visibleH <= canvasH) return g;
+        g.active   = true;
+        g.cellSize = cell;
+        g.size     = {mmW, mmH};
+        g.origin   = {kPaletteW + canvasW - mmW - kMargin,
+                      kToolbarH + kMargin};
+        return g;
+    }
+
     // Scrollbar layout shared by DrawCanvasPanel (renders the bars) and
     // OnUpdate (drives the drag interaction). Scroll extent is the bbox of
     // {map rect, current viewport rect} in world units, so the bar appears
@@ -1996,12 +2110,125 @@ private:
         // Clip — visually mark the canvas border so it's clear where the
         // panel ends regardless of camera offset.
         DrawRectOutline(r, origin, size, 2.0f, kCanvasOut);
+
+        // Minimap on top of everything inside the canvas panel so the
+        // viewport box stays readable over busy tiles.
+        DrawMinimap(r);
+    }
+
+    void DrawMinimap(Renderer2D& r) {
+        const MinimapGeo g = ComputeMinimap();
+        if (!g.active) return;
+        // Background + outline. Slightly darker than kPaneBg so the
+        // minimap reads as "info panel" rather than another canvas.
+        const Color bg(0.10f, 0.11f, 0.14f, 0.92f);
+        r.DrawQuad({g.origin.x - 4.0f, g.origin.y - 4.0f},
+                   {g.size.x + 8.0f, g.size.y + 8.0f}, bg);
+        DrawRectOutline(r, {g.origin.x - 4.0f, g.origin.y - 4.0f},
+                        {g.size.x + 8.0f, g.size.y + 8.0f}, 1.0f,
+                        Color(0.0f, 0.0f, 0.0f, 0.60f));
+        // Tile thumbnails. Cells with -1 stay as the background dark.
+        // Use the same SpriteSheet regions so tile colour matches the
+        // canvas at a glance -- swap a brick tile and the minimap
+        // updates the same frame.
+        const float c = g.cellSize;
+        for (int ty = 0; ty < m_map.Height(); ++ty) {
+            for (int tx = 0; tx < m_map.Width(); ++tx) {
+                const int id = m_map.GetTile(tx, ty);
+                if (id < 0) continue;
+                const TextureRegion region = m_sheet.At(id);
+                if (!region.Valid()) continue;
+                r.DrawQuad({g.origin.x + float(tx) * c,
+                            g.origin.y + float(ty) * c},
+                           {c, c}, region);
+            }
+        }
+        // Viewport indicator. The visible rect [m_camera, +viewSize] in
+        // world units maps to the minimap by dividing by (map_dim) and
+        // scaling by minimap_size. Clamped + drawn as an outline so the
+        // tile thumbnails stay readable underneath.
+        const float viewW = (kScreenW - kPaletteW) / m_zoom;
+        const float viewH = (kScreenH - kToolbarH - kStatusH) / m_zoom;
+        const float worldW = float(m_map.Width()  * m_tileW);
+        const float worldH = float(m_map.Height() * m_tileH);
+        const float vx0 = std::clamp(m_camera.x / worldW,           0.0f, 1.0f);
+        const float vy0 = std::clamp(m_camera.y / worldH,           0.0f, 1.0f);
+        const float vx1 = std::clamp((m_camera.x + viewW) / worldW, 0.0f, 1.0f);
+        const float vy1 = std::clamp((m_camera.y + viewH) / worldH, 0.0f, 1.0f);
+        DrawRectOutline(r,
+            {g.origin.x + vx0 * g.size.x, g.origin.y + vy0 * g.size.y},
+            {(vx1 - vx0) * g.size.x, (vy1 - vy0) * g.size.y},
+            1.5f, kSelectHi);
+    }
+
+    // Hit-test the palette tab strip. Returns 0/1/2 for Tile/Collision/
+    // Object respectively, or -1 if the cursor is outside any tab cell.
+    int TabIndexAt(Vec2 mouse) const {
+        if (mouse.y < kToolbarH || mouse.y >= kToolbarH + kTabStripH)
+            return -1;
+        if (mouse.x < 0.0f || mouse.x >= kPaletteW) return -1;
+        const float tabW = kPaletteW / 3.0f;
+        const int idx = int(std::floor(mouse.x / tabW));
+        return std::clamp(idx, 0, 2);
+    }
+
+    void DrawTabStrip(Renderer2D& r, Vec2 mouse) {
+        constexpr float kTabPad = 2.0f;
+        const float tabW = kPaletteW / 3.0f;
+        const float tabY = kToolbarH;
+        // Short labels fit a 256/3 ≈ 85 px tab at the editor's MSDF font
+        // size without truncating; full names would overflow into the
+        // neighbour. "OBJ" reads as object alongside "TILE" and "COLL".
+        static const char* kLabels[] = { "TILE", "COLL", "OBJ" };
+        const int hover = TabIndexAt(mouse);
+        for (int i = 0; i < 3; ++i) {
+            const float tx = float(i) * tabW;
+            const bool active = (i == int(m_mode));
+            const bool isHover = (i == hover);
+            // Background tint: active matches the per-mode content panel
+            // so the tab visually merges with what's below; inactive is
+            // slightly darker than the toolbar to read as a separate
+            // surface; hover brightens to telegraph the click.
+            Color bg = active   ? kPaneBg
+                     : isHover  ? Color(0.24f, 0.26f, 0.32f, 1.0f)
+                                : Color(0.16f, 0.17f, 0.21f, 1.0f);
+            r.DrawQuad({tx + kTabPad, tabY},
+                       {tabW - kTabPad * 2.0f, kTabStripH}, bg);
+            // Top accent stripe on the active tab; matches kSelectHi yellow
+            // so the eye lands here at a glance.
+            if (active) {
+                r.DrawQuad({tx + kTabPad, tabY},
+                           {tabW - kTabPad * 2.0f, 2.0f}, kSelectHi);
+            }
+            const float pixel = 14.0f;
+            const std::string lbl = kLabels[i];
+            const float lw = MeasureMicroText(lbl, pixel);
+            const Color textC = active   ? kSelectHi
+                              : isHover  ? Color(0.95f, 0.96f, 0.98f, 1.0f)
+                                         : kStatusText;
+            DrawMicroText(r, lbl,
+                          {tx + (tabW - lw) * 0.5f,
+                           tabY + (kTabStripH - pixel) * 0.5f},
+                          pixel, textC);
+        }
+        // Bottom border line so the strip reads as separate from the
+        // content area when the active tab matches its background.
+        r.DrawQuad({0.0f, tabY + kTabStripH - 1.0f},
+                   {kPaletteW, 1.0f}, Color(0.0f, 0.0f, 0.0f, 0.55f));
     }
 
     void DrawPalettePanel(Renderer2D& r) {
-        const Vec2 origin{0.0f, kToolbarH};
-        const Vec2 size  {kPaletteW, kScreenH - kToolbarH - kStatusH};
-        r.DrawQuad(origin, size, kPaneBg);
+        const Vec2 panelOrigin{0.0f, kToolbarH};
+        const Vec2 panelSize  {kPaletteW, kScreenH - kToolbarH - kStatusH};
+        r.DrawQuad(panelOrigin, panelSize, kPaneBg);
+
+        const Vec2 mouse  = Input::MousePosition();
+        DrawTabStrip(r, mouse);
+
+        // Per-mode content sits below the tab strip.
+        const Vec2 origin{0.0f, kToolbarH + kTabStripH};
+        const Vec2 size  {kPaletteW,
+                          kScreenH - kToolbarH - kStatusH - kTabStripH};
 
         if (m_mode == EditLayer::Collision) {
             DrawCollisionPalette(r, origin);
@@ -2219,6 +2446,7 @@ private:
             {"Wheel, +/-",  "zoom at cursor"},
             {"Home",        "reset camera and zoom"},
             {"Scroll drag", "drag thumb to scroll"},
+            {"Minimap LMB", "jump camera to spot"},
         };
         static const Row kView[] = {
             {"G",         "toggle grid"},
@@ -2434,6 +2662,11 @@ private:
     ResizeEdge m_resizingEdge    = ResizeEdge::None;
     ResizeEdge m_resizeHoverEdge = ResizeEdge::None;
     Vec2       m_resizeMouseOrigin{0.0f, 0.0f};
+
+    // Minimap click / drag to jump the camera. The drag flag also gates
+    // canvas paint / edge resize / scrollbar drag so a press in the
+    // minimap can't bleed into another action while held.
+    bool       m_minimapDrag = false;
 
     // Brush size for single-value paint (Tile single-tile, Collision).
     // Always odd so the brush footprint is centred on the hover cell.
