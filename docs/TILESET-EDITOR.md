@@ -156,6 +156,24 @@ Tile 모드에서 스탬프(다중 셀)와는 배타적으로 동작 — brush >
 대신 `m_selectedTile` 단일 값으로 페인트. Object 모드는 항상 1로 강제 (마커는
 셀당 하나).
 
+#### 자동 타일 (Tile 모드 전용)
+
+`T` 키로 토글. 활성화 시점에 선택돼 있던 타일 `N` 이 terrain 의 base
+가 되고, 타일 `[N, N+15]` 가 4-bit cardinal mask 순서로 배치된 16개
+variant 라고 가정합니다 (bit0=N, bit1=E, bit2=S, bit3=W).
+
+- `LMB` 페인트: hover 셀에 `base + mask` 배치 + 카디널 이웃 중 같은
+  terrain 인 셀들의 mask 재계산
+- `RMB`: 셀 클리어 + 이웃 mask 재계산
+- 다시 `T` 로 비활성화 (상태바 `AUTO: ...` 사라짐)
+- 활성화 동안에는 brush size·stamp 무시 (single-cell 페인트로 강제)
+
+타일셋 배치 규약: 같은 terrain 의 16개 variant 가 연속된 id 로
+배열돼 있어야 합니다. 마스크 `0` (고립) → `base`, 마스크 `15`
+(상하좌우 모두 같은 terrain) → `base + 15`. 맵 가장자리 밖은 "같은
+terrain" 으로 취급되어 경계 셀이 자연스럽게 surrounded variant 를
+사용합니다.
+
 #### Object 모드 마커 드래그
 
 마커가 있는 셀에 `LMB` 를 누르고 다른 셀로 끌어다 놓으면 그 마커가 이동

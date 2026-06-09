@@ -604,6 +604,20 @@ protected:
             m_showCollision = !m_showCollision;
         if (shiftHeld && Input::IsKeyPressed(Key::Num2))
             m_showObjects = !m_showObjects;
+        // T: toggle auto-tile mode (Tile mode only). On enable, the
+        // currently selected tile becomes the terrain base and the
+        // next 15 ids form the variants; while active LMB / RMB use
+        // the cardinal-mask paint path instead of the stamp / brush.
+        // Off by default.
+        if (Input::IsKeyPressed(Key::T) &&
+            m_mode == EditLayer::Tile) {
+            if (m_autoTile) {
+                m_autoTile = false;
+            } else if (m_selectedTile >= 0) {
+                m_autoTile = true;
+                m_autoTileBase = m_selectedTile;
+            }
+        }
         // [ / ]: brush size, photoshop-style. Sizes are odd so the brush
         // is centred on the hover cell. Object mode ignores it (markers
         // are always one per cell).
@@ -1142,6 +1156,12 @@ protected:
                         if (Input::IsMouseDown(MouseButton::Right)) {
                             PaintCell(tx, ty, rightVal);
                         }
+                    } else if (m_mode == EditLayer::Tile && m_autoTile) {
+                        if (Input::IsMouseDown(MouseButton::Left)) {
+                            AutoTilePaintAt(tx, ty);
+                        } else if (Input::IsMouseDown(MouseButton::Right)) {
+                            AutoTileEraseAt(tx, ty);
+                        }
                     } else {
                         if (Input::IsMouseDown(MouseButton::Left)) {
                             PaintBrushAt(tx, ty, leftVal,
@@ -1356,6 +1376,61 @@ private:
                 PaintCell(xx, yy, val);
             }
         }
+    }
+
+    // True if (x, y) is off the map OR holds a tile in the current
+    // terrain block. Off-map = "same" makes border cells use the
+    // surrounded-variant index so an autotiled mass meets the map
+    // edge cleanly instead of fraying.
+    bool AutoTileIsSame(int x, int y) const {
+        if (x < 0 || y < 0 ||
+            x >= m_map.Width() || y >= m_map.Height()) return true;
+        const int id = m_map.GetTile(x, y);
+        return id >= m_autoTileBase &&
+               id <  m_autoTileBase + kAutoTileCount;
+    }
+
+    int AutoTileMaskAt(int x, int y) const {
+        int m = 0;
+        if (AutoTileIsSame(x,   y - 1)) m |= 1;   // N
+        if (AutoTileIsSame(x+1, y))     m |= 2;   // E
+        if (AutoTileIsSame(x,   y + 1)) m |= 4;   // S
+        if (AutoTileIsSame(x-1, y))     m |= 8;   // W
+        return m;
+    }
+
+    // Refresh the variant at (x, y) by recomputing its mask. forcePlace
+    // overrides the "already-belongs-to-terrain" gate so the centre
+    // cell can be converted into the terrain on first paint without
+    // the surrounding cells getting promoted along with it.
+    void AutoTileRefreshCell(int x, int y, bool forcePlace) {
+        if (x < 0 || y < 0 ||
+            x >= m_map.Width() || y >= m_map.Height()) return;
+        const int existing = m_map.GetTile(x, y);
+        const bool belongs = existing >= m_autoTileBase &&
+                             existing <  m_autoTileBase + kAutoTileCount;
+        if (!forcePlace && !belongs) return;
+        const int newId = m_autoTileBase + AutoTileMaskAt(x, y);
+        if (existing != newId) PaintCell(x, y, newId);
+    }
+
+    void AutoTilePaintAt(int tx, int ty) {
+        AutoTileRefreshCell(tx,     ty,     /*forcePlace=*/true);
+        AutoTileRefreshCell(tx,     ty - 1, /*forcePlace=*/false);
+        AutoTileRefreshCell(tx + 1, ty,     /*forcePlace=*/false);
+        AutoTileRefreshCell(tx,     ty + 1, /*forcePlace=*/false);
+        AutoTileRefreshCell(tx - 1, ty,     /*forcePlace=*/false);
+    }
+
+    void AutoTileEraseAt(int tx, int ty) {
+        // Clear the centre, then re-mask each cardinal neighbour so
+        // they pick up the "this side is empty now" variant.
+        const int existing = m_map.GetTile(tx, ty);
+        if (existing != -1) PaintCell(tx, ty, -1);
+        AutoTileRefreshCell(tx,     ty - 1, /*forcePlace=*/false);
+        AutoTileRefreshCell(tx + 1, ty,     /*forcePlace=*/false);
+        AutoTileRefreshCell(tx,     ty + 1, /*forcePlace=*/false);
+        AutoTileRefreshCell(tx - 1, ty,     /*forcePlace=*/false);
     }
 
     void PaintStampAt(int tx, int ty) {
@@ -3217,6 +3292,7 @@ private:
             {"Alt+LMB",     "eyedropper"},
             {"F",           "flood fill same value"},
             {"[ / ]",       "brush size (1..9, odd)"},
+            {"T",           "(Tile) auto-tile mode on/off"},
             {"LMB drag",    "(Object) move existing marker"},
         };
         static const Row kSelect[] = {
@@ -3572,13 +3648,22 @@ private:
                           effBrush, effBrush);
         else
             brushBuf[0] = '\0';
+        char autoBuf[24];
+        if (m_autoTile)
+            std::snprintf(autoBuf, sizeof(autoBuf),
+                          "AUTO: %d..%d   ",
+                          m_autoTileBase,
+                          m_autoTileBase + kAutoTileCount - 1);
+        else
+            autoBuf[0] = '\0';
         std::snprintf(buf, sizeof(buf),
                       "MAP: %dx%d   TILE: %dx%d   ZOOM: %.0f%%   "
-                      "MODE: %s   SEL: %s   %sHOVER: %d,%d   "
+                      "MODE: %s   SEL: %s   %s%sHOVER: %d,%d   "
                       "UNDO: %zu/%zu   %s   "
                       "F1 help",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
                       m_zoom * 100.0f, modeName, selBuf, brushBuf,
+                      autoBuf,
                       hx, hy, m_undoStack.size(), m_redoStack.size(),
                       m_dirty ? "MODIFIED" : "SAVED");
         DrawMicroText(r, buf, {12.0f, y + 8.0f}, 12.0f, kStatusText);
@@ -3668,6 +3753,18 @@ private:
     // crash mid-edit doesn't lose work since the last explicit Ctrl+S.
     static constexpr float kBackupInterval = 300.0f;   // 5 minutes
     float m_backupTimer = 0.0f;
+
+    // Auto-tile (T to toggle). Convention: tiles [m_autoTileBase,
+    // m_autoTileBase + kAutoTileCount) form a single terrain laid out
+    // in 4-bit cardinal mask order (bit 0 = N neighbour same, 1 = E,
+    // 2 = S, 3 = W). LMB paint places m_autoTileBase + mask at the
+    // hover cell and refreshes the variants of the cardinal neighbours
+    // that already belong to the terrain. RMB clears and likewise
+    // refreshes neighbours. Brush size and stamps are bypassed while
+    // auto-tile mode is on.
+    static constexpr int kAutoTileCount = 16;
+    bool m_autoTile     = false;
+    int  m_autoTileBase = 0;
 
     // Object-mode marker drag. LMB press on a cell that already has a
     // marker records m_objDragSym and defers any state change to release.
