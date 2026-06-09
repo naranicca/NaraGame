@@ -1390,12 +1390,28 @@ private:
                id <  m_autoTileBase + kAutoTileCount;
     }
 
+    // Build the canonical 8-bit mask for (x, y). Corner bits are
+    // automatically suppressed when either of their adjacent cardinals
+    // is not "same", so a corner only counts in for an inside-corner
+    // (both adjacent sides are also terrain).
     int AutoTileMaskAt(int x, int y) const {
         int m = 0;
-        if (AutoTileIsSame(x,   y - 1)) m |= 1;   // N
-        if (AutoTileIsSame(x+1, y))     m |= 2;   // E
-        if (AutoTileIsSame(x,   y + 1)) m |= 4;   // S
-        if (AutoTileIsSame(x-1, y))     m |= 8;   // W
+        if (AutoTileIsSame(x,     y - 1)) m |= 0x01;  // N
+        if (AutoTileIsSame(x + 1, y - 1)) m |= 0x02;  // NE
+        if (AutoTileIsSame(x + 1, y))     m |= 0x04;  // E
+        if (AutoTileIsSame(x + 1, y + 1)) m |= 0x08;  // SE
+        if (AutoTileIsSame(x,     y + 1)) m |= 0x10;  // S
+        if (AutoTileIsSame(x - 1, y + 1)) m |= 0x20;  // SW
+        if (AutoTileIsSame(x - 1, y))     m |= 0x40;  // W
+        if (AutoTileIsSame(x - 1, y - 1)) m |= 0x80;  // NW
+        const bool n = (m & 0x01) != 0;
+        const bool e = (m & 0x04) != 0;
+        const bool s = (m & 0x10) != 0;
+        const bool w = (m & 0x40) != 0;
+        if (!(n && e)) m &= ~0x02;
+        if (!(s && e)) m &= ~0x08;
+        if (!(s && w)) m &= ~0x20;
+        if (!(n && w)) m &= ~0x80;
         return m;
     }
 
@@ -1410,27 +1426,31 @@ private:
         const bool belongs = existing >= m_autoTileBase &&
                              existing <  m_autoTileBase + kAutoTileCount;
         if (!forcePlace && !belongs) return;
-        const int newId = m_autoTileBase + AutoTileMaskAt(x, y);
+        const int variant = AutoMaskToVariantTable()[AutoTileMaskAt(x, y)];
+        if (variant < 0) return;  // shouldn't happen for canonical masks
+        const int newId = m_autoTileBase + variant;
         if (existing != newId) PaintCell(x, y, newId);
     }
 
     void AutoTilePaintAt(int tx, int ty) {
-        AutoTileRefreshCell(tx,     ty,     /*forcePlace=*/true);
-        AutoTileRefreshCell(tx,     ty - 1, /*forcePlace=*/false);
-        AutoTileRefreshCell(tx + 1, ty,     /*forcePlace=*/false);
-        AutoTileRefreshCell(tx,     ty + 1, /*forcePlace=*/false);
-        AutoTileRefreshCell(tx - 1, ty,     /*forcePlace=*/false);
+        AutoTileRefreshCell(tx, ty, /*forcePlace=*/true);
+        // 8-neighbour refresh because corner bits can flip on diagonals
+        // too -- a 4-neighbour pass would leave the diagonally-touching
+        // cells with stale variants.
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+                if (dx || dy)
+                    AutoTileRefreshCell(tx + dx, ty + dy,
+                                        /*forcePlace=*/false);
     }
 
     void AutoTileEraseAt(int tx, int ty) {
-        // Clear the centre, then re-mask each cardinal neighbour so
-        // they pick up the "this side is empty now" variant.
-        const int existing = m_map.GetTile(tx, ty);
-        if (existing != -1) PaintCell(tx, ty, -1);
-        AutoTileRefreshCell(tx,     ty - 1, /*forcePlace=*/false);
-        AutoTileRefreshCell(tx + 1, ty,     /*forcePlace=*/false);
-        AutoTileRefreshCell(tx,     ty + 1, /*forcePlace=*/false);
-        AutoTileRefreshCell(tx - 1, ty,     /*forcePlace=*/false);
+        if (m_map.GetTile(tx, ty) != -1) PaintCell(tx, ty, -1);
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+                if (dx || dy)
+                    AutoTileRefreshCell(tx + dx, ty + dy,
+                                        /*forcePlace=*/false);
     }
 
     void PaintStampAt(int tx, int ty) {
@@ -3754,17 +3774,54 @@ private:
     static constexpr float kBackupInterval = 300.0f;   // 5 minutes
     float m_backupTimer = 0.0f;
 
-    // Auto-tile (T to toggle). Convention: tiles [m_autoTileBase,
-    // m_autoTileBase + kAutoTileCount) form a single terrain laid out
-    // in 4-bit cardinal mask order (bit 0 = N neighbour same, 1 = E,
-    // 2 = S, 3 = W). LMB paint places m_autoTileBase + mask at the
-    // hover cell and refreshes the variants of the cardinal neighbours
-    // that already belong to the terrain. RMB clears and likewise
-    // refreshes neighbours. Brush size and stamps are bypassed while
-    // auto-tile mode is on.
-    static constexpr int kAutoTileCount = 16;
+    // Auto-tile (T to toggle). 47-variant terrain: tiles
+    // [m_autoTileBase, m_autoTileBase + kAutoTileCount) form a single
+    // terrain in canonical 8-bit mask order. The mask layout follows
+    // the standard "blob47" convention used by RPG Maker / Godot:
+    //   bit 0 = N  (cardinal)
+    //   bit 1 = NE (corner; suppressed unless N AND E are both same)
+    //   bit 2 = E  (cardinal)
+    //   bit 3 = SE (corner; suppressed unless S AND E both same)
+    //   bit 4 = S  (cardinal)
+    //   bit 5 = SW (corner; suppressed unless S AND W both same)
+    //   bit 6 = W  (cardinal)
+    //   bit 7 = NW (corner; suppressed unless N AND W both same)
+    // Of the 2^8=256 raw masks only 47 are canonical (corners gated by
+    // their cardinals); the variant index is the rank of the canonical
+    // mask in numeric order, computed once into kAutoMaskToVariant at
+    // first use. LMB paint places base+variant at the hover cell and
+    // refreshes the variant of every cell in the 3x3 neighbourhood
+    // that already belongs to the terrain. RMB clears + refreshes.
+    // Brush size and stamps are bypassed while auto-tile mode is on.
+    static constexpr int kAutoTileCount = 47;
     bool m_autoTile     = false;
     int  m_autoTileBase = 0;
+
+    static const int* AutoMaskToVariantTable() {
+        static int table[256];
+        static bool init = false;
+        if (!init) {
+            init = true;
+            int idx = 0;
+            for (int m = 0; m < 256; ++m) {
+                const bool ne = (m & 0x02) != 0;
+                const bool se = (m & 0x08) != 0;
+                const bool sw = (m & 0x20) != 0;
+                const bool nw = (m & 0x80) != 0;
+                const bool n  = (m & 0x01) != 0;
+                const bool e  = (m & 0x04) != 0;
+                const bool s  = (m & 0x10) != 0;
+                const bool w  = (m & 0x40) != 0;
+                if (ne && !(n && e)) { table[m] = -1; continue; }
+                if (se && !(s && e)) { table[m] = -1; continue; }
+                if (sw && !(s && w)) { table[m] = -1; continue; }
+                if (nw && !(n && w)) { table[m] = -1; continue; }
+                table[m] = idx++;
+            }
+            // sanity: should land on 47
+        }
+        return table;
+    }
 
     // Object-mode marker drag. LMB press on a cell that already has a
     // marker records m_objDragSym and defers any state change to release.

@@ -159,20 +159,28 @@ Tile 모드에서 스탬프(다중 셀)와는 배타적으로 동작 — brush >
 #### 자동 타일 (Tile 모드 전용)
 
 `T` 키로 토글. 활성화 시점에 선택돼 있던 타일 `N` 이 terrain 의 base
-가 되고, 타일 `[N, N+15]` 가 4-bit cardinal mask 순서로 배치된 16개
-variant 라고 가정합니다 (bit0=N, bit1=E, bit2=S, bit3=W).
+가 되고, 타일 `[N, N+46]` 이 8-방향 canonical mask 순서로 배치된 47개
+variant 라고 가정합니다 ("blob47" 컨벤션 — RPG Maker / Godot 표준).
 
-- `LMB` 페인트: hover 셀에 `base + mask` 배치 + 카디널 이웃 중 같은
-  terrain 인 셀들의 mask 재계산
-- `RMB`: 셀 클리어 + 이웃 mask 재계산
+마스크 비트:
+- bit0=N, bit1=NE, bit2=E, bit3=SE, bit4=S, bit5=SW, bit6=W, bit7=NW
+- 코너 비트 (NE/SE/SW/NW) 는 인접 카디널 (N+E, S+E, S+W, N+W) 이
+  **둘 다 같은 terrain** 일 때만 의미가 있음 → 그 외엔 자동으로 0
+- 256개 raw mask 중 위 규칙을 통과하는 canonical mask 는 정확히 47개,
+  numerical 순서대로 인덱스 0..46 배정
+
+동작:
+- `LMB` 페인트: hover 셀에 `base + variant` 배치 + **3×3 이웃 8개**
+  중 같은 terrain 인 셀들의 variant 재계산 (코너 비트 변화 반영)
+- `RMB`: 셀 클리어 + 같은 8-이웃 refresh
 - 다시 `T` 로 비활성화 (상태바 `AUTO: ...` 사라짐)
 - 활성화 동안에는 brush size·stamp 무시 (single-cell 페인트로 강제)
 
-타일셋 배치 규약: 같은 terrain 의 16개 variant 가 연속된 id 로
-배열돼 있어야 합니다. 마스크 `0` (고립) → `base`, 마스크 `15`
-(상하좌우 모두 같은 terrain) → `base + 15`. 맵 가장자리 밖은 "같은
-terrain" 으로 취급되어 경계 셀이 자연스럽게 surrounded variant 를
-사용합니다.
+타일셋 배치 규약: 같은 terrain 의 47개 variant 가 canonical mask 의
+numerical 순서대로 연속된 id 로 배열돼 있어야 합니다. 데모 PNG
+(`tools/tileset-editor/assets/autotile-demo.png`, 8×6 grid) 참고.
+맵 가장자리 밖은 "같은 terrain" 으로 취급되어 경계 셀이 자연스럽게
+surrounded variant 를 사용합니다.
 
 #### Object 모드 마커 드래그
 
