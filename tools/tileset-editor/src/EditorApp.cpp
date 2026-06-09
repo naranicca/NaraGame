@@ -604,18 +604,38 @@ protected:
             m_showCollision = !m_showCollision;
         if (shiftHeld && Input::IsKeyPressed(Key::Num2))
             m_showObjects = !m_showObjects;
-        // T: toggle auto-tile mode (Tile mode only). On enable, the
-        // currently selected tile becomes the terrain base and the
-        // next 15 ids form the variants; while active LMB / RMB use
-        // the cardinal-mask paint path instead of the stamp / brush.
-        // Off by default.
+        // T: toggle auto-tile mode (Tile mode only). On enable, look
+        // up the terrain containing m_selectedTile; if there is none
+        // yet, register a fresh blob47 terrain starting at that tile.
+        // Either way, the selected (or registered) terrain becomes
+        // m_autoTileBase for the duration of the mode. While active
+        // LMB / RMB use the canonical-mask paint path instead of the
+        // stamp / brush. Off by default; terrains are persisted to
+        // the .ntmap autotile section.
         if (Input::IsKeyPressed(Key::T) &&
             m_mode == EditLayer::Tile) {
             if (m_autoTile) {
                 m_autoTile = false;
             } else if (m_selectedTile >= 0) {
+                int base = -1;
+                for (const auto& t : m_autotiles) {
+                    if (m_selectedTile >= t.base &&
+                        m_selectedTile <  t.base + t.count) {
+                        base = t.base;
+                        break;
+                    }
+                }
+                if (base < 0) {
+                    AutoTileTerrain nt;
+                    nt.base  = m_selectedTile;
+                    nt.count = kAutoTileCount;
+                    nt.kind  = "blob47";
+                    m_autotiles.push_back(nt);
+                    base = nt.base;
+                    m_dirty = true;
+                }
                 m_autoTile = true;
-                m_autoTileBase = m_selectedTile;
+                m_autoTileBase = base;
             }
         }
         // [ / ]: brush size, photoshop-style. Sizes are odd so the brush
@@ -2074,6 +2094,8 @@ private:
         // user can still place markers when editing legacy files.
         m_symbols    = !asset.symbols.empty() ? std::move(asset.symbols)
                                               : DefaultObjectSymbols();
+        m_autotiles  = std::move(asset.autotiles);  // empty if absent
+        m_autoTile   = false;
         // The Tilemap stored a SpriteSheet pointing at the asset's texture
         // before we moved it. Rebind so it points at our owned copy.
         m_tileW = asset.tileWidth;
@@ -2114,6 +2136,8 @@ private:
         m_collision.clear();
         m_objects.clear();
         m_symbols = DefaultObjectSymbols();
+        m_autotiles.clear();
+        m_autoTile = false;
         m_currentTilesetPath = tilesetPath;
         m_currentTilesetAbsPath = tilesetPath;
         m_camera = {0.0f, 0.0f};
@@ -2145,7 +2169,7 @@ private:
                                   m_tileW, m_tileH, 0, 0,
                                   m_collision.size() == need ? m_collision
                                                              : emptyCol,
-                                  m_objects, m_symbols);
+                                  m_objects, m_symbols, m_autotiles);
         if (ok) {
             m_filePath = out;
             m_dirty = false;
@@ -2170,7 +2194,7 @@ private:
                                   m_tileW, m_tileH, 0, 0,
                                   m_collision.size() == need ? m_collision
                                                              : emptyCol,
-                                  m_objects, m_symbols);
+                                  m_objects, m_symbols, m_autotiles);
         if (ok)
             NARAGAME_INFO("editor: backup '%s'", bak.c_str());
         else
@@ -3796,6 +3820,10 @@ private:
     static constexpr int kAutoTileCount = 47;
     bool m_autoTile     = false;
     int  m_autoTileBase = 0;
+    // Registered terrains, persisted to the .ntmap autotile section.
+    // T captures the current selectedTile as a new terrain if no
+    // existing one contains it, otherwise activates the matching one.
+    std::vector<AutoTileTerrain> m_autotiles;
 
     static const int* AutoMaskToVariantTable() {
         static int table[256];

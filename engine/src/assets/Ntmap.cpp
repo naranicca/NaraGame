@@ -49,13 +49,15 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
     std::vector<uint8_t>      collision;
     std::vector<ObjectMarker> objects;
     std::vector<SymbolDef>    symbols;
+    std::vector<AutoTileTerrain> autotiles;
     bool sawHeader  = false;
     bool sawTileset = false;
     bool sawSize    = false;
     // section tracks which body block subsequent body lines belong to.
     // 0 = none, 1 = layer (tile ids), 2 = collision (uint8 codes),
     // 3 = objects (symbol + x + y per line),
-    // 4 = symbols (symbol + hex-rgb + label words per line).
+    // 4 = symbols (symbol + hex-rgb + label words per line),
+    // 5 = autotile (base + count + kind per line).
     int section = 0;
 
     std::string line;
@@ -86,6 +88,23 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             }
             // Fall through to the directive branch -- this wasn't an object
             // line after all.
+            ls.clear();
+            ls.seekg(0);
+        }
+        if (section == 5) {
+            // Each line: <base> <count> <kind>. Numeric first token
+            // keeps it in the section; anything else is a directive.
+            int base = 0, count = 0;
+            std::string kind;
+            if ((ls >> base >> count >> kind) &&
+                base >= 0 && count > 0) {
+                AutoTileTerrain t;
+                t.base  = base;
+                t.count = count;
+                t.kind  = kind;
+                autotiles.push_back(t);
+                continue;
+            }
             ls.clear();
             ls.seekg(0);
         }
@@ -151,6 +170,8 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             section = 3;
         } else if (tok == "symbols") {
             section = 4;
+        } else if (tok == "autotile") {
+            section = 5;
         }
     }
 
@@ -202,7 +223,8 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             asset.objects.push_back(m);
         }
     }
-    asset.symbols = std::move(symbols);
+    asset.symbols   = std::move(symbols);
+    asset.autotiles = std::move(autotiles);
 
     asset.tilesetPath = tilesetRel;
     asset.tileWidth   = cellW;
@@ -216,7 +238,8 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                int margin, int spacing,
                const std::vector<uint8_t>& collision,
                const std::vector<ObjectMarker>& objects,
-               const std::vector<SymbolDef>& symbols) {
+               const std::vector<SymbolDef>& symbols,
+               const std::vector<AutoTileTerrain>& autotiles) {
     std::ofstream out(path, std::ios::binary);
     if (!out.is_open()) {
         NARAGAME_ERROR("SaveNtmap: cannot open '%s' for write", path.c_str());
@@ -267,6 +290,15 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
             std::snprintf(hex, sizeof(hex), "%06x",
                           unsigned(s.color & 0xFFFFFFu));
             out << s.symbol << ' ' << hex << ' ' << s.label << '\n';
+        }
+    }
+    if (!autotiles.empty()) {
+        out << "autotile\n";
+        for (const auto& t : autotiles) {
+            if (t.count <= 0) continue;
+            out << t.base << ' ' << t.count << ' '
+                << (t.kind.empty() ? std::string("blob47") : t.kind)
+                << '\n';
         }
     }
     return out.good();

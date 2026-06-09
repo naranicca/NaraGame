@@ -182,6 +182,14 @@ numerical 순서대로 연속된 id 로 배열돼 있어야 합니다. 데모 PN
 맵 가장자리 밖은 "같은 terrain" 으로 취급되어 경계 셀이 자연스럽게
 surrounded variant 를 사용합니다.
 
+**Terrain 영속화 (`autotile` 섹션)**: `T` 를 처음 누른 시점에 등록된
+terrain 은 `.ntmap` 의 옵션 `autotile` 섹션에 저장됩니다 (한 줄 = 한
+terrain: `<base> <count> <kind>`). 같은 맵을 다시 열면 등록된 terrain
+들이 그대로 복원돼서 base 타일을 선택하고 `T` 만 누르면 즉시 활성화.
+한 맵에 여러 terrain 동시 등록 가능 (지금은 활성화는 한 번에 하나).
+샘플: `tools/tileset-editor/assets/autotile-demo.ntmap` — 5×5 블록 +
+L-shape + 도넛 + 흩어진 점들로 47-variant 동작 시각화.
+
 #### Object 모드 마커 드래그
 
 마커가 있는 셀에 `LMB` 를 누르고 다른 셀로 끌어다 놓으면 그 마커가 이동
@@ -307,6 +315,9 @@ objects                    # 선택
 symbols                    # 선택 — 객체 팔레트 정의
 <symbol> <rrggbb> <label>  # 한 줄에 하나, label 은 줄 끝까지 (공백 OK)
 ...
+autotile                   # 선택 — 등록된 terrain 들
+<base> <count> <kind>      # 한 줄에 하나. 현재 kind="blob47" (count=47)
+...
 ```
 
 규칙:
@@ -319,6 +330,9 @@ symbols                    # 선택 — 객체 팔레트 정의
 - `symbols` 는 에디터 전용 메타데이터. 게임 코드는 `ObjectMarker.symbol`
   (단일 char) 만 소비하므로 색·라벨을 무시합니다. 섹션이 없으면 에디터가
   내장 fallback (P/E/I/C/X/M/g/!/`*`) 을 보여줍니다.
+- `autotile` 도 에디터 전용. 게임은 그냥 paint된 tile id 를 그대로
+  렌더링합니다. 에디터가 `T` 활성 시 `[base, base+count)` 범위에 자동
+  variant 를 배치하는 데 사용.
 
 ## 게임 통합
 

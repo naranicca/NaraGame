@@ -44,6 +44,21 @@ struct SymbolDef {
     std::string label;
 };
 
+// A registered autotile terrain. `base` is the first tile id of the
+// terrain; tiles in [base, base + count) are the variants laid out in
+// canonical order for the given `kind`. The editor uses this list to
+// route paint into the autotile path and to round-trip terrain
+// definitions through Ctrl+S; games ignore the section entirely.
+//
+// `kind` currently supports "blob47" (8-bit canonical mask, 47 variants
+// matching RPG Maker / Godot blob47); future kinds (e.g. "cardinal16")
+// would extend the convention without breaking the file format.
+struct AutoTileTerrain {
+    int         base  = 0;
+    int         count = 47;
+    std::string kind  = "blob47";
+};
+
 // Bundle a Tilemap + the texture its SpriteSheet samples from. The texture
 // lives inside the asset because the SpriteSheet inside `map.SetTileset(...)`
 // only stores a raw pointer -- if the texture goes out of scope the tilemap's
@@ -59,6 +74,7 @@ struct TilemapAsset {
     std::vector<uint8_t>        collision;     // mapW * mapH; empty if absent
     std::vector<ObjectMarker>   objects;       // empty if absent
     std::vector<SymbolDef>      symbols;       // empty if absent
+    std::vector<AutoTileTerrain> autotiles;    // empty if absent
     std::string                 tilesetPath;   // relative path saved in the file
     int                         tileWidth  = 0;
     int                         tileHeight = 0;
@@ -95,6 +111,7 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                int margin = 0, int spacing = 0,
                const std::vector<uint8_t>& collision = {},
                const std::vector<ObjectMarker>& objects = {},
-               const std::vector<SymbolDef>& symbols = {});
+               const std::vector<SymbolDef>& symbols = {},
+               const std::vector<AutoTileTerrain>& autotiles = {});
 
 } // namespace NaraGame
