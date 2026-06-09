@@ -437,10 +437,15 @@ protected:
             return;
         }
 
-        // Add-symbol modal. Drains text input into the char (until set)
-        // and then the label; LMB on a colour swatch sets the tint.
-        // Enter commits, Esc cancels. Same suppress-everything-else
-        // pattern as the other modals.
+        // Add-symbol modal. Text input routes into:
+        //   * m_addChar (until set) -- so the symbol is always the first
+        //     character typed when the modal opens, no field-clicking
+        //     needed for the common case.
+        //   * Then either m_addLabel or m_addHex depending on m_addFocus,
+        //     which the user switches by clicking on a field.
+        // LMB on a colour swatch sets the tint and refreshes the hex
+        // field to that swatch's value; LMB on a field switches focus.
+        // Enter commits, Esc cancels.
         if (m_addSymbolModal) {
             for (char c : Input::TextInputThisFrame()) {
                 if (c == 0x1B) { CloseAddSymbol(); return; }
@@ -449,22 +454,36 @@ protected:
                     return;
                 }
                 if (c == '\b') {
-                    // Backspace peels back the label first; only resets
-                    // the symbol char if the label is already empty.
-                    if (!m_addLabel.empty()) m_addLabel.pop_back();
+                    // Backspace targets the focused field first, then
+                    // peels back through (label or hex) -> char.
+                    std::string& field = (m_addFocus == 1)
+                        ? m_addHex : m_addLabel;
+                    if (!field.empty()) field.pop_back();
                     else if (m_addChar != 0) m_addChar = 0;
+                    if (m_addFocus == 1) TryParseHex();
                     continue;
                 }
                 if (c < 0x20) continue;
                 if (m_addChar == 0) {
                     m_addChar = c;
+                } else if (m_addFocus == 1) {
+                    if (m_addHex.size() < 6 && IsHexDigit(c)) {
+                        m_addHex.push_back(char(std::tolower(uint8_t(c))));
+                        TryParseHex();
+                    }
                 } else if (m_addLabel.size() < 24) {
                     m_addLabel.push_back(c);
                 }
             }
             if (Input::IsMousePressed(MouseButton::Left)) {
                 const int sw = AddModalSwatchHit(mouse);
-                if (sw >= 0) m_addColor = kObjAddSwatches[sw];
+                if (sw >= 0) {
+                    m_addColor = kObjAddSwatches[sw];
+                    m_addHex   = ColorToHex(m_addColor);
+                } else {
+                    const int field = AddModalFieldHit(mouse);
+                    if (field >= 0) m_addFocus = field;
+                }
             }
             return;
         }
@@ -554,10 +573,19 @@ protected:
 
         // ----- Global shortcuts -----
         if (Input::IsKeyPressed(Key::G)) m_grid = !m_grid;
-        // H: hide non-active layer overlays. Lets you stare at just the
-        // collision grid (or just objects) without tile clutter when the
-        // overlays are getting in the way.
-        if (Input::IsKeyPressed(Key::H)) m_layerOverlay = !m_layerOverlay;
+        // H: toggle BOTH non-active overlays at once -- show-all <-> hide-all.
+        // Shift+1 / Shift+2 toggle the collision tint and the object marker
+        // overlays independently, so the user can isolate one layer without
+        // hiding the other.
+        if (Input::IsKeyPressed(Key::H)) {
+            const bool any = m_showCollision || m_showObjects;
+            m_showCollision = m_showObjects = !any;
+        }
+        const bool shiftHeld = Input::IsKeyDown(Key::LeftShift);
+        if (shiftHeld && Input::IsKeyPressed(Key::Num1))
+            m_showCollision = !m_showCollision;
+        if (shiftHeld && Input::IsKeyPressed(Key::Num2))
+            m_showObjects = !m_showObjects;
         // [ / ]: brush size, photoshop-style. Sizes are odd so the brush
         // is centred on the hover cell. Object mode ignores it (markers
         // are always one per cell).
@@ -579,7 +607,10 @@ protected:
         // cheap power-user shortcut so you don't keep round-tripping to the
         // palette for the same handful of tiles). In Collision mode the
         // same digits pick Floor/Wall/Water.
-        if (m_map.Width() > 0) {
+        // Shift+digit is reserved for the layer-visibility toggles above;
+        // skip the palette quick-pick when shift is held so a chord
+        // doesn't double-fire.
+        if (m_map.Width() > 0 && !shiftHeld) {
             const Key digits[9] = {
                 Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
                 Key::Num6, Key::Num7, Key::Num8, Key::Num9,
@@ -781,17 +812,23 @@ protected:
         // bounds (hCamMin/Max etc.) and the camera->mouse scale at drag
         // start so the thumb tracks the cursor linearly through the drag,
         // even though the live ScrollGeo would shift as m_camera moves.
-        // Track-click (page-step) is not implemented; wheel/middle-drag
-        // covers that.
+        // A click on the track (but NOT the thumb) page-jumps the camera
+        // by one viewport in that direction.
         {
             const ScrollGeo geo = ComputeScrollGeo();
             if (m_scrollDrag == 0 &&
                 Input::IsMousePressed(MouseButton::Left)) {
-                if (geo.hActive &&
+                const bool overThumbH = geo.hActive &&
                     mouse.x >= geo.hThumbX &&
                     mouse.x <  geo.hThumbX + geo.hThumbW &&
                     mouse.y >= geo.hTrack0.y &&
-                    mouse.y <  geo.hTrack0.y + geo.hTrackSize.y) {
+                    mouse.y <  geo.hTrack0.y + geo.hTrackSize.y;
+                const bool overThumbV = geo.vActive &&
+                    mouse.y >= geo.vThumbY &&
+                    mouse.y <  geo.vThumbY + geo.vThumbH &&
+                    mouse.x >= geo.vTrack0.x &&
+                    mouse.x <  geo.vTrack0.x + geo.vTrackSize.x;
+                if (overThumbH) {
                     m_scrollDrag         = 1;
                     m_scrollAnchorMouse  = mouse.x;
                     m_scrollAnchorCam    = m_camera.x;
@@ -800,11 +837,7 @@ protected:
                     m_scrollAnchorScale  =
                         (geo.hCamMax - geo.hCamMin) /
                         std::max(1.0f, geo.hTrackRange);
-                } else if (geo.vActive &&
-                           mouse.y >= geo.vThumbY &&
-                           mouse.y <  geo.vThumbY + geo.vThumbH &&
-                           mouse.x >= geo.vTrack0.x &&
-                           mouse.x <  geo.vTrack0.x + geo.vTrackSize.x) {
+                } else if (overThumbV) {
                     m_scrollDrag         = 2;
                     m_scrollAnchorMouse  = mouse.y;
                     m_scrollAnchorCam    = m_camera.y;
@@ -813,6 +846,22 @@ protected:
                     m_scrollAnchorScale  =
                         (geo.vCamMax - geo.vCamMin) /
                         std::max(1.0f, geo.vTrackRange);
+                } else if (geo.hActive &&
+                           IsInside(mouse, geo.hTrack0, geo.hTrackSize)) {
+                    // Page-jump horizontal: ±1 viewport.
+                    const float viewW = (kScreenW - kPaletteW) / m_zoom;
+                    const float dir = (mouse.x < geo.hThumbX)
+                                        ? -1.0f : 1.0f;
+                    m_camera.x = std::clamp(m_camera.x + dir * viewW,
+                                            geo.hCamMin, geo.hCamMax);
+                } else if (geo.vActive &&
+                           IsInside(mouse, geo.vTrack0, geo.vTrackSize)) {
+                    const float viewH =
+                        (kScreenH - kToolbarH - kStatusH) / m_zoom;
+                    const float dir = (mouse.y < geo.vThumbY)
+                                        ? -1.0f : 1.0f;
+                    m_camera.y = std::clamp(m_camera.y + dir * viewH,
+                                            geo.vCamMin, geo.vCamMax);
                 }
             }
             if (m_scrollDrag != 0) {
@@ -2093,7 +2142,7 @@ private:
         // overlays are on (default). Hidden in Tile/Object modes when the
         // user has pressed H to clear the canvas of non-active overlays.
         const bool showCollision = !m_collision.empty() &&
-            (m_layerOverlay || m_mode == EditLayer::Collision);
+            (m_showCollision || m_mode == EditLayer::Collision);
         if (showCollision) {
             const Color cWall (0.95f, 0.30f, 0.30f, 0.42f);
             const Color cWater(0.25f, 0.55f, 0.95f, 0.42f);
@@ -2129,7 +2178,7 @@ private:
         // Object markers. Same overlay gate as collision -- always shown
         // in Object mode, otherwise gated by m_layerOverlay (default on).
         const bool showObjects = !m_objects.empty() &&
-            (m_layerOverlay || m_mode == EditLayer::Object);
+            (m_showObjects || m_mode == EditLayer::Object);
         if (showObjects) {
             const float sx = float(m_tileW) * m_zoom;
             const float sy = float(m_tileH) * m_zoom;
@@ -2762,11 +2811,19 @@ private:
         return n;
     }
 
+    static std::string ColorToHex(uint32_t rgb) {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%06x", unsigned(rgb & 0xFFFFFFu));
+        return std::string(buf);
+    }
+
     void OpenAddSymbolModal() {
         m_addSymbolModal = true;
         m_addChar  = 0;
         m_addColor = kObjAddSwatches[0];
         m_addLabel.clear();
+        m_addHex   = ColorToHex(m_addColor);
+        m_addFocus = 0;
     }
     void CommitAddSymbol() {
         if (m_addChar == 0) return;
@@ -2784,26 +2841,74 @@ private:
         m_addSymbolModal = false;
         m_addChar = 0;
         m_addLabel.clear();
+        m_addHex.clear();
+        m_addFocus = 0;
     }
 
-    // Hit-test the color swatch row inside the Add Symbol modal. Layout
-    // is shared with DrawAddSymbolModal so the geometry stays in sync.
+    // Shared add-modal geometry. DrawAddSymbolModal and the OnUpdate
+    // hit-tests both go through here so a layout edit in one place
+    // automatically syncs the other.
+    struct AddModalGeo {
+        Vec2  panel;
+        float panelW = 520.0f;
+        float panelH = 340.0f;
+        float swatchRowY = 0.0f;
+        float swatchSize = 36.0f;
+        float swatchGap  = 4.0f;
+        float swatchStartX = 0.0f;
+        Vec2  hexP{}, hexS{};
+        Vec2  lblP{}, lblS{};
+    };
+
+    AddModalGeo ComputeAddModalGeo() const {
+        AddModalGeo g;
+        g.panel = {(kScreenW - g.panelW) * 0.5f,
+                   (kScreenH - g.panelH) * 0.5f};
+        g.swatchRowY    = g.panel.y + 130.0f;
+        const float total = g.swatchSize * 8 + g.swatchGap * 7;
+        g.swatchStartX  = g.panel.x + (g.panelW - total) * 0.5f;
+        g.hexP = {g.panel.x + 110.0f, g.panel.y + 186.0f};
+        g.hexS = {180.0f, 32.0f};
+        g.lblP = {g.panel.x + 110.0f, g.panel.y + 242.0f};
+        g.lblS = {g.panelW - 134.0f, 32.0f};
+        return g;
+    }
+
     int AddModalSwatchHit(Vec2 mouse) const {
-        constexpr float panelW = 520.0f;
-        constexpr float panelH = 280.0f;
-        const Vec2 p{(kScreenW - panelW) * 0.5f,
-                     (kScreenH - panelH) * 0.5f};
-        const float rowY = p.y + 130.0f;
-        constexpr float sw = 36.0f;
-        constexpr float sgap = 4.0f;
-        const float total = sw * 8 + sgap * 7;
-        const float startX = p.x + (panelW - total) * 0.5f;
-        if (mouse.y < rowY || mouse.y >= rowY + sw) return -1;
+        const AddModalGeo g = ComputeAddModalGeo();
+        if (mouse.y < g.swatchRowY ||
+            mouse.y >= g.swatchRowY + g.swatchSize) return -1;
         for (int i = 0; i < 8; ++i) {
-            const float sx = startX + float(i) * (sw + sgap);
-            if (mouse.x >= sx && mouse.x < sx + sw) return i;
+            const float sx = g.swatchStartX +
+                             float(i) * (g.swatchSize + g.swatchGap);
+            if (mouse.x >= sx && mouse.x < sx + g.swatchSize) return i;
         }
         return -1;
+    }
+
+    // 0 = label box, 1 = hex box, -1 = neither.
+    int AddModalFieldHit(Vec2 mouse) const {
+        const AddModalGeo g = ComputeAddModalGeo();
+        if (IsInside(mouse, g.lblP, g.lblS)) return 0;
+        if (IsInside(mouse, g.hexP, g.hexS)) return 1;
+        return -1;
+    }
+
+    static bool IsHexDigit(char c) {
+        return (c >= '0' && c <= '9') ||
+               (c >= 'a' && c <= 'f') ||
+               (c >= 'A' && c <= 'F');
+    }
+
+    // Parse the hex string -> update m_addColor when there are exactly
+    // six valid hex chars. Otherwise leave m_addColor alone so the
+    // swatch / preview stays at the last sane value.
+    void TryParseHex() {
+        if (m_addHex.size() != 6) return;
+        for (char c : m_addHex) if (!IsHexDigit(c)) return;
+        const unsigned long v = std::strtoul(m_addHex.c_str(),
+                                             nullptr, 16);
+        m_addColor = uint32_t(v & 0xFFFFFFu);
     }
 
     // Modal cheatsheet panel. Trigger from F1, dismiss with F1/Esc. All
@@ -2847,16 +2952,19 @@ private:
             {"Esc",        "clear selection"},
         };
         static const Row kCamera[] = {
-            {"Arrows",      "pan"},
-            {"Middle drag", "pan"},
-            {"Wheel, +/-",  "zoom at cursor"},
-            {"Home",        "reset camera and zoom"},
-            {"Scroll drag", "drag thumb to scroll"},
-            {"Minimap LMB", "jump camera to spot"},
+            {"Arrows",       "pan"},
+            {"Middle drag",  "pan"},
+            {"Wheel, +/-",   "zoom at cursor"},
+            {"Home",         "reset camera and zoom"},
+            {"Scroll drag",  "drag thumb to scroll"},
+            {"Scroll track", "click empty area for page jump"},
+            {"Minimap LMB",  "jump camera to spot"},
         };
         static const Row kView[] = {
             {"G",         "toggle grid"},
-            {"H",         "toggle non-active overlays"},
+            {"H",         "toggle both non-active overlays"},
+            {"Shift+1",   "toggle collision overlay"},
+            {"Shift+2",   "toggle object overlay"},
             {"Tab or L",  "cycle Tile / Collision / Object"},
         };
         static const Row kPalette[] = {
@@ -3019,31 +3127,31 @@ private:
                       {p.x + 160.0f, p.y + 170.0f}, 14.0f, kStatusText);
     }
 
-    // Add-symbol modal: char row (typed), 8-colour swatch row (clicked),
-    // label row (typed), with a small live preview of the symbol cell
-    // so the user can see the result before committing.
+    // Add-symbol modal: char row (typed), 8-colour swatch row (clicked)
+    // with a HEX text field for arbitrary colours, label row (typed).
+    // Click on the hex / label field to switch focus; the active field's
+    // outline brightens to kSelectHi and a "_" cursor marks the caret.
     void DrawAddSymbolModal(Renderer2D& r) {
-        constexpr float panelW = 520.0f;
-        constexpr float panelH = 280.0f;
-        const Vec2 p{(kScreenW - panelW) * 0.5f,
-                     (kScreenH - panelH) * 0.5f};
+        const AddModalGeo g = ComputeAddModalGeo();
+        const Vec2 p = g.panel;
         r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
                    Color(0.0f, 0.0f, 0.0f, 0.70f));
-        r.DrawQuad(p, {panelW, panelH}, kPaneBg);
-        DrawRectOutline(r, p, {panelW, panelH}, 2.0f, kSelectHi);
+        r.DrawQuad(p, {g.panelW, g.panelH}, kPaneBg);
+        DrawRectOutline(r, p, {g.panelW, g.panelH}, 2.0f, kSelectHi);
         DrawMicroText(r, "Add new symbol",
                       {p.x + 24.0f, p.y + 18.0f}, 20.0f, kSelectHi);
 
         const Color kKeyText(0.85f, 0.90f, 0.98f, 1.0f);
+        const Color kFieldBg(0.16f, 0.18f, 0.24f, 1.0f);
+        const Color kFieldEdge(0.0f, 0.0f, 0.0f, 0.60f);
 
         // Symbol row.
         DrawMicroText(r, "Symbol",
                       {p.x + 24.0f, p.y + 64.0f}, 14.0f, kStatusText);
         const Vec2 boxP{p.x + 110.0f, p.y + 56.0f};
         const Vec2 boxS{40.0f, 32.0f};
-        r.DrawQuad(boxP, boxS, Color(0.16f, 0.18f, 0.24f, 1.0f));
-        DrawRectOutline(r, boxP, boxS, 1.0f,
-                        Color(0.0f, 0.0f, 0.0f, 0.60f));
+        r.DrawQuad(boxP, boxS, kFieldBg);
+        DrawRectOutline(r, boxP, boxS, 1.0f, kFieldEdge);
         if (m_addChar != 0) {
             const char txt[2] = { m_addChar, 0 };
             const float w = MeasureMicroText(txt, 20.0f);
@@ -3057,44 +3165,65 @@ private:
             {boxP.x + boxS.x + 12.0f, p.y + 64.0f},
             12.0f, kStatusText);
 
-        // Color row.
+        // Color row -- 8 swatches.
         DrawMicroText(r, "Color",
                       {p.x + 24.0f, p.y + 116.0f}, 14.0f, kStatusText);
-        constexpr float sw = 36.0f;
-        constexpr float sgap = 4.0f;
-        const float total = sw * 8 + sgap * 7;
-        const float startX = p.x + (panelW - total) * 0.5f;
-        const float rowY = p.y + 130.0f;
         for (int i = 0; i < 8; ++i) {
-            const float sx = startX + float(i) * (sw + sgap);
-            r.DrawQuad({sx, rowY}, {sw, sw},
+            const float sx = g.swatchStartX +
+                             float(i) * (g.swatchSize + g.swatchGap);
+            r.DrawQuad({sx, g.swatchRowY},
+                       {g.swatchSize, g.swatchSize},
                        ColorFromHex(kObjAddSwatches[i]));
             const bool active = (m_addColor == kObjAddSwatches[i]);
-            DrawRectOutline(r, {sx, rowY}, {sw, sw},
+            DrawRectOutline(r, {sx, g.swatchRowY},
+                            {g.swatchSize, g.swatchSize},
                             active ? 2.0f : 1.0f,
-                            active ? kSelectHi
-                                   : Color(0.0f, 0.0f, 0.0f, 0.60f));
+                            active ? kSelectHi : kFieldEdge);
         }
+
+        // Hex row.
+        DrawMicroText(r, "Hex",
+                      {p.x + 24.0f, p.y + 194.0f}, 14.0f, kStatusText);
+        r.DrawQuad(g.hexP, g.hexS, kFieldBg);
+        const bool hexFocus = (m_addFocus == 1);
+        DrawRectOutline(r, g.hexP, g.hexS,
+                        hexFocus ? 2.0f : 1.0f,
+                        hexFocus ? kSelectHi : kFieldEdge);
+        // Live colour preview swatch right of the hex box, so the user
+        // can see the typed colour without scanning the symbol box.
+        const Vec2 prevP{g.hexP.x + g.hexS.x + 12.0f, g.hexP.y};
+        const Vec2 prevS{32.0f, g.hexS.y};
+        r.DrawQuad(prevP, prevS, ColorFromHex(m_addColor));
+        DrawRectOutline(r, prevP, prevS, 1.0f, kFieldEdge);
+        const std::string hexShown =
+            std::string("#") + m_addHex + (hexFocus ? "_" : "");
+        DrawMicroText(r, hexShown,
+                      {g.hexP.x + 8.0f,
+                       g.hexP.y + (g.hexS.y - 14.0f) * 0.5f},
+                      14.0f, kStatusText);
 
         // Label row.
         DrawMicroText(r, "Label",
-                      {p.x + 24.0f, p.y + 200.0f}, 14.0f, kStatusText);
-        const Vec2 lblP{p.x + 110.0f, p.y + 192.0f};
-        const Vec2 lblS{panelW - 134.0f, 32.0f};
-        r.DrawQuad(lblP, lblS, Color(0.16f, 0.18f, 0.24f, 1.0f));
-        DrawRectOutline(r, lblP, lblS, 1.0f,
-                        Color(0.0f, 0.0f, 0.0f, 0.60f));
-        const std::string display = m_addLabel + "_";  // cursor mark
-        DrawMicroText(r, display,
-                      {lblP.x + 8.0f, lblP.y + (lblS.y - 14.0f) * 0.5f},
+                      {p.x + 24.0f, p.y + 250.0f}, 14.0f, kStatusText);
+        const bool lblFocus = (m_addFocus == 0);
+        r.DrawQuad(g.lblP, g.lblS, kFieldBg);
+        DrawRectOutline(r, g.lblP, g.lblS,
+                        lblFocus ? 2.0f : 1.0f,
+                        lblFocus ? kSelectHi : kFieldEdge);
+        const std::string lblShown =
+            m_addLabel + (lblFocus ? "_" : "");
+        DrawMicroText(r, lblShown,
+                      {g.lblP.x + 8.0f,
+                       g.lblP.y + (g.lblS.y - 14.0f) * 0.5f},
                       14.0f, kStatusText);
 
         // Footer hint.
         DrawMicroText(r,
             m_addChar == 0
-                ? "Type the symbol character first, then the label."
-                : "Enter: confirm    Esc: cancel    Backspace: edit",
-            {p.x + 24.0f, p.y + panelH - 28.0f}, 12.0f, kStatusText);
+                ? "Type the symbol character first, then click a field."
+                : "Enter: confirm    Esc: cancel    "
+                  "click field to switch label / hex",
+            {p.x + 24.0f, p.y + g.panelH - 28.0f}, 12.0f, kStatusText);
     }
 
     // Unsaved-changes confirmation. Triggered by Esc when m_dirty is
@@ -3195,11 +3324,14 @@ private:
     Vec2  m_camera{0.0f, 0.0f};
     float m_zoom = 1.0f;
     bool  m_grid = true;
-    // When false, only the active edit layer is drawn on the canvas. Tile
-    // is the always-on base layer (collision and objects would have no
-    // visual context without it), so this gates the *non-active* overlays:
-    // collision tint and object markers.
-    bool  m_layerOverlay = true;
+    // Per-overlay visibility for the non-active edit layers. Tile is the
+    // always-on base layer (collision and objects would have no visual
+    // context without it), so only collision tint and object markers
+    // have toggles. H flips both together; Shift+1 / Shift+2 isolate
+    // one overlay so the user can stare at, say, the collision grid
+    // without losing the tile reference.
+    bool  m_showCollision = true;
+    bool  m_showObjects   = true;
 
     Vec2  m_panAnchor{0.0f, 0.0f};
     Vec2  m_camAnchor{0.0f, 0.0f};
@@ -3263,6 +3395,12 @@ private:
     char        m_addChar         = 0;     // 0 = not yet typed
     uint32_t    m_addColor        = 0xCCCCCCu;
     std::string m_addLabel;
+    // HEX text input alongside the swatch row, for arbitrary colours
+    // outside the eight presets. Tracked separately so clicking a
+    // swatch refreshes the field to that swatch's hex; typing six valid
+    // hex chars updates m_addColor live.
+    std::string m_addHex;
+    int         m_addFocus = 0;            // 0 = label, 1 = hex
 
     // Brush size for single-value paint (Tile single-tile, Collision).
     // Always odd so the brush footprint is centred on the hover cell.
