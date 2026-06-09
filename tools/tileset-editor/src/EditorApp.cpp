@@ -2581,9 +2581,95 @@ private:
         // panel ends regardless of camera offset.
         DrawRectOutline(r, origin, size, 2.0f, kCanvasOut);
 
+        // Cell-info tooltip near the cursor. Skipped while a marker drag
+        // ghost is following the cursor (the two would stack on top of
+        // each other) and when the cursor is off the map.
+        if (m_inCanvas && !m_objDragging &&
+            m_hoverTx >= 0 && m_hoverTx < m_map.Width() &&
+            m_hoverTy >= 0 && m_hoverTy < m_map.Height()) {
+            DrawHoverTooltip(r, mouseNow);
+        }
+
         // Minimap on top of everything inside the canvas panel so the
         // viewport box stays readable over busy tiles.
         DrawMinimap(r);
+    }
+
+    // Floating tooltip next to the cursor showing the hovered cell's
+    // coords + per-layer state (tile id, collision code, marker symbol).
+    // Clamped to the canvas bounds so it never escapes off-screen.
+    void DrawHoverTooltip(Renderer2D& r, const Vec2& mouse) {
+        std::vector<std::string> lines;
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "Cell: %d, %d",
+                      m_hoverTx, m_hoverTy);
+        lines.emplace_back(buf);
+
+        const int tile = m_map.GetTile(m_hoverTx, m_hoverTy);
+        std::snprintf(buf, sizeof(buf), "Tile: %s",
+                      tile >= 0 ? std::to_string(tile).c_str()
+                                : "(empty)");
+        lines.emplace_back(buf);
+
+        if (!m_collision.empty()) {
+            const size_t idx = size_t(m_hoverTy) *
+                               size_t(m_map.Width()) +
+                               size_t(m_hoverTx);
+            if (idx < m_collision.size()) {
+                static const char* kCollNames[] = {
+                    "Floor", "Wall", "Water"
+                };
+                const uint8_t c = m_collision[idx];
+                std::snprintf(buf, sizeof(buf), "Coll: %s",
+                              c < 3 ? kCollNames[c] : "?");
+                lines.emplace_back(buf);
+            }
+        }
+
+        const int sym = GetObjectSymbol(m_hoverTx, m_hoverTy);
+        if (sym != 0) {
+            const char* label = "?";
+            for (const auto& s : m_symbols) {
+                if (s.symbol == char(sym)) {
+                    label = s.label.empty() ? "(no label)"
+                                            : s.label.c_str();
+                    break;
+                }
+            }
+            std::snprintf(buf, sizeof(buf), "Marker: %c (%s)",
+                          char(sym), label);
+            lines.emplace_back(buf);
+        }
+
+        constexpr float lineH = 16.0f;
+        constexpr float pad   = 8.0f;
+        constexpr float pixel = 12.0f;
+        float maxW = 0.0f;
+        for (const auto& l : lines)
+            maxW = std::max(maxW, MeasureMicroText(l, pixel));
+        const float panelW = maxW + pad * 2.0f;
+        const float panelH = float(lines.size()) * lineH + pad * 2.0f;
+
+        // Offset toward bottom-right of cursor; flip to other side when
+        // the tooltip would leave the canvas viewport.
+        const float canvasRight  = kScreenW;
+        const float canvasBottom = kScreenH - kStatusH;
+        Vec2 p{mouse.x + 18.0f, mouse.y + 18.0f};
+        if (p.x + panelW > canvasRight)
+            p.x = mouse.x - 18.0f - panelW;
+        if (p.y + panelH > canvasBottom)
+            p.y = mouse.y - 18.0f - panelH;
+
+        r.DrawQuad(p, {panelW, panelH},
+                   Color(0.05f, 0.06f, 0.08f, 0.88f));
+        DrawRectOutline(r, p, {panelW, panelH}, 1.0f,
+                        Color(1.0f, 0.86f, 0.20f, 0.60f));
+        for (size_t i = 0; i < lines.size(); ++i) {
+            DrawMicroText(r, lines[i],
+                          {p.x + pad,
+                           p.y + pad + float(i) * lineH},
+                          pixel, kStatusText);
+        }
     }
 
     void DrawMinimap(Renderer2D& r) {
