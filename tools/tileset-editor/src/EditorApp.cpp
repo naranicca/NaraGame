@@ -21,6 +21,7 @@
 //       start a fresh map with the given tileset and dimensions; --out is
 //       where Ctrl+S writes (default: a sibling .ntmap next to the tileset).
 
+#include <NaraGame/assets/AssetWatcher.h>
 #include <NaraGame/assets/MSDFFontLoader.h>
 #include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/assets/TilemapLoader.h>
@@ -405,6 +406,17 @@ protected:
         const Vec2 mouse = Input::MousePosition();
         const float wheel = Input::MouseWheelDelta();
         const bool ctrl = Input::IsKeyDown(Key::LeftCtrl);
+
+        // Drain pending hot-reload events before anything else this frame
+        // so the visible palette / canvas / minimap pick up the new
+        // texture immediately. The callback only flips a flag; the
+        // actual texture rebind runs here on the main thread where it's
+        // safe to touch the GPU.
+        m_tilesetWatcher.Poll();
+        if (m_tilesetReloadPending) {
+            m_tilesetReloadPending = false;
+            ReloadTilesetTexture();
+        }
 
         // Delete-symbol confirmation. Modal: Y / Enter delete, N / Esc
         // cancel. All other input is suppressed below so a stray click
@@ -1618,6 +1630,60 @@ private:
         }
     }
 
+    static std::string DirComponent(const std::string& path) {
+        const size_t slash = path.find_last_of("/\\");
+        if (slash == std::string::npos) return {};
+        return path.substr(0, slash + 1);
+    }
+    static std::string LeafComponent(const std::string& path) {
+        const size_t slash = path.find_last_of("/\\");
+        if (slash == std::string::npos) return path;
+        return path.substr(slash + 1);
+    }
+    static std::string ResolveAgainst(const std::string& baseFile,
+                                      const std::string& rel) {
+        if (rel.size() >= 2 && rel[1] == ':') return rel;          // C:\...
+        if (!rel.empty() && (rel[0] == '/' || rel[0] == '\\')) return rel;
+        return DirComponent(baseFile) + rel;
+    }
+
+    // Install / replace the watcher on the directory containing the
+    // current tileset. The leaf is captured by value so the callback
+    // closure stays valid through a later Watch() that re-replaces it.
+    void StartTilesetWatcher() {
+        if (m_currentTilesetAbsPath.empty()) return;
+        const std::string dir  = DirComponent(m_currentTilesetAbsPath);
+        const std::string leaf = LeafComponent(m_currentTilesetAbsPath);
+        if (dir.empty() || leaf.empty()) return;
+        // AssetWatcher emits paths relative to the watched root using
+        // forward slashes; the leaf has no separators so a direct
+        // compare is enough.
+        m_tilesetWatcher.Watch(dir,
+            [this, leaf](const std::string& rel) {
+                if (rel == leaf) m_tilesetReloadPending = true;
+            });
+    }
+
+    // Re-LoadTexture and rebind the SpriteSheet. The Tilemap holds a
+    // raw pointer through its SpriteSheet, so the rebind has to happen
+    // after the new texture is owned by m_tilesetTex.
+    void ReloadTilesetTexture() {
+        if (m_currentTilesetAbsPath.empty()) return;
+        std::unique_ptr<RHITexture> fresh = LoadTexture(
+            GetDevice(), m_currentTilesetAbsPath, TextureFilter::Point);
+        if (!fresh) {
+            NARAGAME_WARN("editor: tileset hot-reload failed for '%s'",
+                          m_currentTilesetAbsPath.c_str());
+            return;
+        }
+        m_tilesetTex = std::move(fresh);
+        m_sheet = SpriteSheet(m_tilesetTex.get(),
+                              m_tileW, m_tileH, 0, 0);
+        m_map.SetTileset(m_sheet);
+        NARAGAME_INFO("editor: tileset hot-reloaded '%s'",
+                      m_currentTilesetAbsPath.c_str());
+    }
+
     void OpenPath(const std::string& path) {
         TilemapAsset asset;
         if (EndsWith(path, ".tmx")) {
@@ -1646,12 +1712,14 @@ private:
         m_map.SetTileset(sheet);
         m_sheet = sheet;
         m_currentTilesetPath = asset.tilesetPath;
+        m_currentTilesetAbsPath = ResolveAgainst(path, asset.tilesetPath);
         m_filePath  = path;
         m_camera    = {0.0f, 0.0f};
         m_zoom      = 1.0f;
         m_paletteScroll = 0.0f;
         SetStampSingle(0);
         ClearHistory();
+        StartTilesetWatcher();
         NARAGAME_INFO("editor: opened '%s' (%dx%d, tile %dx%d)",
                       path.c_str(), m_map.Width(), m_map.Height(),
                       m_tileW, m_tileH);
@@ -1676,11 +1744,13 @@ private:
         m_objects.clear();
         m_symbols = DefaultObjectSymbols();
         m_currentTilesetPath = tilesetPath;
+        m_currentTilesetAbsPath = tilesetPath;
         m_camera = {0.0f, 0.0f};
         m_zoom   = 1.0f;
         m_paletteScroll = 0.0f;
         SetStampSingle(0);
         ClearHistory();
+        StartTilesetWatcher();
         NARAGAME_INFO("editor: new map %dx%d, tile %dx%d, tileset '%s'",
                       mapW, mapH, tileW, tileH, tilesetPath.c_str());
     }
@@ -3018,6 +3088,15 @@ private:
     // canvas paint / edge resize / scrollbar drag so a press in the
     // minimap can't bleed into another action while held.
     bool       m_minimapDrag = false;
+
+    // Tileset PNG hot reload. Watches the directory the current tileset
+    // sits in and queues a reload whenever the leaf filename modifies
+    // -- so editing the PNG in an external tool (Aseprite, Photoshop,
+    // GIMP) refreshes the editor's swatches + canvas + minimap on the
+    // next frame without needing to reopen the map.
+    AssetWatcher m_tilesetWatcher;
+    bool         m_tilesetReloadPending = false;
+    std::string  m_currentTilesetAbsPath;
 
     // Object-palette symbol management. Both modals are modal: when up,
     // OnUpdate returns early after running their own input so no canvas

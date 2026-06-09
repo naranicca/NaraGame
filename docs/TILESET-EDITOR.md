@@ -290,6 +290,15 @@ m_watcher.Watch(assetsDir, [this](const std::string& rel) {
 - `test/mario/src/MarioApp.cpp` — `GameScene::OnEnter` 에서
   `LoadNtmap`, `levelReloadCounter` 로 씬 재진입 신호.
 
+### 타일셋 PNG 핫리로드
+
+에디터 자체도 현재 타일셋이 들어있는 디렉토리를 `AssetWatcher` 로
+감시합니다. 외부 도구 (Aseprite·Photoshop·GIMP) 에서 PNG 를 저장하면
+다음 프레임에 자동으로 새 텍스처를 로드하고 `SpriteSheet` 를 재바인딩 —
+팔레트 / 캔버스 / 미니맵 모두 즉시 반영됩니다 (에디터 리오픈 불필요).
+또한 게임이 같은 PNG 를 watcher 로 보고 있다면 PNG 한 번 저장으로
+**외부 도구 → 에디터 → 실행 중인 게임** 세 곳이 동시에 갱신됩니다.
+
 ## 새 맵을 만드는 표준 흐름
 
 1. `tileset-editor.exe --tileset assets/tiles.png --tilesize 32`
