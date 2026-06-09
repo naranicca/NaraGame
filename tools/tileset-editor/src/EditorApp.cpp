@@ -625,10 +625,10 @@ protected:
         // cheap power-user shortcut so you don't keep round-tripping to the
         // palette for the same handful of tiles). In Collision mode the
         // same digits pick Floor/Wall/Water.
-        // Shift+digit is reserved for the layer-visibility toggles above;
-        // skip the palette quick-pick when shift is held so a chord
-        // doesn't double-fire.
-        if (m_map.Width() > 0 && !shiftHeld) {
+        // Shift+digit is reserved for the layer-visibility toggles and
+        // Ctrl+digit for the zoom presets; skip the palette quick-pick
+        // when either modifier is held so a chord doesn't double-fire.
+        if (m_map.Width() > 0 && !shiftHeld && !ctrl) {
             const Key digits[9] = {
                 Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
                 Key::Num6, Key::Num7, Key::Num8, Key::Num9,
@@ -678,6 +678,13 @@ protected:
         if (ctrl && Input::IsKeyPressed(Key::R)) {
             m_recentOverlay = !m_recentOverlay;
         }
+        // Ctrl + 0/1/2/4: zoom presets. 0 = fit to canvas, others are
+        // direct factors. Same anchor rule as wheel zoom (viewport
+        // centre stays put) so the user keeps their bearings.
+        if (ctrl && Input::IsKeyPressed(Key::Num0)) ZoomFit();
+        if (ctrl && Input::IsKeyPressed(Key::Num1)) ZoomTo(1.0f);
+        if (ctrl && Input::IsKeyPressed(Key::Num2)) ZoomTo(2.0f);
+        if (ctrl && Input::IsKeyPressed(Key::Num4)) ZoomTo(4.0f);
         if (ctrl && Input::IsKeyPressed(Key::N)) {
             // Pop a PNG picker for the tileset. The result starts a blank
             // map sized kDefaultMapW x kDefaultMapH at the existing tile
@@ -1881,6 +1888,43 @@ private:
     // Install / replace the watcher on the directory containing the
     // current tileset. The leaf is captured by value so the callback
     // closure stays valid through a later Watch() that re-replaces it.
+    // Set m_zoom to newZoom while keeping the world point currently
+    // under the canvas centre at the canvas centre. Mirrors the
+    // wheel-zoom-at-cursor logic but uses the viewport midpoint as the
+    // anchor so a "Ctrl+2 / 200%" keystroke doesn't yank the user to
+    // some random spot.
+    void ZoomTo(float newZoom) {
+        if (newZoom <= 0.0f) return;
+        const Vec2 canvasOrigin{kPaletteW, kToolbarH};
+        const Vec2 canvasCentre{
+            kPaletteW + (kScreenW - kPaletteW) * 0.5f,
+            kToolbarH + (kScreenH - kToolbarH - kStatusH) * 0.5f};
+        const Vec2 worldBefore =
+            ScreenToWorld(canvasCentre, canvasOrigin, m_zoom);
+        m_zoom = newZoom;
+        const Vec2 worldAfter =
+            ScreenToWorld(canvasCentre, canvasOrigin, m_zoom);
+        m_camera.x += worldBefore.x - worldAfter.x;
+        m_camera.y += worldBefore.y - worldAfter.y;
+    }
+
+    // Fit the whole map inside the canvas viewport: pick the largest
+    // zoom that still shows everything, then centre the map on the
+    // canvas. Useful for jumping back to overview after working in a
+    // detail zoom level.
+    void ZoomFit() {
+        if (m_map.Width() <= 0) return;
+        const float canvasW = kScreenW - kPaletteW;
+        const float canvasH = kScreenH - kToolbarH - kStatusH;
+        const float mapW = float(m_map.Width() * m_tileW);
+        const float mapH = float(m_map.Height() * m_tileH);
+        if (mapW <= 0.0f || mapH <= 0.0f) return;
+        m_zoom = std::min(canvasW / mapW, canvasH / mapH);
+        // Centre: camera = mapCentre - viewportCentre / zoom
+        m_camera.x = mapW * 0.5f - canvasW * 0.5f / m_zoom;
+        m_camera.y = mapH * 0.5f - canvasH * 0.5f / m_zoom;
+    }
+
     void StartTilesetWatcher() {
         if (m_currentTilesetAbsPath.empty()) return;
         const std::string dir  = DirComponent(m_currentTilesetAbsPath);
@@ -3098,6 +3142,8 @@ private:
             {"Arrows",       "pan"},
             {"Middle drag",  "pan"},
             {"Wheel, +/-",   "zoom at cursor"},
+            {"Ctrl+0",       "zoom: fit to canvas"},
+            {"Ctrl+1/2/4",   "zoom: 100% / 200% / 400%"},
             {"Home",         "reset camera and zoom"},
             {"Scroll drag",  "drag thumb to scroll"},
             {"Scroll track", "click empty area for page jump"},
