@@ -86,6 +86,20 @@ mushroom block (`!`) 은 **Tile=QUESTION + Object=!** 두 레이어가
 기본 fallback (`tools/tileset-editor/src/EditorApp.cpp`
 의 `DefaultObjectSymbols()`) 에 추가하면 됩니다.
 
+### 에디터에서 심볼 추가 / 삭제
+
+Object 모드 팔레트 상단의 **`+ Add symbol`** 버튼을 누르면 새 심볼
+모달이 뜹니다:
+- 키보드로 단일 문자 → 심볼 char 지정
+- 8개 컬러 스와치 중 클릭 → 색 지정
+- 계속 타이핑 → 라벨 (최대 24자, Backspace 로 수정)
+- `Enter` 확정, `Esc` 취소
+
+각 심볼 셀의 우상단 **`x`** 버튼을 누르면 삭제 확인 모달이 뜹니다 —
+그 심볼을 사용하는 맵 위의 모든 마커 개수까지 함께 표시. `Y` / Enter
+확정, `N` / Esc 취소. 확정하면 심볼 목록에서 제거되고 맵 위 마커도 모두
+사라지며 다음 저장 시 `.ntmap` 에 반영됩니다 (`m_dirty` 토글됨).
+
 ## 키바인드
 
 ### 파일 / 편집

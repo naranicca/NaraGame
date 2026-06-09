@@ -3,6 +3,7 @@
 #include "NaraGame/math/Vec2.h"
 
 #include <cstdint>
+#include <string>
 
 namespace NaraGame {
 
@@ -59,11 +60,19 @@ public:
     // detent ≈ ±1.0). Positive = scrolled toward the user / "up".
     static float MouseWheelDelta();
 
+    // Characters typed this frame (driven by the platform's WM_CHAR-style
+    // event, NOT IsKeyDown -- so capitals/punctuation arrive correctly
+    // shifted, and held keys auto-repeat as the OS schedules). Includes
+    // control bytes the editor cares about: '\b' for backspace, '\r' for
+    // enter, 0x1B for Esc. Cleared on NewFrame().
+    static const std::string& TextInputThisFrame();
+
     // --- Called by the platform layer / engine; not for game code. ---
     static void SetKeyState(Key key, bool down);
     static void SetMouseButton(MouseButton button, bool down);
     static void SetMousePosition(float x, float y);
     static void AddMouseWheel(float deltaNotches);
+    static void PushTextInput(char c);
     static void NewFrame();
 };
 

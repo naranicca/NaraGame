@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <string>
 
 namespace NaraGame {
 
@@ -22,6 +23,7 @@ static std::array<bool, static_cast<std::size_t>(MouseButton::Count)> g_mousePre
 static std::array<bool, static_cast<std::size_t>(MouseButton::Count)> g_mouseReleasedThisFrame{};
 static Vec2  g_mousePosition{};
 static float g_mouseWheelThisFrame = 0.0f;
+static std::string g_textInputThisFrame;
 
 bool Input::IsKeyDown(Key key) {
     return g_keyCurrent[static_cast<std::size_t>(key)];
@@ -81,6 +83,14 @@ void Input::AddMouseWheel(float deltaNotches) {
     g_mouseWheelThisFrame += deltaNotches;
 }
 
+const std::string& Input::TextInputThisFrame() {
+    return g_textInputThisFrame;
+}
+
+void Input::PushTextInput(char c) {
+    g_textInputThisFrame.push_back(c);
+}
+
 void Input::NewFrame() {
     // Reset edge-event trackers; "current" carries over because Down state
     // is continuous (button stays held across frames until an up event).
@@ -89,6 +99,7 @@ void Input::NewFrame() {
     g_mousePressedThisFrame.fill(false);
     g_mouseReleasedThisFrame.fill(false);
     g_mouseWheelThisFrame = 0.0f;
+    g_textInputThisFrame.clear();
 }
 
 } // namespace NaraGame

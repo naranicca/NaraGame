@@ -151,6 +151,18 @@ LRESULT WindowsWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             Input::SetKeyState(TranslateKey(wParam), false);
             return 0;
 
+        case WM_CHAR: {
+            // ASCII printable + the editor-significant control codes:
+            // backspace (0x08), enter (0x0D), escape (0x1B). Skip the
+            // DEL (0x7F) and other controls.
+            const wchar_t wc = static_cast<wchar_t>(wParam);
+            if (wc == 0x08 || wc == 0x0D || wc == 0x1B ||
+                (wc >= 0x20 && wc < 0x7F)) {
+                Input::PushTextInput(static_cast<char>(wc));
+            }
+            return 0;
+        }
+
         case WM_MOUSEMOVE: {
             // LOWORD/HIWORD give unsigned shorts; cast to signed short so points
             // outside the client area (e.g. during capture) report negative coords.

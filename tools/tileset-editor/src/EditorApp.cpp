@@ -406,6 +406,55 @@ protected:
         const float wheel = Input::MouseWheelDelta();
         const bool ctrl = Input::IsKeyDown(Key::LeftCtrl);
 
+        // Delete-symbol confirmation. Modal: Y / Enter delete, N / Esc
+        // cancel. All other input is suppressed below so a stray click
+        // doesn't dirty the map while the user is reading the count.
+        if (m_deleteSymbolIdx >= 0) {
+            const bool indexOk = size_t(m_deleteSymbolIdx) < m_symbols.size();
+            if (!indexOk) { m_deleteSymbolIdx = -1; }
+            else if (Input::IsKeyPressed(Key::Y) ||
+                     Input::IsKeyPressed(Key::Enter)) {
+                DeleteSymbolAt(m_deleteSymbolIdx);
+                m_deleteSymbolIdx = -1;
+            } else if (Input::IsKeyPressed(Key::N) ||
+                       Input::IsKeyPressed(Key::Escape)) {
+                m_deleteSymbolIdx = -1;
+            }
+            return;
+        }
+
+        // Add-symbol modal. Drains text input into the char (until set)
+        // and then the label; LMB on a colour swatch sets the tint.
+        // Enter commits, Esc cancels. Same suppress-everything-else
+        // pattern as the other modals.
+        if (m_addSymbolModal) {
+            for (char c : Input::TextInputThisFrame()) {
+                if (c == 0x1B) { CloseAddSymbol(); return; }
+                if (c == '\r' || c == '\n') {
+                    CommitAddSymbol();
+                    return;
+                }
+                if (c == '\b') {
+                    // Backspace peels back the label first; only resets
+                    // the symbol char if the label is already empty.
+                    if (!m_addLabel.empty()) m_addLabel.pop_back();
+                    else if (m_addChar != 0) m_addChar = 0;
+                    continue;
+                }
+                if (c < 0x20) continue;
+                if (m_addChar == 0) {
+                    m_addChar = c;
+                } else if (m_addLabel.size() < 24) {
+                    m_addLabel.push_back(c);
+                }
+            }
+            if (Input::IsMousePressed(MouseButton::Left)) {
+                const int sw = AddModalSwatchHit(mouse);
+                if (sw >= 0) m_addColor = kObjAddSwatches[sw];
+            }
+            return;
+        }
+
         // Quit-confirm modal. Set when the user presses Esc with unsaved
         // changes -- gives them a chance to save before the editor exits.
         // S saves (popping a Save-As dialog if the map has no path yet),
@@ -642,10 +691,21 @@ protected:
                     paletteContentOrigin);
                 if (picked >= 0) m_selectedCol = picked;
             } else if (m_mode == EditLayer::Object) {
-                const int picked = ObjectPaletteHit(mouse,
-                    paletteContentOrigin);
-                if (picked >= 0 && size_t(picked) < m_symbols.size())
-                    m_selectedSym = m_symbols[picked].symbol;
+                if (ObjectAddHit(mouse, paletteContentOrigin)) {
+                    OpenAddSymbolModal();
+                } else {
+                    const int delIdx = ObjectDeleteHit(
+                        mouse, paletteContentOrigin);
+                    if (delIdx >= 0) {
+                        m_deleteSymbolIdx = delIdx;
+                    } else {
+                        const int picked = ObjectPaletteHit(
+                            mouse, paletteContentOrigin);
+                        if (picked >= 0 &&
+                            size_t(picked) < m_symbols.size())
+                            m_selectedSym = m_symbols[picked].symbol;
+                    }
+                }
             }
         }
         // Palette LMB drag (Tile mode): extends the stamp to a rectangle
@@ -985,6 +1045,8 @@ protected:
         DrawStatusBar(r);
         if (m_helpOverlay) DrawHelpOverlay(r);
         if (m_quitConfirm) DrawQuitConfirm(r);
+        if (m_deleteSymbolIdx >= 0) DrawDeleteSymbolModal(r);
+        if (m_addSymbolModal) DrawAddSymbolModal(r);
 
         r.End();
     }
@@ -2354,15 +2416,37 @@ private:
     }
 
     void DrawObjectPalette(Renderer2D& r, Vec2 origin) {
+        const Vec2 mouseNow = Input::MousePosition();
         DrawMicroText(r, "object layer",
                       {origin.x + 12.0f, origin.y + 8.0f},
                       14.0f, kStatusText);
+
+        // "+ Add symbol" button. Hover highlight gives the affordance;
+        // click handler lives in OnUpdate via ObjectAddHit so this draw
+        // function is purely visual.
+        {
+            const Vec2 bp = ObjAddBtnRect(origin);
+            const Vec2 bs = ObjAddBtnSize();
+            const bool over = IsInside(mouseNow, bp, bs);
+            const Color bg = over ? Color(0.30f, 0.34f, 0.42f, 1.0f)
+                                  : Color(0.22f, 0.24f, 0.30f, 1.0f);
+            r.DrawQuad(bp, bs, bg);
+            DrawRectOutline(r, bp, bs, 1.0f, Color(0.0f, 0.0f, 0.0f, 0.6f));
+            const std::string lbl = "+ Add symbol";
+            const float lw = MeasureMicroText(lbl, 14.0f);
+            DrawMicroText(r, lbl,
+                          {bp.x + (bs.x - lw) * 0.5f,
+                           bp.y + (bs.y - 14.0f) * 0.5f},
+                          14.0f, over ? kSelectHi : kStatusText);
+        }
+
         constexpr float pad   = 12.0f;
         constexpr float cellH = 56.0f;
         constexpr float gap   = 8.0f;
         for (size_t i = 0; i < m_symbols.size(); ++i) {
             const SymbolDef& s = m_symbols[i];
-            const float py = origin.y + 32.0f + float(i) * (cellH + gap);
+            const float py = origin.y + kObjListTop +
+                             float(i) * (cellH + gap);
             const Vec2 p{origin.x + pad, py};
             const Vec2 sz{kPaletteW - pad * 2.0f, cellH};
             // Cell background is the neutral pane tint; a thin coloured
@@ -2378,6 +2462,27 @@ private:
             DrawMicroText(r, s.label.c_str(),
                           {p.x + 54.0f, p.y + cellH * 0.5f - 8.0f},
                           14.0f, kStatusText);
+
+            // × delete button on the right side of the cell, vertically
+            // centred so it lines up with the big symbol glyph and the
+            // label text instead of stranding at the cell's top edge.
+            // Transparent in the resting state so it doesn't fight the
+            // cell tint; hovered state swaps the glyph to kSelectHi
+            // yellow so the affordance reads as "armed".
+            const float bx = p.x + sz.x - kObjDelBtnSize - kObjDelBtnPad;
+            const float by = p.y + (cellH - kObjDelBtnSize) * 0.5f;
+            const bool overDel = mouseNow.x >= bx &&
+                mouseNow.x < bx + kObjDelBtnSize &&
+                mouseNow.y >= by &&
+                mouseNow.y < by + kObjDelBtnSize;
+            const float gx = MeasureMicroText("x", 14.0f);
+            DrawMicroText(r, "x",
+                          {bx + (kObjDelBtnSize - gx) * 0.5f,
+                           by + (kObjDelBtnSize - 14.0f) * 0.5f},
+                          14.0f,
+                          overDel ? kSelectHi
+                                  : Color(0.75f, 0.78f, 0.85f, 0.70f));
+
             if (s.symbol == m_selectedSym) {
                 DrawRectOutline(r, {p.x - 2.0f, p.y - 2.0f},
                                 {sz.x + 4.0f, sz.y + 4.0f},
@@ -2386,17 +2491,144 @@ private:
         }
     }
 
-    int ObjectPaletteHit(Vec2 mouse, Vec2 origin) const {
+    // Per-cell × button dimensions; shared by hit test and draw so they
+    // stay in lockstep.
+    static constexpr float kObjDelBtnSize = 18.0f;
+    static constexpr float kObjDelBtnPad  = 6.0f;
+    // "+ Add symbol" button at the top of the Object palette.
+    static constexpr float kObjAddBtnH    = 28.0f;
+    static constexpr float kObjAddBtnTop  = 32.0f;  // from origin.y
+    static constexpr float kObjListTop    = kObjAddBtnTop + kObjAddBtnH + 8.0f;
+
+    // Swatches used by the Add Symbol modal. Eight colours that read well
+    // on the editor's dark cells; the user picks one by clicking. Default
+    // (kObjAddDefault) is a neutral grey so a brand-new symbol is visible
+    // before the user changes anything.
+    static constexpr uint32_t kObjAddSwatches[8] = {
+        0x55b8ffu, 0xff5050u, 0xffd060u, 0x66cc44u,
+        0xff9966u, 0xff5577u, 0x44ccccu, 0xeeeeeeu,
+    };
+
+    Vec2 ObjAddBtnRect(Vec2 origin) const {
+        return {origin.x + 12.0f, origin.y + kObjAddBtnTop};
+    }
+    Vec2 ObjAddBtnSize() const {
+        return {kPaletteW - 24.0f, kObjAddBtnH};
+    }
+    bool ObjectAddHit(Vec2 mouse, Vec2 origin) const {
+        return IsInside(mouse, ObjAddBtnRect(origin), ObjAddBtnSize());
+    }
+
+    // Per-cell × button position (centred vertically inside the cell on
+    // the right edge). Returns the symbol index it would delete, or -1
+    // if the cursor isn't over one.
+    int ObjectDeleteHit(Vec2 mouse, Vec2 origin) const {
         constexpr float pad   = 12.0f;
         constexpr float cellH = 56.0f;
         constexpr float gap   = 8.0f;
         for (size_t i = 0; i < m_symbols.size(); ++i) {
-            const float py = origin.y + 32.0f + float(i) * (cellH + gap);
+            const float py = origin.y + kObjListTop +
+                             float(i) * (cellH + gap);
+            const float bx = origin.x + pad + (kPaletteW - pad * 2.0f) -
+                             kObjDelBtnSize - kObjDelBtnPad;
+            const float by = py + (cellH - kObjDelBtnSize) * 0.5f;
+            if (mouse.x >= bx && mouse.x < bx + kObjDelBtnSize &&
+                mouse.y >= by && mouse.y < by + kObjDelBtnSize) {
+                return int(i);
+            }
+        }
+        return -1;
+    }
+
+    int ObjectPaletteHit(Vec2 mouse, Vec2 origin) const {
+        constexpr float pad   = 12.0f;
+        constexpr float cellH = 56.0f;
+        constexpr float gap   = 8.0f;
+        // Avoid latching selection when the press is actually on the
+        // delete button -- the dispatch in OnUpdate already routes that
+        // separately, but a press near the top-right corner of a cell
+        // should never accidentally select either.
+        if (ObjectDeleteHit(mouse, origin) >= 0) return -1;
+        for (size_t i = 0; i < m_symbols.size(); ++i) {
+            const float py = origin.y + kObjListTop +
+                             float(i) * (cellH + gap);
             const float px = origin.x + pad;
             if (mouse.x >= px && mouse.x < px + (kPaletteW - pad * 2.0f) &&
                 mouse.y >= py && mouse.y < py + cellH) {
                 return int(i);
             }
+        }
+        return -1;
+    }
+
+    // Drop one entry from m_symbols AND erase every marker that uses its
+    // char. The map dirties so the change makes it into the next save;
+    // selection falls back to the previous-or-first entry so the user
+    // isn't stuck pointing at a vanished symbol.
+    void DeleteSymbolAt(int idx) {
+        if (idx < 0 || size_t(idx) >= m_symbols.size()) return;
+        const char sym = m_symbols[size_t(idx)].symbol;
+        m_symbols.erase(m_symbols.begin() + idx);
+        m_objects.erase(
+            std::remove_if(m_objects.begin(), m_objects.end(),
+                [sym](const ObjectMarker& m) { return m.symbol == sym; }),
+            m_objects.end());
+        if (m_selectedSym == sym) {
+            m_selectedSym = m_symbols.empty()
+                ? 0
+                : m_symbols[size_t(std::min(idx,
+                    int(m_symbols.size()) - 1))].symbol;
+        }
+        m_dirty = true;
+    }
+
+    int CountMarkersWithSymbol(char sym) const {
+        int n = 0;
+        for (const auto& m : m_objects)
+            if (m.symbol == sym) ++n;
+        return n;
+    }
+
+    void OpenAddSymbolModal() {
+        m_addSymbolModal = true;
+        m_addChar  = 0;
+        m_addColor = kObjAddSwatches[0];
+        m_addLabel.clear();
+    }
+    void CommitAddSymbol() {
+        if (m_addChar == 0) return;
+        // Reject duplicates: the editor identifies symbols by char, so
+        // two entries with the same char would make selection ambiguous
+        // and confuse the delete path.
+        for (const auto& s : m_symbols)
+            if (s.symbol == m_addChar) { CloseAddSymbol(); return; }
+        m_symbols.push_back({m_addChar, m_addColor, m_addLabel});
+        m_selectedSym = m_addChar;
+        m_dirty = true;
+        CloseAddSymbol();
+    }
+    void CloseAddSymbol() {
+        m_addSymbolModal = false;
+        m_addChar = 0;
+        m_addLabel.clear();
+    }
+
+    // Hit-test the color swatch row inside the Add Symbol modal. Layout
+    // is shared with DrawAddSymbolModal so the geometry stays in sync.
+    int AddModalSwatchHit(Vec2 mouse) const {
+        constexpr float panelW = 520.0f;
+        constexpr float panelH = 280.0f;
+        const Vec2 p{(kScreenW - panelW) * 0.5f,
+                     (kScreenH - panelH) * 0.5f};
+        const float rowY = p.y + 130.0f;
+        constexpr float sw = 36.0f;
+        constexpr float sgap = 4.0f;
+        const float total = sw * 8 + sgap * 7;
+        const float startX = p.x + (panelW - total) * 0.5f;
+        if (mouse.y < rowY || mouse.y >= rowY + sw) return -1;
+        for (int i = 0; i < 8; ++i) {
+            const float sx = startX + float(i) * (sw + sgap);
+            if (mouse.x >= sx && mouse.x < sx + sw) return i;
         }
         return -1;
     }
@@ -2523,6 +2755,125 @@ private:
         };
         DrawColumn(col1X, kCol1, int(sizeof(kCol1) / sizeof(kCol1[0])));
         DrawColumn(col2X, kCol2, int(sizeof(kCol2) / sizeof(kCol2[0])));
+    }
+
+    // Delete-symbol confirm panel. Spells out the consequences (how many
+    // markers will disappear) so a tap on the wrong × isn't an
+    // irrecoverable loss.
+    void DrawDeleteSymbolModal(Renderer2D& r) {
+        if (size_t(m_deleteSymbolIdx) >= m_symbols.size()) return;
+        const SymbolDef& s = m_symbols[size_t(m_deleteSymbolIdx)];
+        const int n = CountMarkersWithSymbol(s.symbol);
+        r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                   Color(0.0f, 0.0f, 0.0f, 0.70f));
+        constexpr float panelW = 540.0f;
+        constexpr float panelH = 220.0f;
+        const Vec2 p{(kScreenW - panelW) * 0.5f,
+                     (kScreenH - panelH) * 0.5f};
+        r.DrawQuad(p, {panelW, panelH}, kPaneBg);
+        DrawRectOutline(r, p, {panelW, panelH}, 2.0f, kSelectHi);
+        DrawMicroText(r, "Delete symbol",
+                      {p.x + 24.0f, p.y + 22.0f}, 22.0f, kSelectHi);
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "Remove '%c' (%s) from the palette",
+                      s.symbol, s.label.empty() ? "no label"
+                                                : s.label.c_str());
+        DrawMicroText(r, line, {p.x + 24.0f, p.y + 64.0f},
+                      14.0f, kStatusText);
+        char count[80];
+        std::snprintf(count, sizeof(count),
+                      "and erase %d marker%s from the map.",
+                      n, n == 1 ? "" : "s");
+        DrawMicroText(r, count, {p.x + 24.0f, p.y + 86.0f},
+                      14.0f, kStatusText);
+        const Color kKeyText(0.85f, 0.90f, 0.98f, 1.0f);
+        DrawMicroText(r, "Y / Enter",
+                      {p.x + 32.0f, p.y + 140.0f}, 16.0f, kKeyText);
+        DrawMicroText(r, "confirm",
+                      {p.x + 160.0f, p.y + 140.0f}, 14.0f, kStatusText);
+        DrawMicroText(r, "N / Esc",
+                      {p.x + 32.0f, p.y + 170.0f}, 16.0f, kKeyText);
+        DrawMicroText(r, "cancel",
+                      {p.x + 160.0f, p.y + 170.0f}, 14.0f, kStatusText);
+    }
+
+    // Add-symbol modal: char row (typed), 8-colour swatch row (clicked),
+    // label row (typed), with a small live preview of the symbol cell
+    // so the user can see the result before committing.
+    void DrawAddSymbolModal(Renderer2D& r) {
+        constexpr float panelW = 520.0f;
+        constexpr float panelH = 280.0f;
+        const Vec2 p{(kScreenW - panelW) * 0.5f,
+                     (kScreenH - panelH) * 0.5f};
+        r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                   Color(0.0f, 0.0f, 0.0f, 0.70f));
+        r.DrawQuad(p, {panelW, panelH}, kPaneBg);
+        DrawRectOutline(r, p, {panelW, panelH}, 2.0f, kSelectHi);
+        DrawMicroText(r, "Add new symbol",
+                      {p.x + 24.0f, p.y + 18.0f}, 20.0f, kSelectHi);
+
+        const Color kKeyText(0.85f, 0.90f, 0.98f, 1.0f);
+
+        // Symbol row.
+        DrawMicroText(r, "Symbol",
+                      {p.x + 24.0f, p.y + 64.0f}, 14.0f, kStatusText);
+        const Vec2 boxP{p.x + 110.0f, p.y + 56.0f};
+        const Vec2 boxS{40.0f, 32.0f};
+        r.DrawQuad(boxP, boxS, Color(0.16f, 0.18f, 0.24f, 1.0f));
+        DrawRectOutline(r, boxP, boxS, 1.0f,
+                        Color(0.0f, 0.0f, 0.0f, 0.60f));
+        if (m_addChar != 0) {
+            const char txt[2] = { m_addChar, 0 };
+            const float w = MeasureMicroText(txt, 20.0f);
+            DrawMicroText(r, txt,
+                          {boxP.x + (boxS.x - w) * 0.5f,
+                           boxP.y + (boxS.y - 20.0f) * 0.5f},
+                          20.0f, ColorFromHex(m_addColor));
+        }
+        DrawMicroText(r,
+            m_addChar == 0 ? "press any key" : "Backspace to retype",
+            {boxP.x + boxS.x + 12.0f, p.y + 64.0f},
+            12.0f, kStatusText);
+
+        // Color row.
+        DrawMicroText(r, "Color",
+                      {p.x + 24.0f, p.y + 116.0f}, 14.0f, kStatusText);
+        constexpr float sw = 36.0f;
+        constexpr float sgap = 4.0f;
+        const float total = sw * 8 + sgap * 7;
+        const float startX = p.x + (panelW - total) * 0.5f;
+        const float rowY = p.y + 130.0f;
+        for (int i = 0; i < 8; ++i) {
+            const float sx = startX + float(i) * (sw + sgap);
+            r.DrawQuad({sx, rowY}, {sw, sw},
+                       ColorFromHex(kObjAddSwatches[i]));
+            const bool active = (m_addColor == kObjAddSwatches[i]);
+            DrawRectOutline(r, {sx, rowY}, {sw, sw},
+                            active ? 2.0f : 1.0f,
+                            active ? kSelectHi
+                                   : Color(0.0f, 0.0f, 0.0f, 0.60f));
+        }
+
+        // Label row.
+        DrawMicroText(r, "Label",
+                      {p.x + 24.0f, p.y + 200.0f}, 14.0f, kStatusText);
+        const Vec2 lblP{p.x + 110.0f, p.y + 192.0f};
+        const Vec2 lblS{panelW - 134.0f, 32.0f};
+        r.DrawQuad(lblP, lblS, Color(0.16f, 0.18f, 0.24f, 1.0f));
+        DrawRectOutline(r, lblP, lblS, 1.0f,
+                        Color(0.0f, 0.0f, 0.0f, 0.60f));
+        const std::string display = m_addLabel + "_";  // cursor mark
+        DrawMicroText(r, display,
+                      {lblP.x + 8.0f, lblP.y + (lblS.y - 14.0f) * 0.5f},
+                      14.0f, kStatusText);
+
+        // Footer hint.
+        DrawMicroText(r,
+            m_addChar == 0
+                ? "Type the symbol character first, then the label."
+                : "Enter: confirm    Esc: cancel    Backspace: edit",
+            {p.x + 24.0f, p.y + panelH - 28.0f}, 12.0f, kStatusText);
     }
 
     // Unsaved-changes confirmation. Triggered by Esc when m_dirty is
@@ -2667,6 +3018,15 @@ private:
     // canvas paint / edge resize / scrollbar drag so a press in the
     // minimap can't bleed into another action while held.
     bool       m_minimapDrag = false;
+
+    // Object-palette symbol management. Both modals are modal: when up,
+    // OnUpdate returns early after running their own input so no canvas
+    // / palette / scrollbar action fires under them.
+    int         m_deleteSymbolIdx = -1;    // >=0 = index awaiting confirm
+    bool        m_addSymbolModal  = false; // panel for char/color/label
+    char        m_addChar         = 0;     // 0 = not yet typed
+    uint32_t    m_addColor        = 0xCCCCCCu;
+    std::string m_addLabel;
 
     // Brush size for single-value paint (Tile single-tile, Collision).
     // Always odd so the brush footprint is centred on the hover cell.
