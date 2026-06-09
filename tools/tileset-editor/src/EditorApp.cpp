@@ -1105,10 +1105,44 @@ protected:
                         m_rectActive = false;
                     }
                 } else if (inMap) {
-                    if (Input::IsMouseDown(MouseButton::Left)) {
-                        PaintBrushAt(tx, ty, leftVal, /*isLeft=*/true);
-                    } else if (Input::IsMouseDown(MouseButton::Right)) {
-                        PaintBrushAt(tx, ty, rightVal, /*isLeft=*/false);
+                    if (m_mode == EditLayer::Object) {
+                        // Press-on-marker enters a drag candidate state;
+                        // release decides between move (cursor wandered
+                        // off source) and replace (didn't move). Press
+                        // on an empty cell still places immediately and
+                        // continues to spray on hold like the other
+                        // modes, so the existing "drag a row of enemies"
+                        // workflow is preserved.
+                        if (Input::IsMousePressed(MouseButton::Left)) {
+                            const int existing = GetObjectSymbol(tx, ty);
+                            if (existing != 0) {
+                                m_objDragSym   = char(existing);
+                                m_objDragSrcTx = tx;
+                                m_objDragSrcTy = ty;
+                                m_objDragging  = false;
+                            } else {
+                                PaintCell(tx, ty, leftVal);
+                            }
+                        }
+                        if (m_objDragSym != 0 &&
+                            Input::IsMouseDown(MouseButton::Left)) {
+                            if (tx != m_objDragSrcTx ||
+                                ty != m_objDragSrcTy) m_objDragging = true;
+                        } else if (m_objDragSym == 0 &&
+                                   Input::IsMouseDown(MouseButton::Left)) {
+                            PaintCell(tx, ty, leftVal);
+                        }
+                        if (Input::IsMouseDown(MouseButton::Right)) {
+                            PaintCell(tx, ty, rightVal);
+                        }
+                    } else {
+                        if (Input::IsMouseDown(MouseButton::Left)) {
+                            PaintBrushAt(tx, ty, leftVal,
+                                         /*isLeft=*/true);
+                        } else if (Input::IsMouseDown(MouseButton::Right)) {
+                            PaintBrushAt(tx, ty, rightVal,
+                                         /*isLeft=*/false);
+                        }
                     }
                 }
             }
@@ -1116,6 +1150,34 @@ protected:
             m_hoverTx = -1;
             m_hoverTy = -1;
         }
+
+        // Resolve any pending marker drag on LMB release. Lives outside
+        // the canvas-paint guard so a release after the cursor strays
+        // off the canvas still cleans up the drag state.
+        if (m_objDragSym != 0 &&
+            !Input::IsMouseDown(MouseButton::Left)) {
+            const bool destValid =
+                m_hoverTx >= 0 && m_hoverTx < m_map.Width() &&
+                m_hoverTy >= 0 && m_hoverTy < m_map.Height();
+            if (!m_objDragging) {
+                // No drag at all: treat the press as a click-to-replace
+                // (legacy behaviour) -- swap the source marker for the
+                // currently selected symbol.
+                PaintCell(m_objDragSrcTx, m_objDragSrcTy,
+                          int(uint8_t(m_selectedSym)));
+            } else if (destValid &&
+                       (m_hoverTx != m_objDragSrcTx ||
+                        m_hoverTy != m_objDragSrcTy)) {
+                // Drag with a valid different destination: move.
+                PaintCell(m_objDragSrcTx, m_objDragSrcTy, 0);
+                PaintCell(m_hoverTx, m_hoverTy,
+                          int(uint8_t(m_objDragSym)));
+            }
+            // else (drag returned to source / dest invalid): cancel quietly.
+            m_objDragSym  = 0;
+            m_objDragging = false;
+        }
+
         // Mouse fully up → finalise the current stroke. Doing this after the
         // paint pass means a single click that flips one cell still becomes a
         // 1-edit stroke pushed onto the undo stack.
@@ -2227,17 +2289,55 @@ private:
             for (const auto& m : m_objects) {
                 const Vec2 p = WorldToScreen(
                     {float(m.x * m_tileW), float(m.y * m_tileH)}, origin);
-                r.DrawQuad(p, {sx, sy}, Color(0.0f, 0.0f, 0.0f, 0.55f));
-                DrawRectOutline(r, p, {sx, sy}, 2.0f,
-                                Color(1.0f, 0.86f, 0.20f, 1.0f));
+                // While dragging, dim the source marker so the user sees
+                // a clear "from" preview alongside the ghost-at-hover.
+                const bool isDragSrc = (m_objDragging &&
+                                        m.x == m_objDragSrcTx &&
+                                        m.y == m_objDragSrcTy);
+                const Color bgC  = isDragSrc
+                    ? Color(0.0f, 0.0f, 0.0f, 0.30f)
+                    : Color(0.0f, 0.0f, 0.0f, 0.55f);
+                const Color edgeC = isDragSrc
+                    ? Color(1.0f, 0.86f, 0.20f, 0.45f)
+                    : Color(1.0f, 0.86f, 0.20f, 1.0f);
+                const Color textC = isDragSrc
+                    ? Color(1.0f, 0.95f, 0.30f, 0.40f)
+                    : Color(1.0f, 0.95f, 0.30f, 1.0f);
+                r.DrawQuad(p, {sx, sy}, bgC);
+                DrawRectOutline(r, p, {sx, sy}, 2.0f, edgeC);
                 const char text[2] = { m.symbol, 0 };
                 const float gh = std::min(sx, sy) * 0.6f;
                 const float w  = MeasureMicroText(text, gh);
                 DrawMicroText(r, text,
                               {p.x + (sx - w) * 0.5f,
                                p.y + (sy - gh) * 0.5f},
-                              gh, Color(1.0f, 0.95f, 0.30f, 1.0f));
+                              gh, textC);
             }
+        }
+
+        // Marker-drag ghost: draw a translucent copy of the source
+        // marker at the hover cell so the user sees where it will land.
+        // Hidden when the cursor strays outside the map.
+        if (m_objDragging && m_objDragSym != 0 &&
+            m_hoverTx >= 0 && m_hoverTx < m_map.Width() &&
+            m_hoverTy >= 0 && m_hoverTy < m_map.Height() &&
+            (m_hoverTx != m_objDragSrcTx ||
+             m_hoverTy != m_objDragSrcTy)) {
+            const float sx = float(m_tileW) * m_zoom;
+            const float sy = float(m_tileH) * m_zoom;
+            const Vec2 gp = WorldToScreen(
+                {float(m_hoverTx * m_tileW),
+                 float(m_hoverTy * m_tileH)}, origin);
+            r.DrawQuad(gp, {sx, sy}, Color(0.0f, 0.0f, 0.0f, 0.55f));
+            DrawRectOutline(r, gp, {sx, sy}, 2.0f,
+                            Color(1.0f, 0.92f, 0.55f, 0.95f));
+            const char gt[2] = { m_objDragSym, 0 };
+            const float gh = std::min(sx, sy) * 0.6f;
+            const float gw = MeasureMicroText(gt, gh);
+            DrawMicroText(r, gt,
+                          {gp.x + (sx - gw) * 0.5f,
+                           gp.y + (sy - gh) * 0.5f},
+                          gh, Color(1.0f, 0.95f, 0.30f, 0.95f));
         }
 
         // Stamp hover preview (Tile mode, multi-cell stamp). Draws a faint
@@ -2987,6 +3087,7 @@ private:
             {"Alt+LMB",     "eyedropper"},
             {"F",           "flood fill same value"},
             {"[ / ]",       "brush size (1..9, odd)"},
+            {"LMB drag",    "(Object) move existing marker"},
         };
         static const Row kSelect[] = {
             {"Ctrl+drag",  "marquee select"},
@@ -3435,6 +3536,19 @@ private:
     // crash mid-edit doesn't lose work since the last explicit Ctrl+S.
     static constexpr float kBackupInterval = 300.0f;   // 5 minutes
     float m_backupTimer = 0.0f;
+
+    // Object-mode marker drag. LMB press on a cell that already has a
+    // marker records m_objDragSym and defers any state change to release.
+    // If the cursor leaves the source cell before release (m_objDragging
+    // turns true), the release moves the marker to the new cell. A press
+    // that releases without ever moving falls back to the legacy replace
+    // behaviour (paint m_selectedSym over the source cell). Press on an
+    // empty cell -- and Tile / Collision modes -- skip this whole path
+    // and continuous-paint as before.
+    char m_objDragSym    = 0;
+    int  m_objDragSrcTx  = 0;
+    int  m_objDragSrcTy  = 0;
+    bool m_objDragging   = false;
 
     // Object-palette symbol management. Both modals are modal: when up,
     // OnUpdate returns early after running their own input so no canvas
