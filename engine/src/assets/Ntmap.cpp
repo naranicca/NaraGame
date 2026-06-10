@@ -74,8 +74,8 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
         const char first = line[0];
         const bool isData = (first == '-' || (first >= '0' && first <= '9'));
         if (section == 3) {
-            // Each line: <symbol> <x> <y>. Skip if the leading token isn't
-            // a single printable char (probably a new directive).
+            // Each line: <symbol> <x> <y> [data...]. Skip if the leading
+            // token isn't a single printable char (probably a new directive).
             std::string sym;
             int ox, oy;
             if ((ls >> sym >> ox >> oy) && sym.size() == 1) {
@@ -83,6 +83,14 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
                 m.symbol = sym[0];
                 m.x = ox;
                 m.y = oy;
+                // Anything after the y coord on the same line is the
+                // optional free-form payload. Trim leading/trailing
+                // whitespace (and trailing \r from CRLF on Windows).
+                std::string rest;
+                std::getline(ls, rest);
+                const size_t s = rest.find_first_not_of(" \t");
+                const size_t e = rest.find_last_not_of(" \t\r\n");
+                if (s != std::string::npos) m.data = rest.substr(s, e - s + 1);
                 objects.push_back(m);
                 continue;
             }
@@ -279,7 +287,9 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
             // never resurrects them.
             if (m.x < 0 || m.y < 0 ||
                 m.x >= map.Width() || m.y >= map.Height()) continue;
-            out << m.symbol << ' ' << m.x << ' ' << m.y << '\n';
+            out << m.symbol << ' ' << m.x << ' ' << m.y;
+            if (!m.data.empty()) out << ' ' << m.data;
+            out << '\n';
         }
     }
     if (!symbols.empty()) {

@@ -488,6 +488,42 @@ protected:
             return;
         }
 
+        // Marker metadata modal. Single text field for the marker's
+        // free-form data string. Enter commits to the marker (and marks
+        // the map dirty if the buffer changed), Esc cancels. If the
+        // backing marker disappeared (e.g. undo), close silently.
+        if (m_metaModalIdx >= 0) {
+            if (size_t(m_metaModalIdx) >= m_objects.size()) {
+                m_metaModalIdx = -1;
+                m_metaModalBuf.clear();
+                return;
+            }
+            for (char c : Input::TextInputThisFrame()) {
+                if (c == 0x1B) {
+                    m_metaModalIdx = -1;
+                    m_metaModalBuf.clear();
+                    return;
+                }
+                if (c == '\r' || c == '\n') {
+                    auto& mref = m_objects[size_t(m_metaModalIdx)];
+                    if (mref.data != m_metaModalBuf) {
+                        mref.data = m_metaModalBuf;
+                        m_dirty = true;
+                    }
+                    m_metaModalIdx = -1;
+                    m_metaModalBuf.clear();
+                    return;
+                }
+                if (c == '\b') {
+                    if (!m_metaModalBuf.empty()) m_metaModalBuf.pop_back();
+                    continue;
+                }
+                if (c < 0x20) continue;
+                if (m_metaModalBuf.size() < 256) m_metaModalBuf.push_back(c);
+            }
+            return;
+        }
+
         // Quit-confirm modal. Set when the user presses Esc with unsaved
         // changes -- gives them a chance to save before the editor exits.
         // S saves (popping a Save-As dialog if the map has no path yet),
@@ -1173,7 +1209,21 @@ protected:
                                    Input::IsMouseDown(MouseButton::Left)) {
                             PaintCell(tx, ty, leftVal);
                         }
-                        if (Input::IsMouseDown(MouseButton::Right)) {
+                        // RMB: press on an existing marker opens the
+                        // metadata edit modal (don't erase). Press on an
+                        // empty cell, or dragging RMB across cells,
+                        // erases as before so the legacy "drag a row of
+                        // erases" workflow still works.
+                        if (Input::IsMousePressed(MouseButton::Right)) {
+                            const int idx = FindObjectIndex(tx, ty);
+                            if (idx >= 0) {
+                                m_metaModalIdx = idx;
+                                m_metaModalBuf =
+                                    m_objects[size_t(idx)].data;
+                            } else {
+                                PaintCell(tx, ty, rightVal);
+                            }
+                        } else if (Input::IsMouseDown(MouseButton::Right)) {
                             PaintCell(tx, ty, rightVal);
                         }
                     } else if (m_mode == EditLayer::Tile && m_autoTile) {
@@ -1263,6 +1313,7 @@ protected:
         if (m_quitConfirm) DrawQuitConfirm(r);
         if (m_deleteSymbolIdx >= 0) DrawDeleteSymbolModal(r);
         if (m_addSymbolModal) DrawAddSymbolModal(r);
+        if (m_metaModalIdx >= 0) DrawMetadataModal(r);
         if (m_recentOverlay) DrawRecentOverlay(r);
 
         r.End();
@@ -1517,6 +1568,13 @@ private:
         for (const auto& m : m_objects)
             if (m.x == x && m.y == y) return int(uint8_t(m.symbol));
         return 0;
+    }
+    // Returns the m_objects index of the marker at (x,y), or -1 if none.
+    // Used by the RMB metadata modal trigger.
+    int FindObjectIndex(int x, int y) const {
+        for (size_t i = 0; i < m_objects.size(); ++i)
+            if (m_objects[i].x == x && m_objects[i].y == y) return int(i);
+        return -1;
     }
     void SetObjectSymbol(int x, int y, char sym) {
         for (auto it = m_objects.begin(); it != m_objects.end(); ++it) {
@@ -2475,6 +2533,17 @@ private:
                               {p.x + (sx - w) * 0.5f,
                                p.y + (sy - gh) * 0.5f},
                               gh, textC);
+                // Tiny yellow square in the top-right corner if the
+                // marker carries non-empty data -- so the user can spot
+                // metadata-bearing markers (doors, etc.) at a glance.
+                if (!m.data.empty()) {
+                    const float dotS = std::max(3.0f, sx * 0.10f);
+                    const Color dotC = isDragSrc
+                        ? Color(1.0f, 0.95f, 0.30f, 0.50f)
+                        : Color(1.0f, 0.95f, 0.30f, 1.0f);
+                    r.DrawQuad({p.x + sx - dotS - 3.0f, p.y + 3.0f},
+                               {dotS, dotS}, dotC);
+                }
             }
         }
 
@@ -2758,6 +2827,17 @@ private:
             std::snprintf(buf, sizeof(buf), "Marker: %c (%s)",
                           char(sym), label);
             lines.emplace_back(buf);
+            // Append metadata if present -- lets the user verify door
+            // destinations / item params without opening the modal.
+            for (const auto& mo : m_objects) {
+                if (mo.x == m_hoverTx && mo.y == m_hoverTy &&
+                    !mo.data.empty()) {
+                    std::snprintf(buf, sizeof(buf), "Data: %s",
+                                  mo.data.c_str());
+                    lines.emplace_back(buf);
+                    break;
+                }
+            }
         }
 
         constexpr float lineH = 16.0f;
@@ -3654,6 +3734,52 @@ private:
                       {p.x + 360.0f, rowY}, 14.0f, kStatusText);
     }
 
+    // Marker-metadata modal. Single text input bound to m_metaModalBuf;
+    // Enter / Esc handled by the OnUpdate modal block. The marker is
+    // identified by m_metaModalIdx into m_objects.
+    void DrawMetadataModal(Renderer2D& r) {
+        if (size_t(m_metaModalIdx) >= m_objects.size()) return;
+        const auto& mref = m_objects[size_t(m_metaModalIdx)];
+        r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
+                   Color(0.0f, 0.0f, 0.0f, 0.70f));
+        constexpr float panelW = 640.0f;
+        constexpr float panelH = 200.0f;
+        const Vec2 p{(kScreenW - panelW) * 0.5f,
+                     (kScreenH - panelH) * 0.5f};
+        r.DrawQuad(p, {panelW, panelH}, kPaneBg);
+        DrawRectOutline(r, p, {panelW, panelH}, 2.0f, kSelectHi);
+
+        char title[96];
+        std::snprintf(title, sizeof(title),
+                      "Marker metadata: '%c' at (%d, %d)",
+                      mref.symbol, mref.x, mref.y);
+        DrawMicroText(r, title,
+                      {p.x + 24.0f, p.y + 22.0f}, 20.0f, kSelectHi);
+
+        const Color kFieldBg(0.16f, 0.18f, 0.24f, 1.0f);
+        const Color kFieldEdge(0.0f, 0.0f, 0.0f, 0.60f);
+        const Vec2 fieldP{p.x + 24.0f, p.y + 80.0f};
+        const Vec2 fieldS{panelW - 48.0f, 36.0f};
+        r.DrawQuad(fieldP, fieldS, kFieldBg);
+        DrawRectOutline(r, fieldP, fieldS, 2.0f, kSelectHi);
+        // The trailing "_" caret is drawn at the end of the buffer; long
+        // strings scroll right as they exceed the field width, but for
+        // 256 chars / typical metadata that rarely happens.
+        const std::string shown = m_metaModalBuf + "_";
+        DrawMicroText(r, shown,
+                      {fieldP.x + 8.0f,
+                       fieldP.y + (fieldS.y - 14.0f) * 0.5f},
+                      14.0f, kStatusText);
+
+        DrawMicroText(r,
+            "Free-form text -- the game parses it (e.g. "
+            "'to=room2,side=west' on doors).",
+            {p.x + 24.0f, p.y + 130.0f}, 12.0f, kStatusText);
+        DrawMicroText(r, "Enter: save    Esc: cancel    Backspace to edit",
+                      {p.x + 24.0f, p.y + panelH - 28.0f},
+                      12.0f, kStatusText);
+    }
+
     void DrawToolbar(Renderer2D& r) {
         r.DrawQuad({0.0f, 0.0f}, {kScreenW, kToolbarH}, kToolbarBg);
 
@@ -3878,6 +4004,13 @@ private:
     // hex chars updates m_addColor live.
     std::string m_addHex;
     int         m_addFocus = 0;            // 0 = label, 1 = hex
+
+    // Marker metadata modal. RMB on an existing marker in Object mode
+    // opens this for editing the marker's optional free-form data
+    // string (e.g. "to=room2,side=west" on door markers). Enter commits,
+    // Esc cancels.
+    int         m_metaModalIdx = -1;       // m_objects index; -1 = closed
+    std::string m_metaModalBuf;            // edit buffer
 
     // Brush size for single-value paint (Tile single-tile, Collision).
     // Always odd so the brush footprint is centred on the hover cell.

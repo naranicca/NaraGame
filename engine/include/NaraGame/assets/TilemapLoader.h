@@ -27,10 +27,16 @@ namespace Collision {
 // Object marker — a single character at a tile coordinate, written to the
 // .ntmap's optional `objects` section. Meaning is up to the game: brawl
 // reads `P` as the player spawn, `E` as an enemy spawn, etc.
+//
+// `data` is an optional free-form payload appended after `<sym> <x> <y>` in
+// the file. Games parse it themselves — zelda uses `to=room2,side=west` on
+// door markers to wire room transitions. Empty if the marker has no
+// trailing data.
 struct ObjectMarker {
-    char symbol = 0;
-    int  x = 0;
-    int  y = 0;
+    char        symbol = 0;
+    int         x = 0;
+    int         y = 0;
+    std::string data;
 };
 
 // Per-character metadata for the `objects` palette: human-readable label and
