@@ -280,6 +280,11 @@ public:
     void OnEnter() override {
         m_ctx->roomId    = m_roomId;
         m_ctx->entrySide = m_entrySide;
+        NARAGAME_INFO("zelda: enter room%d from %s",
+                      m_roomId,
+                      m_entrySide == CardinalDir::N ? "north" :
+                      m_entrySide == CardinalDir::E ? "east"  :
+                      m_entrySide == CardinalDir::S ? "south" : "west");
         LoadRoomAsset();
 
         m_camera = Camera2D(kScreenW, kScreenH);
@@ -329,6 +334,20 @@ public:
         if (Input::IsKeyPressed(Key::Escape)) {
             Manager().ChangeWith(m_ctx->makeTitle(), 0.3f);
             return;
+        }
+
+        // Debug teleport: number keys 1-4 jump straight to that room. Uses
+        // the same Manager().ChangeWith path the door triggers do, so the
+        // transition wiring stays exercised. Entry side is fixed to S so
+        // the player drops at whichever door faces south (or falls back to
+        // the @ marker on a fresh run).
+        const Key kRoomKeys[4] = {Key::Num1, Key::Num2, Key::Num3, Key::Num4};
+        for (int i = 0; i < 4; ++i) {
+            if (Input::IsKeyPressed(kRoomKeys[i])) {
+                Manager().ChangeWith(
+                    m_ctx->makeRoom(i + 1, CardinalDir::S), 0.25f);
+                return;
+            }
         }
 
         UpdatePlayer(dt);
@@ -689,6 +708,8 @@ private:
             }
             if (nextRoom <= 0) continue;
             const CardinalDir entry = ParseSide(side);
+            NARAGAME_INFO("zelda: door %c at (%d,%d) -> room%d enter from %s",
+                          m.symbol, m.x, m.y, nextRoom, side.c_str());
             Manager().ChangeWith(m_ctx->makeRoom(nextRoom, entry), 0.35f);
             return;
         }
