@@ -5,7 +5,8 @@
 # ASCII characters:
 #   .  grass (tile 0)
 #   #  stone wall (tile 1-47, blob47 variant)
-#   ~  water (tile 48-94, blob47 variant)
+#   ~  water (tile 48-94, blob47 variant; blocks movement)
+#   p  dirt path (tile 97-143, blob47 variant; walkable, purely visual)
 #   >  door floor (tile 95) + D marker (data from $doors)
 #   <  door floor + D marker
 #   ^  door floor + D marker
@@ -96,12 +97,12 @@ $room1 = @{
     layout = @(
         '####################'
         '#..................#'
+        '#....~~~~~~........#'
+        '#...~~~~~~~~.......#'
+        '#....~~~~~~........#'
         '#..................#'
-        '#........e.........#'
-        '#..................#'
-        '#..................#'
-        '#.@................>'
-        '#..................>'
+        '#.@.ppppppppppppppp>'
+        '#..pppppppppppppppp>'
         '#..................#'
         '#........e.........#'
         '#..................#'
@@ -116,17 +117,17 @@ $room2 = @{
     name = 'room2'
     layout = @(
         '#########**#########'
-        '#..................#'
-        '#..................#'
-        '#......e......e....#'
-        '#..................#'
-        '#..................#'
-        '<..................>'
-        '<..................>'
-        '#..................#'
-        '#..................#'
-        '#........v.........#'
-        '#########vv#########')
+        '#~~......pp........#'
+        '#~~~.....pp........#'
+        '#~~~.....pp........#'
+        '#~~......pp........#'
+        '#..e.....pp...e....#'
+        '<pppppppppppppppppp>'
+        '<pppppppppppppppppp>'
+        '#........pp........#'
+        '#........pp........#'
+        '#........pp........#'
+        '####################')
     doors = @{
         '9,0'   = 'to=room3,side=south'
         '10,0'  = 'to=room3,side=south'
@@ -134,9 +135,6 @@ $room2 = @{
         '0,7'   = 'to=room1,side=east'
         '19,6'  = 'to=room4,side=west'
         '19,7'  = 'to=room4,side=west'
-        '9,10'  = 'to=room1,side=north'
-        '9,11'  = 'to=room1,side=north'
-        '10,11' = 'to=room1,side=north'
     }
 }
 
@@ -150,15 +148,15 @@ $room3 = @{
     name = 'room3'
     layout = @(
         '####################'
+        '#~~~~~~~~~~~~......#'
+        '#~~~~~~~~~~~~..e...#'
+        '#~~~~~~~~~~~~......#'
+        '#~~~~~~~~~~~~......#'
         '#..................#'
-        '#......e....e......#'
-        '#..................#'
-        '#........k.........#'
-        '#..................#'
-        '#..................#'
-        '#..................#'
-        '#..................#'
-        '#..................#'
+        '#...ppppp...k......#'
+        '#...p...p..........#'
+        '#...p.e.p..........#'
+        '#...ppppp..........#'
         '#########^##########'
         '####################')
     doors = @{
@@ -170,15 +168,15 @@ $room4 = @{
     name = 'room4'
     layout = @(
         '####################'
-        '#..................#'
-        '#...~~~~~~~~~~.....#'
-        '#...~~~~~~~~~~.....#'
-        '#...~~~~~~~~~~.....#'
-        '<...~~~~~~~~~~.....#'
-        '<.e.~~~~~t~~~~..e..#'
-        '#.e.~~~~~~~~~~..e..#'
-        '#...~~~~~~~~~~.....#'
-        '#...~~~~~~~~~~.....#'
+        '#~~~~~~~~..........#'
+        '#~~~~~~~~..........#'
+        '#~~~~..............#'
+        '#~~................#'
+        '<...e.pppppppppp...#'
+        '<.....p........p...#'
+        '#..e..p...t....p...#'
+        '#.....p........p...#'
+        '#.....pppppppppp...#'
         '#..................#'
         '####################')
     doors = @{
@@ -226,6 +224,13 @@ foreach ($room in $rooms) {
                     $mask = Compute-Mask $layout $x $y @('~')
                     $tile = Compute-VariantId 48 $mask $variantTable
                     $colByte = 2
+                }
+                'p' {
+                    # Dirt path connects to itself only (not grass) for the
+                    # mask -- so adjacent grass cells get the "edge" variants.
+                    $mask = Compute-Mask $layout $x $y @('p')
+                    $tile = Compute-VariantId 97 $mask $variantTable
+                    $colByte = 0
                 }
                 '>' { $tile = 95; $colByte = 0; $marker = 'D' }
                 '<' { $tile = 95; $colByte = 0; $marker = 'D' }
@@ -298,6 +303,7 @@ foreach ($room in $rooms) {
     [void]$sb.AppendLine("autotile")
     [void]$sb.AppendLine("1 47 blob47")
     [void]$sb.AppendLine("48 47 blob47")
+    [void]$sb.AppendLine("97 47 blob47")
 
     $dst = "$PSScriptRoot\$($room.name).ntmap"
     # Force UTF-8 without BOM -- the engine's stdlib reader doesn't strip BOMs.

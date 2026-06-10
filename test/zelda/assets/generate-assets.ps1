@@ -1,13 +1,13 @@
 # Procedurally generate tiles.png + characters.png for the zelda test game.
 # Re-run any time the visual style or tile budget changes; outputs are checked in.
 #
-# tiles.png layout (8 cols x 13 rows = 104 cells of 32x32 each, image 256x416):
+# tiles.png layout (8 cols x 18 rows = 144 cells of 32x32 each, image 256x576):
 #   id   0           : grass (floor)
 #   ids  1 ..  47    : stone wall (blob47, same canonical mask order as the editor)
 #   ids 48 ..  94    : water     (blob47)
 #   id  95           : door floor (brown with arch)
 #   id  96           : locked door (door + padlock motif)
-#   ids 97 .. 103    : unused (transparent)
+#   ids 97 .. 143    : dirt path (blob47)
 #
 # characters.png layout (5 cells of 32x32 = 160x32):
 #   id 0: player, 1: slime, 2: key, 3: heart, 4: treasure chest
@@ -94,7 +94,7 @@ function Draw-AutotileCell {
 # ---- tiles.png ----
 $tileW = 32
 $cols  = 8
-$rows  = 13
+$rows  = 18
 $W = $cols * $tileW
 $H = $rows * $tileW
 
@@ -173,6 +173,20 @@ Fill-Rect $g (New-Color 255  80  60 20) ($x + 14) ($y + 18) 4 3
 Fill-Rect $g (New-Color 255 200 200 200) ($x + 13) ($y + 10) 6 2
 Fill-Rect $g (New-Color 255 200 200 200) ($x + 13) ($y + 12) 2 2
 Fill-Rect $g (New-Color 255 200 200 200) ($x + 17) ($y + 12) 2 2
+
+# Tiles 97-143: dirt path. Warm tan body with darker brown edge bars so the
+# path reads as a sunken trail across grass; subtle accent at inner corners
+# keeps the autotile transitions clean.
+$dirtBody   = New-Color 255 178 134  86
+$dirtEdge   = New-Color 255  92  60  34
+$dirtAccent = New-Color 255 138  98  56
+for ($i = 0; $i -lt $variants.Count; $i++) {
+    $id  = 97 + $i
+    $col = $id % $cols
+    $row = [int][math]::Floor($id / $cols)
+    Draw-AutotileCell $g ($col * $tileW) ($row * $tileW) $tileW $variants[$i] `
+        $dirtBody $dirtEdge $dirtAccent
+}
 
 $g.Dispose()
 $dst = "$PSScriptRoot\tiles.png"
