@@ -129,8 +129,14 @@ constexpr LinkRect kLinkWalk[4][kLinkWalkFrames] = {
     },
 };
 
-constexpr float kPlayerSpriteW = 30.0f;  // world units; sprite quad width
-constexpr float kPlayerSpriteH = 38.0f;  // taller than wide -- matches Link
+// Quarter-view anchor: sprite is one tile tall and sits with its bottom
+// flush against the collision circle's bottom, so the feet line up with
+// what the player can actually push into. Because the sprite is taller
+// than the collision diameter (32 vs 22), the head still rises past the
+// tile top -- enough to read as perspective without floating off the
+// ground.
+constexpr float kPlayerSpriteH  = 32.0f;
+constexpr float kPlayerFeetDrop = 0.0f;
 constexpr float kWalkAnimFps   = 12.0f;
 
 enum class Facing : int { S = 0, W = 1, N = 2, E = 3 };
@@ -865,14 +871,14 @@ private:
             const TextureRegion sprite = TextureRegion::FromPixels(
                 m_ctx->linkTex.get(),
                 float(lr.x), float(lr.y), float(lr.w), float(lr.h));
-            // Preserve sprite aspect; anchor the bottom edge a couple of
-            // pixels below the collision center so the feet sit at the
-            // collision circle's lower edge.
+            // Quarter-view anchor: sprite bottom sits at the collision
+            // circle's bottom (feet on ground), so the head extends upward
+            // into the tile above -- not centered on the footprint.
             const float aspect = float(lr.w) / float(lr.h);
             const float h = kPlayerSpriteH;
             const float w = h * aspect;
-            r.DrawQuad({m_playerPos.x - w * 0.5f,
-                        m_playerPos.y - h * 0.5f + 2.0f},
+            const float bottomY = m_playerPos.y + kPlayerR + kPlayerFeetDrop;
+            r.DrawQuad({m_playerPos.x - w * 0.5f, bottomY - h},
                        {w, h}, sprite, tint);
         } else {
             r.DrawQuad({m_playerPos.x - kPlayerR, m_playerPos.y - kPlayerR},
