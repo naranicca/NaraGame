@@ -434,7 +434,8 @@ public:
         // World pass: tilemap + sprites at camera transform.
         r.Begin(m_camera.ViewProjection());
         if (m_asset.valid) {
-            m_asset.map.Draw(r, m_camera.VisibleBounds(), Color::White());
+            DrawAllLayers(m_asset, r, m_camera.VisibleBounds(),
+                          Color::White());
         }
         DrawObjectMarkersInWorld(r);
         DrawSlimes(r);

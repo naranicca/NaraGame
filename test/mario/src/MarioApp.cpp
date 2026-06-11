@@ -464,6 +464,11 @@ public:
 
         r.Begin(m_camera.ViewProjection());
         m_map.Draw(r, m_camera.VisibleBounds());
+        // Multi-layer maps land their base tiles in m_map (moved out
+        // of the asset above); any extraLayers stay in the asset and
+        // render directly from there.
+        for (const auto& layer : m_levelAsset.extraLayers)
+            layer.Draw(r, m_camera.VisibleBounds());
         for (const Goomba& g : m_goombas) {
             if (!g.alive)
                 continue;

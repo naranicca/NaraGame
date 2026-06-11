@@ -2358,16 +2358,26 @@ private:
             const SpriteSheet& sheet = m_bgAsset.map.Tileset();
             const int bw = m_bgAsset.map.Width();
             const int bh = m_bgAsset.map.Height();
-            for (int ty = 0; ty < bh; ++ty) {
-                for (int tx = 0; tx < bw; ++tx) {
-                    const int id = m_bgAsset.map.GetTile(tx, ty);
-                    if (id < 0) continue;
-                    const TextureRegion region = sheet.At(id);
-                    if (!region.Valid()) continue;
-                    const Vec2 p = W2S({float(tx), float(ty)}, m_camOrigin);
-                    r.DrawQuad(p, {kTileW, kTileH}, region);
+            // The arena uses a screen-space W2S transform that Tilemap::Draw
+            // can't reproduce, so we keep the manual loop and just stack
+            // every layer through it. Lower layers render first so the
+            // extra layers can overlay -- empty cells (-1) skip silently.
+            auto drawLayer = [&](const Tilemap& layer) {
+                for (int ty = 0; ty < bh; ++ty) {
+                    for (int tx = 0; tx < bw; ++tx) {
+                        const int id = layer.GetTile(tx, ty);
+                        if (id < 0) continue;
+                        const TextureRegion region = sheet.At(id);
+                        if (!region.Valid()) continue;
+                        const Vec2 p = W2S({float(tx), float(ty)},
+                                           m_camOrigin);
+                        r.DrawQuad(p, {kTileW, kTileH}, region);
+                    }
                 }
-            }
+            };
+            drawLayer(m_bgAsset.map);
+            for (const auto& layer : m_bgAsset.extraLayers)
+                drawLayer(layer);
         }
         // Checker floor + water. Walls are drawn later in the sorted pass.
         // Water tiles get a flat blue + a thin white rim where they touch
