@@ -698,7 +698,8 @@ protected:
         // Shift+digit is reserved for the layer-visibility toggles and
         // Ctrl+digit for the zoom presets; skip the palette quick-pick
         // when either modifier is held so a chord doesn't double-fire.
-        if (m_map.Width() > 0 && !shiftHeld && !ctrl) {
+        const bool altHeld = Input::IsKeyDown(Key::LeftAlt);
+        if (m_map.Width() > 0 && !shiftHeld && !ctrl && !altHeld) {
             const Key digits[9] = {
                 Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
                 Key::Num6, Key::Num7, Key::Num8, Key::Num9,
@@ -714,6 +715,25 @@ protected:
                         m_selectedSym = m_symbols[i].symbol;
                 }
             }
+        }
+
+        // Alt + digit: switch active tile layer (1 = base, 2..9 = extra
+        // layers). Alt + L: add a new empty layer above the current one.
+        // Alt + Delete: drop the active layer (base map can't be removed).
+        // These are only meaningful in Tile mode; the alt picker on the
+        // canvas runs from mouse handling so it doesn't conflict.
+        if (altHeld && m_map.Width() > 0) {
+            const Key digits[9] = {
+                Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
+                Key::Num6, Key::Num7, Key::Num8, Key::Num9,
+            };
+            for (int i = 0; i < 9; ++i) {
+                if (Input::IsKeyPressed(digits[i]) && i < LayerCount()) {
+                    m_activeLayer = i;
+                }
+            }
+            if (Input::IsKeyPressed(Key::L)) AddLayer();
+            if (Input::IsKeyPressed(Key::Backspace)) RemoveActiveLayer();
         }
         if (ctrl && Input::IsKeyPressed(Key::C)) CopySelection();
         if (ctrl && Input::IsKeyPressed(Key::X)) {
@@ -1083,7 +1103,7 @@ protected:
             if (alt) {
                 if (inMap && Input::IsMousePressed(MouseButton::Left)) {
                     if (m_mode == EditLayer::Tile) {
-                        const int id = m_map.GetTile(tx, ty);
+                        const int id = ActiveTilemap().GetTile(tx, ty);
                         if (id >= 0) SetStampSingle(id);
                     } else if (!m_collision.empty()) {
                         m_selectedCol = int(
@@ -1352,20 +1372,27 @@ private:
     // freely mix both layers, but in practice a drag never switches modes
     // mid-way -- this just keeps the undo stack honest if it ever does.
     enum class EditLayer : int { Tile = 0, Collision = 1, Object = 2 };
-    struct StrokeEdit { EditLayer layer; int x, y, oldId, newId; };
+    // tileLayer is which Tile layer the edit landed on (0 = m_map, 1..N =
+    // m_extraLayers[i-1]). Only meaningful when `layer == Tile`; we
+    // record 0 for collision/object edits since those grids aren't
+    // duplicated per tile layer.
+    struct StrokeEdit { EditLayer layer; int tileLayer; int x, y, oldId, newId; };
 
     // Resize is too coarse to express as cell edits -- one operation can
     // change the dimensions and shift every cell. Stash whole-grid before /
     // after snapshots in a Stroke and undo by restoring the old shape.
+    // oldLayerTiles[0] is the base map, [1..N] are the extra layers in
+    // index order. Multi-layer maps need every layer captured so that
+    // undoing a resize restores not just the base but every overlay too.
     struct ResizeSnapshot {
-        int                       oldW = 0, oldH = 0;
-        std::vector<int>          oldTiles;
-        std::vector<uint8_t>      oldCol;
-        std::vector<ObjectMarker> oldObjects;
-        int                       newW = 0, newH = 0;
-        std::vector<int>          newTiles;
-        std::vector<uint8_t>      newCol;
-        std::vector<ObjectMarker> newObjects;
+        int                            oldW = 0, oldH = 0;
+        std::vector<std::vector<int>>  oldLayerTiles;
+        std::vector<uint8_t>           oldCol;
+        std::vector<ObjectMarker>      oldObjects;
+        int                            newW = 0, newH = 0;
+        std::vector<std::vector<int>>  newLayerTiles;
+        std::vector<uint8_t>           newCol;
+        std::vector<ObjectMarker>      newObjects;
     };
     struct Stroke {
         std::vector<StrokeEdit>         edits;
@@ -1456,7 +1483,7 @@ private:
     bool AutoTileIsSame(int x, int y) const {
         if (x < 0 || y < 0 ||
             x >= m_map.Width() || y >= m_map.Height()) return true;
-        const int id = m_map.GetTile(x, y);
+        const int id = ActiveTilemap().GetTile(x, y);
         return id >= m_autoTileBase &&
                id <  m_autoTileBase + kAutoTileCount;
     }
@@ -1493,7 +1520,7 @@ private:
     void AutoTileRefreshCell(int x, int y, bool forcePlace) {
         if (x < 0 || y < 0 ||
             x >= m_map.Width() || y >= m_map.Height()) return;
-        const int existing = m_map.GetTile(x, y);
+        const int existing = ActiveTilemap().GetTile(x, y);
         const bool belongs = existing >= m_autoTileBase &&
                              existing <  m_autoTileBase + kAutoTileCount;
         if (!forcePlace && !belongs) return;
@@ -1516,7 +1543,7 @@ private:
     }
 
     void AutoTileEraseAt(int tx, int ty) {
-        if (m_map.GetTile(tx, ty) != -1) PaintCell(tx, ty, -1);
+        if (ActiveTilemap().GetTile(tx, ty) != -1) PaintCell(tx, ty, -1);
         for (int dy = -1; dy <= 1; ++dy)
             for (int dx = -1; dx <= 1; ++dx)
                 if (dx || dy)
@@ -1542,10 +1569,11 @@ private:
     void PaintCell(int x, int y, int newId) {
         if (m_map.Width() <= 0) return;
         if (m_mode == EditLayer::Tile) {
-            const int oldId = m_map.GetTile(x, y);
+            Tilemap& t = ActiveTilemap();
+            const int oldId = t.GetTile(x, y);
             if (oldId == newId) return;
             RecordEdit(EditLayer::Tile, x, y, oldId, newId);
-            m_map.SetTile(x, y, newId);
+            t.SetTile(x, y, newId);
         } else if (m_mode == EditLayer::Collision) {
             EnsureCollisionGrid();
             const size_t idx = size_t(y) * m_map.Width() + size_t(x);
@@ -1589,16 +1617,88 @@ private:
 
     void RecordEdit(EditLayer layer, int x, int y, int oldId, int newId) {
         BeginStroke();
+        // Same cell on a different tile layer is a distinct edit, so fold
+        // tileLayer into the dedup key. Layer 0 keeps the same key as the
+        // pre-multilayer build, so existing single-layer maps' strokes
+        // hash identically to before this change.
+        const int tlayer = (layer == EditLayer::Tile) ? m_activeLayer : 0;
         const uint64_t key = (uint64_t(int(layer)) << 62) |
+                             (uint64_t(tlayer) << 56) |
                              (uint64_t(uint32_t(y)) << 32) | uint32_t(x);
         if (m_currentTouched.insert(key).second) {
-            m_currentStroke->edits.push_back({layer, x, y, oldId, newId});
+            m_currentStroke->edits.push_back(
+                {layer, tlayer, x, y, oldId, newId});
         }
     }
 
     void EnsureCollisionGrid() {
         const size_t need = size_t(m_map.Width()) * size_t(m_map.Height());
         if (m_collision.size() != need) m_collision.assign(need, 0);
+    }
+
+    // Active tile layer accessor. m_activeLayer == 0 means the base map
+    // (m_map); any positive value indexes into m_extraLayers. Clamp here
+    // rather than at every call site so a stale m_activeLayer after layer
+    // removal can't punch through bounds checks downstream.
+    Tilemap& ActiveTilemap() {
+        if (m_activeLayer <= 0 || m_extraLayers.empty()) {
+            m_activeLayer = 0;
+            return m_map;
+        }
+        if (m_activeLayer > int(m_extraLayers.size()))
+            m_activeLayer = int(m_extraLayers.size());
+        return m_extraLayers[size_t(m_activeLayer - 1)];
+    }
+    const Tilemap& ActiveTilemap() const {
+        if (m_activeLayer <= 0 ||
+            m_activeLayer > int(m_extraLayers.size())) return m_map;
+        return m_extraLayers[size_t(m_activeLayer - 1)];
+    }
+    int LayerCount() const { return 1 + int(m_extraLayers.size()); }
+
+    // Add an empty layer ABOVE the currently active one and switch to it.
+    // New layers fill with -1 so the layer below shows through until
+    // anything is painted on. Capped at 9 so the Alt+digit shortcut
+    // can always reach every layer.
+    void AddLayer() {
+        if (m_map.Width() <= 0) return;
+        if (LayerCount() >= 9) {
+            NARAGAME_INFO("editor: max 9 tile layers");
+            return;
+        }
+        Tilemap fresh(m_map.Width(), m_map.Height(),
+                      float(m_tileW), float(m_tileH));
+        fresh.SetTileset(m_sheet);
+        fresh.Fill(-1);
+        // Insert immediately above the active one so a Alt+L next to layer 1
+        // gives layer 2 (not "last"); same intuition as Photoshop.
+        const size_t insertAt = size_t(m_activeLayer);
+        m_extraLayers.insert(m_extraLayers.begin() + insertAt,
+                             std::move(fresh));
+        m_activeLayer = int(insertAt + 1);
+        m_dirty = true;
+        ClearHistory();   // undo across layer add/remove isn't modeled yet
+        NARAGAME_INFO("editor: added layer %d/%d", m_activeLayer + 1,
+                      LayerCount());
+    }
+
+    // Remove the active layer. The base map (layer 0) can't be removed --
+    // the editor always keeps at least one layer so size + tileset stay
+    // anchored. Shifts the active index down so it lands on a valid layer.
+    void RemoveActiveLayer() {
+        if (m_activeLayer == 0) {
+            NARAGAME_INFO("editor: can't remove the base layer");
+            return;
+        }
+        const size_t idx = size_t(m_activeLayer - 1);
+        if (idx >= m_extraLayers.size()) return;
+        m_extraLayers.erase(m_extraLayers.begin() + idx);
+        if (m_activeLayer > LayerCount() - 1)
+            m_activeLayer = LayerCount() - 1;
+        m_dirty = true;
+        ClearHistory();
+        NARAGAME_INFO("editor: removed layer; now %d/%d",
+                      m_activeLayer + 1, LayerCount());
     }
 
     void BeginStroke() {
@@ -1621,7 +1721,16 @@ private:
     void ApplyEdit(const StrokeEdit& e, bool undo) {
         const int v = undo ? e.oldId : e.newId;
         if (e.layer == EditLayer::Tile) {
-            m_map.SetTile(e.x, e.y, v);
+            // Route to whichever tile layer the edit originally ran on.
+            // The layer index is bounded at record time, but a resize
+            // that dropped layers can leave a stale index here -- so
+            // bounds-check before writing.
+            if (e.tileLayer == 0) {
+                m_map.SetTile(e.x, e.y, v);
+            } else if (e.tileLayer >= 1 &&
+                       size_t(e.tileLayer - 1) < m_extraLayers.size()) {
+                m_extraLayers[size_t(e.tileLayer - 1)].SetTile(e.x, e.y, v);
+            }
         } else if (e.layer == EditLayer::Collision) {
             EnsureCollisionGrid();
             m_collision[size_t(e.y) * m_map.Width() + size_t(e.x)] = uint8_t(v);
@@ -1633,17 +1742,28 @@ private:
     // Swap the whole map/collision out for the supplied snapshot. Used by
     // both DoResize (forward) and Undo/Redo (backward/forward); keeps the
     // SpriteSheet binding the editor already had so palette / drawing keep
-    // working without re-binding tileset state.
+    // working without re-binding tileset state. layerTiles[0] is the base
+    // map; any further entries become m_extraLayers in order.
     void ApplyResizeSnapshot(int w, int h,
-                             const std::vector<int>& tiles,
+                             const std::vector<std::vector<int>>& layerTiles,
                              const std::vector<uint8_t>& col,
                              const std::vector<ObjectMarker>& objs) {
-        Tilemap newMap(w, h, float(m_tileW), float(m_tileH));
-        newMap.SetTileset(m_sheet);
-        for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x)
-                newMap.SetTile(x, y, tiles[size_t(y) * size_t(w) + size_t(x)]);
-        m_map       = std::move(newMap);
+        auto build = [&](const std::vector<int>& src) {
+            Tilemap t(w, h, float(m_tileW), float(m_tileH));
+            t.SetTileset(m_sheet);
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                    t.SetTile(x, y,
+                              src[size_t(y) * size_t(w) + size_t(x)]);
+            return t;
+        };
+        if (layerTiles.empty()) return;
+        m_map = build(layerTiles[0]);
+        m_extraLayers.clear();
+        for (size_t i = 1; i < layerTiles.size(); ++i)
+            m_extraLayers.push_back(build(layerTiles[i]));
+        if (m_activeLayer >= int(layerTiles.size()))
+            m_activeLayer = int(layerTiles.size()) - 1;
         m_collision = col;
         m_objects   = objs;
     }
@@ -1654,7 +1774,7 @@ private:
         m_undoStack.pop_back();
         if (s.resize) {
             ApplyResizeSnapshot(s.resize->oldW, s.resize->oldH,
-                                s.resize->oldTiles, s.resize->oldCol,
+                                s.resize->oldLayerTiles, s.resize->oldCol,
                                 s.resize->oldObjects);
         } else {
             // Apply in reverse so overlapping edits inside one stroke wind
@@ -1674,7 +1794,7 @@ private:
         m_redoStack.pop_back();
         if (s.resize) {
             ApplyResizeSnapshot(s.resize->newW, s.resize->newH,
-                                s.resize->newTiles, s.resize->newCol,
+                                s.resize->newLayerTiles, s.resize->newCol,
                                 s.resize->newObjects);
         } else {
             for (auto& e : s.edits) {
@@ -1713,7 +1833,7 @@ private:
             for (int xx = 0; xx < w; ++xx) {
                 int v = 0;
                 if (m_mode == EditLayer::Tile) {
-                    v = m_map.GetTile(m_selX0 + xx, m_selY0 + yy);
+                    v = ActiveTilemap().GetTile(m_selX0 + xx, m_selY0 + yy);
                 } else {
                     EnsureCollisionGrid();
                     v = int(m_collision[size_t(m_selY0 + yy) * m_map.Width()
@@ -1842,11 +1962,21 @@ private:
         if (newW < 1 || newH < 1) return;
 
         const bool hasCol = (m_collision.size() == size_t(W) * size_t(H));
-        std::vector<int>     oldTiles(size_t(W) * size_t(H), -1);
+        // Snapshot every tile layer's cells at the OLD dimensions. Indexed
+        // by layer index (0 = base), then row-major within the grid. The
+        // resize remaps each layer independently so an overlay shifted off
+        // a shrunk edge gets dropped just like a marker would.
+        std::vector<std::vector<int>> oldLayerTiles(
+            size_t(LayerCount()), std::vector<int>(size_t(W) * size_t(H), -1));
+        for (int li = 0; li < LayerCount(); ++li) {
+            const Tilemap& src = (li == 0) ? m_map
+                                           : m_extraLayers[size_t(li - 1)];
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x)
+                    oldLayerTiles[size_t(li)][size_t(y) * W + x] =
+                        src.GetTile(x, y);
+        }
         std::vector<uint8_t> oldCol;
-        for (int y = 0; y < H; ++y)
-            for (int x = 0; x < W; ++x)
-                oldTiles[size_t(y) * W + x] = m_map.GetTile(x, y);
         if (hasCol) oldCol = m_collision;
 
         // src(x, y) — index from the OLD grid that the NEW cell (x, y) takes
@@ -1862,7 +1992,9 @@ private:
             }
         };
 
-        std::vector<int>     newTiles(size_t(newW) * size_t(newH), -1);
+        std::vector<std::vector<int>> newLayerTiles(
+            oldLayerTiles.size(),
+            std::vector<int>(size_t(newW) * size_t(newH), -1));
         std::vector<uint8_t> newCol;
         if (hasCol) newCol.assign(size_t(newW) * size_t(newH), 0);
         for (int y = 0; y < newH; ++y) {
@@ -1870,7 +2002,10 @@ private:
                 int sx, sy;
                 src(x, y, sx, sy);
                 if (sx >= 0 && sy >= 0 && sx < W && sy < H) {
-                    newTiles[size_t(y) * newW + x] = oldTiles[size_t(sy) * W + sx];
+                    for (size_t li = 0; li < oldLayerTiles.size(); ++li) {
+                        newLayerTiles[li][size_t(y) * newW + x] =
+                            oldLayerTiles[li][size_t(sy) * W + sx];
+                    }
                     if (hasCol)
                         newCol[size_t(y) * newW + x] = oldCol[size_t(sy) * W + sx];
                 }
@@ -1902,14 +2037,14 @@ private:
         Stroke s;
         s.resize = std::make_unique<ResizeSnapshot>();
         s.resize->oldW = W;     s.resize->oldH = H;
-        s.resize->oldTiles   = std::move(oldTiles);
-        s.resize->oldCol     = std::move(oldCol);
-        s.resize->oldObjects = std::move(oldObjects);
+        s.resize->oldLayerTiles = std::move(oldLayerTiles);
+        s.resize->oldCol        = std::move(oldCol);
+        s.resize->oldObjects    = std::move(oldObjects);
         s.resize->newW = newW;  s.resize->newH = newH;
-        s.resize->newTiles   = newTiles;
-        s.resize->newCol     = newCol;
-        s.resize->newObjects = newObjects;
-        ApplyResizeSnapshot(newW, newH, newTiles, newCol, newObjects);
+        s.resize->newLayerTiles = newLayerTiles;
+        s.resize->newCol        = newCol;
+        s.resize->newObjects    = newObjects;
+        ApplyResizeSnapshot(newW, newH, newLayerTiles, newCol, newObjects);
         m_undoStack.push_back(std::move(s));
         if (m_undoStack.size() > kUndoLimit) m_undoStack.pop_front();
         m_redoStack.clear();
@@ -1927,7 +2062,7 @@ private:
         // Read seed from the active layer; bail if no change would happen.
         int seedId = 0;
         if (m_mode == EditLayer::Tile) {
-            seedId = m_map.GetTile(sx, sy);
+            seedId = ActiveTilemap().GetTile(sx, sy);
         } else {
             EnsureCollisionGrid();
             seedId = int(m_collision[size_t(sy) * m_map.Width() + size_t(sx)]);
@@ -1949,7 +2084,7 @@ private:
             // but keeps the invariant honest if PaintCell is ever extended).
             int cur = 0;
             if (m_mode == EditLayer::Tile)
-                cur = m_map.GetTile(x, y);
+                cur = ActiveTilemap().GetTile(x, y);
             else
                 cur = int(m_collision[size_t(y) * W + size_t(x)]);
             if (cur != seedId) continue;
@@ -2128,6 +2263,7 @@ private:
         m_sheet = SpriteSheet(m_tilesetTex.get(),
                               m_tileW, m_tileH, 0, 0);
         m_map.SetTileset(m_sheet);
+        for (auto& layer : m_extraLayers) layer.SetTileset(m_sheet);
         NARAGAME_INFO("editor: tileset hot-reloaded '%s'",
                       m_currentTilesetAbsPath.c_str());
     }
@@ -2145,6 +2281,8 @@ private:
         }
         m_tilesetTex = std::move(asset.texture);
         m_map        = std::move(asset.map);
+        m_extraLayers = std::move(asset.extraLayers); // empty for legacy maps
+        m_activeLayer = 0;
         m_collision  = std::move(asset.collision);   // empty if none in file
         m_objects    = std::move(asset.objects);     // empty if none in file
         // A map that authored its own `symbols` section wins over the editor
@@ -2160,6 +2298,7 @@ private:
         m_tileH = asset.tileHeight;
         SpriteSheet sheet(m_tilesetTex.get(), m_tileW, m_tileH, 0, 0);
         m_map.SetTileset(sheet);
+        for (auto& layer : m_extraLayers) layer.SetTileset(sheet);
         m_sheet = sheet;
         m_currentTilesetPath = asset.tilesetPath;
         m_currentTilesetAbsPath = ResolveAgainst(path, asset.tilesetPath);
@@ -2191,6 +2330,8 @@ private:
         m_map = Tilemap(mapW, mapH, float(tileW), float(tileH));
         m_map.SetTileset(m_sheet);
         m_map.Fill(-1);
+        m_extraLayers.clear();
+        m_activeLayer = 0;
         m_collision.clear();
         m_objects.clear();
         m_symbols = DefaultObjectSymbols();
@@ -2227,7 +2368,8 @@ private:
                                   m_tileW, m_tileH, 0, 0,
                                   m_collision.size() == need ? m_collision
                                                              : emptyCol,
-                                  m_objects, m_symbols, m_autotiles);
+                                  m_objects, m_symbols, m_autotiles,
+                                  m_extraLayers);
         if (ok) {
             m_filePath = out;
             m_dirty = false;
@@ -2252,7 +2394,8 @@ private:
                                   m_tileW, m_tileH, 0, 0,
                                   m_collision.size() == need ? m_collision
                                                              : emptyCol,
-                                  m_objects, m_symbols, m_autotiles);
+                                  m_objects, m_symbols, m_autotiles,
+                                  m_extraLayers);
         if (ok)
             NARAGAME_INFO("editor: backup '%s'", bak.c_str());
         else
@@ -2449,18 +2592,35 @@ private:
 
         // Draw tiles. We submit them as plain DrawQuad calls so we control
         // the per-tile scale (Tilemap::Draw bakes its own world transform
-        // and can't do per-tile zoom here).
-        for (int ty = 0; ty < m_map.Height(); ++ty) {
-            for (int tx = 0; tx < m_map.Width(); ++tx) {
-                const int id = m_map.GetTile(tx, ty);
-                if (id < 0) continue;
-                const TextureRegion region = m_sheet.At(id);
-                if (!region.Valid()) continue;
-                const Vec2 p = WorldToScreen(
-                    {float(tx * m_tileW), float(ty * m_tileH)}, origin);
-                r.DrawQuad(p, {float(m_tileW) * m_zoom,
-                                float(m_tileH) * m_zoom}, region);
+        // and can't do per-tile zoom here). Layers stack bottom-up; the
+        // active layer renders at full opacity, the others at 0.45 so
+        // the user can still see context but knows which one paint hits.
+        auto drawLayer = [&](const Tilemap& layer, bool isActive) {
+            const Color tint = isActive
+                ? Color::White()
+                : Color(1.0f, 1.0f, 1.0f, 0.45f);
+            for (int ty = 0; ty < layer.Height(); ++ty) {
+                for (int tx = 0; tx < layer.Width(); ++tx) {
+                    const int id = layer.GetTile(tx, ty);
+                    if (id < 0) continue;
+                    const TextureRegion region = m_sheet.At(id);
+                    if (!region.Valid()) continue;
+                    const Vec2 p = WorldToScreen(
+                        {float(tx * m_tileW), float(ty * m_tileH)}, origin);
+                    r.DrawQuad(p, {float(m_tileW) * m_zoom,
+                                    float(m_tileH) * m_zoom}, region, tint);
+                }
             }
+        };
+        // Only dim non-active layers when the user is editing tiles --
+        // in collision / object modes the tile background is purely
+        // reference and full opacity reads better.
+        const bool dimInactive = (m_mode == EditLayer::Tile) &&
+                                 LayerCount() > 1;
+        drawLayer(m_map, !dimInactive || m_activeLayer == 0);
+        for (int i = 0; i < int(m_extraLayers.size()); ++i) {
+            drawLayer(m_extraLayers[size_t(i)],
+                      !dimInactive || m_activeLayer == i + 1);
         }
 
         // Collision overlay. Visible when its layer is active, or when
@@ -2793,11 +2953,16 @@ private:
                       m_hoverTx, m_hoverTy);
         lines.emplace_back(buf);
 
-        const int tile = m_map.GetTile(m_hoverTx, m_hoverTy);
+        const int tile = ActiveTilemap().GetTile(m_hoverTx, m_hoverTy);
         std::snprintf(buf, sizeof(buf), "Tile: %s",
                       tile >= 0 ? std::to_string(tile).c_str()
                                 : "(empty)");
         lines.emplace_back(buf);
+        if (LayerCount() > 1) {
+            std::snprintf(buf, sizeof(buf), "Layer: %d/%d",
+                          m_activeLayer + 1, LayerCount());
+            lines.emplace_back(buf);
+        }
 
         if (!m_collision.empty()) {
             const size_t idx = size_t(m_hoverTy) *
@@ -2885,19 +3050,24 @@ private:
         // Tile thumbnails. Cells with -1 stay as the background dark.
         // Use the same SpriteSheet regions so tile colour matches the
         // canvas at a glance -- swap a brick tile and the minimap
-        // updates the same frame.
+        // updates the same frame. Stack every layer so the minimap
+        // reflects the composited canvas, not just the base.
         const float c = g.cellSize;
-        for (int ty = 0; ty < m_map.Height(); ++ty) {
-            for (int tx = 0; tx < m_map.Width(); ++tx) {
-                const int id = m_map.GetTile(tx, ty);
-                if (id < 0) continue;
-                const TextureRegion region = m_sheet.At(id);
-                if (!region.Valid()) continue;
-                r.DrawQuad({g.origin.x + float(tx) * c,
-                            g.origin.y + float(ty) * c},
-                           {c, c}, region);
+        auto drawMini = [&](const Tilemap& layer) {
+            for (int ty = 0; ty < layer.Height(); ++ty) {
+                for (int tx = 0; tx < layer.Width(); ++tx) {
+                    const int id = layer.GetTile(tx, ty);
+                    if (id < 0) continue;
+                    const TextureRegion region = m_sheet.At(id);
+                    if (!region.Valid()) continue;
+                    r.DrawQuad({g.origin.x + float(tx) * c,
+                                g.origin.y + float(ty) * c},
+                               {c, c}, region);
+                }
             }
-        }
+        };
+        drawMini(m_map);
+        for (const auto& l : m_extraLayers) drawMini(l);
         // Viewport indicator. The visible rect [m_camera, +viewSize] in
         // world units maps to the minimap by dividing by (map_dim) and
         // scaling by minimap_size. Clamped + drawn as an outline so the
@@ -3451,6 +3621,11 @@ private:
             {"Ctrl+Shift+arrow", "shrink that edge"},
             {"Drag map edge",    "live resize"},
         };
+        static const Row kLayers[] = {
+            {"Alt+1..9",      "switch active tile layer"},
+            {"Alt+L",         "add new layer above active"},
+            {"Alt+Backspace", "remove active layer"},
+        };
         static const Section kCol1[] = {
             {"FILE",      kFile,   int(sizeof(kFile)   / sizeof(kFile[0]))},
             {"EDIT",      kEdit,   int(sizeof(kEdit)   / sizeof(kEdit[0]))},
@@ -3462,6 +3637,7 @@ private:
             {"VIEW",    kView,    int(sizeof(kView)    / sizeof(kView[0]))},
             {"PALETTE", kPalette, int(sizeof(kPalette) / sizeof(kPalette[0]))},
             {"RESIZE",  kResize,  int(sizeof(kResize)  / sizeof(kResize[0]))},
+            {"LAYERS",  kLayers,  int(sizeof(kLayers)  / sizeof(kLayers[0]))},
         };
 
         r.DrawQuad({0.0f, 0.0f}, {kScreenW, kScreenH},
@@ -3826,13 +4002,19 @@ private:
                           m_autoTileBase + kAutoTileCount - 1);
         else
             autoBuf[0] = '\0';
+        char layerBuf[24];
+        if (LayerCount() > 1)
+            std::snprintf(layerBuf, sizeof(layerBuf), "LAYER: %d/%d   ",
+                          m_activeLayer + 1, LayerCount());
+        else
+            layerBuf[0] = '\0';
         std::snprintf(buf, sizeof(buf),
                       "MAP: %dx%d   TILE: %dx%d   ZOOM: %.0f%%   "
-                      "MODE: %s   SEL: %s   %s%sHOVER: %d,%d   "
+                      "MODE: %s   %sSEL: %s   %s%sHOVER: %d,%d   "
                       "UNDO: %zu/%zu   %s   "
                       "F1 help",
                       m_map.Width(), m_map.Height(), m_tileW, m_tileH,
-                      m_zoom * 100.0f, modeName, selBuf, brushBuf,
+                      m_zoom * 100.0f, modeName, layerBuf, selBuf, brushBuf,
                       autoBuf,
                       hx, hy, m_undoStack.size(), m_redoStack.size(),
                       m_dirty ? "MODIFIED" : "SAVED");
@@ -3845,7 +4027,14 @@ private:
     EditorArgs                  m_args;
     std::unique_ptr<RHITexture> m_tilesetTex;
     SpriteSheet                 m_sheet;
+    // m_map is tile layer 0 (the base). m_extraLayers stacks on top in
+    // index order -- extraLayers[0] is layer 1, [1] is layer 2, etc.
+    // Tile painting and Alt+Cs/Vs/Xs go through whatever m_activeLayer
+    // points at, so the rest of the code can keep saying "this layer"
+    // via the ActiveTilemap() accessor.
     Tilemap                     m_map;
+    std::vector<Tilemap>        m_extraLayers;
+    int                         m_activeLayer = 0;   // 0 = base, 1..N = extraLayers[i-1]
     std::string                 m_filePath;
     std::string                 m_currentTilesetPath;
     int   m_tileW = kDefaultTileSz;
