@@ -86,6 +86,55 @@ constexpr float kHudPad   = 24.0f;
 constexpr float kHeartPx  = 40.0f;
 constexpr int   kStartHp  = 4;
 
+// Link sprite sheet -- link.png is a hand-laid sheet with non-uniform frame
+// rects, so we hard-code pixel boxes. Layout per the source artist:
+//   row 1: S-idle  x3   row 5: S-walk x10
+//   row 2: W-idle  x3   row 6: W-walk x10
+//   row 3: N-idle  x1   row 7: N-walk x10
+//   row 4: E-idle  x3   row 8: E-walk x10
+// Idle uses only the first frame per direction; walk cycles all 10.
+struct LinkRect { int x, y, w, h; };
+
+constexpr LinkRect kLinkIdle[4] = {  // indexed by Facing (S/W/N/E = 0/1/2/3)
+    {  5,   9, 58, 72},
+    { 11,  92, 55, 70},
+    {  9, 175, 57, 67},
+    {  9, 253, 54, 70},
+};
+constexpr int kLinkWalkFrames = 10;
+constexpr LinkRect kLinkWalk[4][kLinkWalkFrames] = {
+    {  // S-walk
+        {  9, 331, 57, 72}, { 83, 327, 57, 70}, {157, 327, 57, 76},
+        {232, 327, 57, 76}, {306, 327, 57, 76}, {380, 331, 57, 72},
+        {454, 327, 57, 70}, {529, 327, 57, 76}, {603, 327, 57, 76},
+        {677, 327, 57, 76},
+    },
+    {  // W-walk
+        {  2, 414, 73, 68}, { 80, 414, 60, 67}, {151, 411, 60, 63},
+        {228, 411, 61, 70}, {303, 411, 63, 70}, {374, 414, 73, 68},
+        {451, 414, 60, 68}, {525, 411, 58, 67}, {603, 411, 60, 67},
+        {674, 411, 64, 70},
+    },
+    {  // N-walk
+        {  9, 482, 57, 76}, { 83, 488, 57, 70}, {157, 482, 57, 76},
+        {232, 482, 57, 76}, {306, 482, 57, 76}, {380, 482, 57, 76},
+        {454, 482, 57, 76}, {529, 482, 57, 76}, {603, 485, 57, 76},
+        {677, 482, 57, 76},
+    },
+    {  // E-walk
+        {  2, 572, 64, 70}, { 83, 572, 60, 70}, {157, 572, 61, 70},
+        {228, 575, 61, 69}, {296, 575, 73, 69}, {377, 572, 63, 70},
+        {451, 572, 60, 70}, {532, 572, 60, 63}, {606, 575, 61, 67},
+        {668, 575, 73, 69},
+    },
+};
+
+constexpr float kPlayerSpriteW = 30.0f;  // world units; sprite quad width
+constexpr float kPlayerSpriteH = 38.0f;  // taller than wide -- matches Link
+constexpr float kWalkAnimFps   = 12.0f;
+
+enum class Facing : int { S = 0, W = 1, N = 2, E = 3 };
+
 // Tile-id constants matching generate-assets.ps1.
 constexpr int kTileGrass     = 0;
 constexpr int kTileDoorFloor = 95;
@@ -159,11 +208,13 @@ struct GameContext {
     bool freshRun  = true;    // true until the player enters their first room
                               // -- @ marker is honored only on a fresh run.
 
-    // Sprite sheet for player/slime/key/heart/treasure. The textures live
-    // on the application (so they survive scene swaps) and are referenced
-    // by RoomScene on draw.
+    // Sprite sheet for slime/key/heart/treasure. The textures live on the
+    // application (so they survive scene swaps) and are referenced by
+    // RoomScene on draw. Player uses linkTex instead (non-uniform frames
+    // so it bypasses SpriteSheet -- see kLinkIdle/kLinkWalk above).
     std::unique_ptr<RHITexture> charsTex;
     SpriteSheet                 charSheet;
+    std::unique_ptr<RHITexture> linkTex;
 };
 
 inline TextureRegion CharSprite(GameContext* ctx, int idx) {
@@ -583,6 +634,17 @@ private:
         if (len > 0.001f) { v.x /= len; v.y /= len; }
         if (std::abs(v.x) > 0.01f) m_playerFacingX = v.x < 0.0f ? -1.0f : 1.0f;
 
+        // 4-dir facing for the Link sprite. On diagonal input, vertical
+        // takes precedence -- normalized v.y is +/-0.707 on a diagonal,
+        // and the > 0.5 thresholds catch that ahead of the x checks below.
+        m_moving = (len > 0.001f);
+        if (v.y < -0.5f)      m_facing = Facing::N;
+        else if (v.y >  0.5f) m_facing = Facing::S;
+        else if (v.x < -0.5f) m_facing = Facing::W;
+        else if (v.x >  0.5f) m_facing = Facing::E;
+        if (m_moving) m_walkAnimT += dt;
+        else          m_walkAnimT  = 0.0f;
+
         const Vec2 delta{v.x * kPlayerSpeed * dt, v.y * kPlayerSpeed * dt};
         MoveWithCollision(m_playerPos, delta, kPlayerR);
 
@@ -795,12 +857,22 @@ private:
             const float k = (std::sin(m_playerHurt * 40.0f) + 1.0f) * 0.5f;
             tint = Color(1.0f, 1.0f - 0.6f * k, 1.0f - 0.6f * k, 1.0f);
         }
-        const TextureRegion sprite = CharSprite(m_ctx, 0);
-        const float w = kPlayerR * 2.0f + 4.0f;
-        const float h = kPlayerR * 2.0f + 6.0f;
-        if (sprite.Valid()) {
+        const int dir = static_cast<int>(m_facing);
+        const LinkRect lr = m_moving
+            ? kLinkWalk[dir][int(m_walkAnimT * kWalkAnimFps) % kLinkWalkFrames]
+            : kLinkIdle[dir];
+        if (m_ctx->linkTex) {
+            const TextureRegion sprite = TextureRegion::FromPixels(
+                m_ctx->linkTex.get(),
+                float(lr.x), float(lr.y), float(lr.w), float(lr.h));
+            // Preserve sprite aspect; anchor the bottom edge a couple of
+            // pixels below the collision center so the feet sit at the
+            // collision circle's lower edge.
+            const float aspect = float(lr.w) / float(lr.h);
+            const float h = kPlayerSpriteH;
+            const float w = h * aspect;
             r.DrawQuad({m_playerPos.x - w * 0.5f,
-                        m_playerPos.y - h * 0.5f},
+                        m_playerPos.y - h * 0.5f + 2.0f},
                        {w, h}, sprite, tint);
         } else {
             r.DrawQuad({m_playerPos.x - kPlayerR, m_playerPos.y - kPlayerR},
@@ -884,9 +956,12 @@ private:
 
     Camera2D m_camera;
 
-    Vec2  m_playerPos{0.0f, 0.0f};
-    float m_playerFacingX = 1.0f;
-    float m_playerHurt    = 0.0f;
+    Vec2   m_playerPos{0.0f, 0.0f};
+    float  m_playerFacingX = 1.0f;     // -1/+1; still used for sword swing
+    Facing m_facing        = Facing::S;
+    float  m_walkAnimT     = 0.0f;     // seconds; resets to 0 when idle
+    bool   m_moving        = false;
+    float  m_playerHurt    = 0.0f;
 
     float m_swingT      = 0.0f;
     float m_swingDirX   = 1.0f;
@@ -928,6 +1003,13 @@ protected:
         if (m_ctx.charsTex) {
             m_ctx.charSheet = SpriteSheet(m_ctx.charsTex.get(), 32, 32);
         }
+        m_ctx.linkTex = LoadTexture(GetDevice(),
+                                    assets + "/link.png",
+                                    TextureFilter::Point);
+        if (!m_ctx.linkTex) {
+            NARAGAME_WARN("zelda: missing %s/link.png -- player will be a quad",
+                          assets.c_str());
+        }
 
         m_ctx.makeTitle    = [this] { return std::make_unique<TitleScene>(&m_ctx); };
         m_ctx.makeRoom     = [this](int id, CardinalDir side) {
@@ -957,6 +1039,7 @@ protected:
 
     void OnStop() override {
         m_ctx.charsTex.reset();
+        m_ctx.linkTex.reset();
         m_scenes.Clear();
         m_renderer.Shutdown();
     }
