@@ -2,6 +2,7 @@
 
 #include "NaraGame/assets/TextureLoader.h"
 #include "NaraGame/core/Log.h"
+#include "NaraGame/renderer/Renderer2D.h"
 #include "NaraGame/renderer/rhi/RHIDevice.h"
 
 #include <cstdio>
@@ -45,6 +46,11 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
     std::string tilesetRel;
     int cellW = 0, cellH = 0, margin = 0, spacing = 0;
     int mapW = 0, mapH = 0;
+    // One `layer` directive starts a fresh tile vector; the previous one
+    // (if any) gets pushed into `allLayers`. After the file is fully
+    // parsed, allLayers[0] becomes asset.map and the rest go to
+    // asset.extraLayers.
+    std::vector<std::vector<int>> allLayers;
     std::vector<int>          tiles;
     std::vector<uint8_t>      collision;
     std::vector<ObjectMarker> objects;
@@ -171,6 +177,14 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             ls >> mapW >> mapH;
             sawSize = true;
         } else if (tok == "layer") {
+            // Starting a new layer: flush whatever ids the previous `layer`
+            // section accumulated, then start a fresh tile vector. The
+            // first `layer` directive fires this with an empty `tiles`, so
+            // we skip the push.
+            if (!tiles.empty()) {
+                allLayers.push_back(std::move(tiles));
+                tiles.clear();
+            }
             section = 1;
         } else if (tok == "collision") {
             section = 2;
@@ -183,6 +197,12 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
         }
     }
 
+    // Flush the final layer the parser was still filling.
+    if (!tiles.empty()) {
+        allLayers.push_back(std::move(tiles));
+        tiles.clear();
+    }
+
     if (!sawHeader || !sawTileset || !sawSize) {
         NARAGAME_ERROR("LoadNtmap: '%s' missing required header/tileset/size",
                        path.c_str());
@@ -192,11 +212,17 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
         NARAGAME_ERROR("LoadNtmap: '%s' has bad dimensions", path.c_str());
         return asset;
     }
-    const size_t expected = size_t(mapW) * size_t(mapH);
-    if (tiles.size() < expected) {
-        NARAGAME_ERROR("LoadNtmap: '%s' truncated layer (%zu/%zu)",
-                       path.c_str(), tiles.size(), expected);
+    if (allLayers.empty()) {
+        NARAGAME_ERROR("LoadNtmap: '%s' has no layer section", path.c_str());
         return asset;
+    }
+    const size_t expected = size_t(mapW) * size_t(mapH);
+    for (size_t i = 0; i < allLayers.size(); ++i) {
+        if (allLayers[i].size() < expected) {
+            NARAGAME_ERROR("LoadNtmap: '%s' truncated layer %zu (%zu/%zu)",
+                           path.c_str(), i, allLayers[i].size(), expected);
+            return asset;
+        }
     }
 
     const std::string absTileset = Resolve(DirOf(path), tilesetRel);
@@ -206,13 +232,20 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
         return asset;
     }
 
-    asset.map = Tilemap(mapW, mapH, float(cellW), float(cellH));
     SpriteSheet sheet(asset.texture.get(), cellW, cellH, margin, spacing);
-    asset.map.SetTileset(sheet);
-    for (int y = 0; y < mapH; ++y) {
-        for (int x = 0; x < mapW; ++x) {
-            asset.map.SetTile(x, y, tiles[size_t(y) * mapW + x]);
+    auto buildLayer = [&](const std::vector<int>& src) {
+        Tilemap t(mapW, mapH, float(cellW), float(cellH));
+        t.SetTileset(sheet);
+        for (int y = 0; y < mapH; ++y) {
+            for (int x = 0; x < mapW; ++x) {
+                t.SetTile(x, y, src[size_t(y) * mapW + x]);
+            }
         }
+        return t;
+    };
+    asset.map = buildLayer(allLayers[0]);
+    for (size_t i = 1; i < allLayers.size(); ++i) {
+        asset.extraLayers.push_back(buildLayer(allLayers[i]));
     }
     // Optional collision: only attached if the file provided exactly the
     // right number of codes. A short / oversized section is treated as an
@@ -247,7 +280,8 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                const std::vector<uint8_t>& collision,
                const std::vector<ObjectMarker>& objects,
                const std::vector<SymbolDef>& symbols,
-               const std::vector<AutoTileTerrain>& autotiles) {
+               const std::vector<AutoTileTerrain>& autotiles,
+               const std::vector<Tilemap>& extraLayers) {
     std::ofstream out(path, std::ios::binary);
     if (!out.is_open()) {
         NARAGAME_ERROR("SaveNtmap: cannot open '%s' for write", path.c_str());
@@ -257,13 +291,28 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
     out << "tileset " << tilesetPath << ' ' << tileWidth << ' ' << tileHeight
         << ' ' << margin << ' ' << spacing << '\n';
     out << "size " << map.Width() << ' ' << map.Height() << '\n';
-    out << "layer\n";
-    for (int y = 0; y < map.Height(); ++y) {
-        for (int x = 0; x < map.Width(); ++x) {
-            if (x) out << ' ';
-            out << map.GetTile(x, y);
+    auto writeLayer = [&](const Tilemap& t) {
+        out << "layer\n";
+        for (int y = 0; y < t.Height(); ++y) {
+            for (int x = 0; x < t.Width(); ++x) {
+                if (x) out << ' ';
+                out << t.GetTile(x, y);
+            }
+            out << '\n';
         }
-        out << '\n';
+    };
+    writeLayer(map);
+    // Extra layers only get written when their dimensions match the base
+    // map. A mismatch is an authoring bug we'd rather drop than persist:
+    // a partial overlay would round-trip with phantom -1 cells.
+    for (const auto& layer : extraLayers) {
+        if (layer.Width() != map.Width() || layer.Height() != map.Height()) {
+            NARAGAME_WARN(
+                "SaveNtmap: extra layer %dx%d != base %dx%d, skipped",
+                layer.Width(), layer.Height(), map.Width(), map.Height());
+            continue;
+        }
+        writeLayer(layer);
     }
     // Only emit the collision section when the caller supplied one whose
     // dimensions match the map (otherwise a partial grid would round-trip
@@ -312,6 +361,15 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
         }
     }
     return out.good();
+}
+
+void DrawAllLayers(const TilemapAsset& asset, Renderer2D& renderer,
+                   const Vec4& visible, const Color& tint) {
+    if (!asset.valid) return;
+    asset.map.Draw(renderer, visible, tint);
+    for (const auto& layer : asset.extraLayers) {
+        layer.Draw(renderer, visible, tint);
+    }
 }
 
 } // namespace NaraGame

@@ -71,12 +71,18 @@ struct AutoTileTerrain {
 // regions become dangling. Keep the asset alive for as long as the map is
 // drawn.
 //
+// `map` is the base (lowest-Z) tile layer. `extraLayers` are stacked above
+// it in order, each painted with the same tileset and tile size. Empty
+// cells (id = -1) in any layer let the layer below show through. Use the
+// DrawAllLayers helper below to render the full stack at once.
+//
 // `collision` is an optional same-dimensioned grid of Collision::* codes.
 // Empty if the .ntmap had no `collision` section; the loader does NOT
 // synthesize one (so a game can tell "all floor" from "absent" if it cares).
 struct TilemapAsset {
     std::unique_ptr<RHITexture> texture;
     Tilemap                     map;
+    std::vector<Tilemap>        extraLayers;   // additional tile layers on top
     std::vector<uint8_t>        collision;     // mapW * mapH; empty if absent
     std::vector<ObjectMarker>   objects;       // empty if absent
     std::vector<SymbolDef>      symbols;       // empty if absent
@@ -86,6 +92,14 @@ struct TilemapAsset {
     int                         tileHeight = 0;
     bool                        valid      = false;
 };
+
+// Draw the base map plus every extraLayer in bottom-to-top order so any
+// transparent (-1) cells in upper layers show what's beneath. Games that
+// don't care about multi-layer can keep calling asset.map.Draw() directly
+// and just skip the overlays.
+class Renderer2D;
+void DrawAllLayers(const TilemapAsset& asset, Renderer2D& renderer,
+                   const Vec4& visible, const Color& tint = Color::White());
 
 // .ntmap is a tiny plain-text format authored by the in-engine editor:
 //
@@ -118,6 +132,7 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                const std::vector<uint8_t>& collision = {},
                const std::vector<ObjectMarker>& objects = {},
                const std::vector<SymbolDef>& symbols = {},
-               const std::vector<AutoTileTerrain>& autotiles = {});
+               const std::vector<AutoTileTerrain>& autotiles = {},
+               const std::vector<Tilemap>& extraLayers = {});
 
 } // namespace NaraGame
