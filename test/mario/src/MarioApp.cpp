@@ -458,17 +458,64 @@ public:
         m_camera.CenterOn({p->position.x + p->size.x * 0.5f, p->position.y + p->size.y * 0.5f});
     }
 
+    // Build a Camera2D that views the world at (mainCam.position * factor).
+    // Used to drive per-layer parallax: factors < 1 render layers that
+    // appear far away (track the player slowly), factors > 1 render
+    // layers that appear close (track faster). Bounds are intentionally
+    // dropped on the parallax camera -- scaling the position by 1.5 can
+    // push past the level's right edge, and we'd rather see the empty
+    // edge than have the camera snap back.
+    Camera2D ParallaxCamera(float factor) const {
+        Camera2D c(m_camera.ViewportWidth(), m_camera.ViewportHeight());
+        c.SetZoom(m_camera.Zoom());
+        const Vec2& p = m_camera.Position();
+        c.SetPosition({p.x * factor, p.y * factor});
+        return c;
+    }
+
     void OnRender() override {
         Application::Get().GetDevice().Clear(Color(0.42f, 0.55f, 1.0f, 1.0f));
         Renderer2D& r = *m_ctx->renderer;
 
-        r.Begin(m_camera.ViewProjection());
-        m_map.Draw(r, m_camera.VisibleBounds());
-        // Multi-layer maps land their base tiles in m_map (moved out
-        // of the asset above); any extraLayers stay in the asset and
-        // render directly from there.
-        for (const auto& layer : m_levelAsset.extraLayers)
-            layer.Draw(r, m_camera.VisibleBounds());
+        // Build a per-layer list (base + extras) so we can sort by
+        // parallax factor: lowest parallax draws first (farthest away)
+        // and game objects slot in just before the first foreground
+        // layer. layerParallax always exists alongside the layers, so
+        // missing entries already defaulted to 1.0 at load time.
+        struct LayerRef { const Tilemap* tm; float parallax; };
+        std::vector<LayerRef> layers;
+        const auto& px = m_levelAsset.layerParallax;
+        layers.push_back({&m_map, px.empty() ? 1.0f : px[0]});
+        for (size_t i = 0; i < m_levelAsset.extraLayers.size(); ++i) {
+            layers.push_back({&m_levelAsset.extraLayers[i],
+                              (i + 1 < px.size()) ? px[i + 1] : 1.0f});
+        }
+        std::sort(layers.begin(), layers.end(),
+                  [](const LayerRef& a, const LayerRef& b) {
+                      return a.parallax < b.parallax;
+                  });
+        // Game objects (player, goombas, etc.) live on the gameplay
+        // plane and render with parallax 1.0. They go in front of every
+        // layer with parallax <= 1.0 and behind any FG (parallax > 1.0)
+        // layer -- that's "just before the first FG layer", or after
+        // every layer if the map has none.
+        size_t fgStartIdx = layers.size();
+        for (size_t i = 0; i < layers.size(); ++i) {
+            if (layers[i].parallax > 1.0f) { fgStartIdx = i; break; }
+        }
+        const Camera2D playCam = ParallaxCamera(1.0f);
+        auto drawLayer = [&](const LayerRef& L) {
+            const Camera2D cam = ParallaxCamera(L.parallax);
+            r.Begin(cam.ViewProjection());
+            L.tm->Draw(r, cam.VisibleBounds());
+            r.End();
+        };
+        for (size_t i = 0; i < fgStartIdx; ++i) drawLayer(layers[i]);
+
+        // Game objects render with the gameplay camera (parallax 1.0).
+        // Everything between r.Begin and the matching r.End below sits
+        // on the play plane.
+        r.Begin(playCam.ViewProjection());
         for (const Goomba& g : m_goombas) {
             if (!g.alive)
                 continue;
@@ -585,6 +632,11 @@ public:
         }
 
         r.End();
+
+        // Foreground layers (parallax > 1.0) draw last so they appear in
+        // front of every game object. The layer list and fgStartIdx were
+        // computed at the top of OnRender alongside the BG pass.
+        for (size_t i = fgStartIdx; i < layers.size(); ++i) drawLayer(layers[i]);
 
         r.Begin(Renderer2D::ScreenCamera(m_ctx->screenW, m_ctx->screenH));
         r.DrawText(*m_ctx->font, "SCORE " + std::to_string(m_ctx->score), {16.0f, 14.0f},

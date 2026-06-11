@@ -83,6 +83,12 @@ struct TilemapAsset {
     std::unique_ptr<RHITexture> texture;
     Tilemap                     map;
     std::vector<Tilemap>        extraLayers;   // additional tile layers on top
+    // One factor per layer (layerParallax[0] = base map, [1..N] = extra
+    // layers). Read by parallax-aware renderers to scale the camera
+    // position per layer (e.g., 0.3 = slow far background, 1.0 = normal,
+    // 1.5 = fast foreground). Always sized to 1+extraLayers.size() after
+    // a successful load; missing entries in the file default to 1.0.
+    std::vector<float>          layerParallax;
     std::vector<uint8_t>        collision;     // mapW * mapH; empty if absent
     std::vector<ObjectMarker>   objects;       // empty if absent
     std::vector<SymbolDef>      symbols;       // empty if absent
@@ -133,6 +139,7 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                const std::vector<ObjectMarker>& objects = {},
                const std::vector<SymbolDef>& symbols = {},
                const std::vector<AutoTileTerrain>& autotiles = {},
-               const std::vector<Tilemap>& extraLayers = {});
+               const std::vector<Tilemap>& extraLayers = {},
+               const std::vector<float>& layerParallax = {});
 
 } // namespace NaraGame

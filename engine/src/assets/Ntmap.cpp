@@ -63,8 +63,10 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
     // 0 = none, 1 = layer (tile ids), 2 = collision (uint8 codes),
     // 3 = objects (symbol + x + y per line),
     // 4 = symbols (symbol + hex-rgb + label words per line),
-    // 5 = autotile (base + count + kind per line).
+    // 5 = autotile (base + count + kind per line),
+    // 6 = parallax (one float per line; one entry per tile layer).
     int section = 0;
+    std::vector<float> parallax;
 
     std::string line;
     int lineNo = 0;
@@ -148,7 +150,21 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             ls.clear();
             ls.seekg(0);
         }
-        if (section != 0 && section != 3 && isData) {
+        if (section == 6) {
+            // Each line is a single float. Negative leading char counts
+            // as data because the parallax factor may be a fraction like
+            // 0.3 or even 0 (foreground that doesn't track the camera at
+            // all). isData covers digits + '-', not '.' or '0.x' starts,
+            // so handle this section explicitly.
+            float f = 0.0f;
+            if (ls >> f) {
+                parallax.push_back(f);
+                continue;
+            }
+            ls.clear();
+            ls.seekg(0);
+        }
+        if (section != 0 && section != 3 && section != 6 && isData) {
             int v;
             while (ls >> v) {
                 if (section == 1) tiles.push_back(v);
@@ -194,6 +210,8 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
             section = 4;
         } else if (tok == "autotile") {
             section = 5;
+        } else if (tok == "parallax") {
+            section = 6;
         }
     }
 
@@ -247,6 +265,14 @@ TilemapAsset LoadNtmap(RHIDevice& device, const std::string& path,
     for (size_t i = 1; i < allLayers.size(); ++i) {
         asset.extraLayers.push_back(buildLayer(allLayers[i]));
     }
+    // Always emit a parallax vector sized to the layer count so renderers
+    // can read [i] without a presence check. Missing entries in the file
+    // (or absent section entirely) default to 1.0 = "tracks the camera
+    // normally", which matches single-layer behaviour from before.
+    asset.layerParallax.assign(allLayers.size(), 1.0f);
+    for (size_t i = 0; i < parallax.size() && i < allLayers.size(); ++i) {
+        asset.layerParallax[i] = parallax[i];
+    }
     // Optional collision: only attached if the file provided exactly the
     // right number of codes. A short / oversized section is treated as an
     // authoring mistake and dropped (the game then falls back to whatever
@@ -281,7 +307,8 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                const std::vector<ObjectMarker>& objects,
                const std::vector<SymbolDef>& symbols,
                const std::vector<AutoTileTerrain>& autotiles,
-               const std::vector<Tilemap>& extraLayers) {
+               const std::vector<Tilemap>& extraLayers,
+               const std::vector<float>& layerParallax) {
     std::ofstream out(path, std::ios::binary);
     if (!out.is_open()) {
         NARAGAME_ERROR("SaveNtmap: cannot open '%s' for write", path.c_str());
@@ -359,6 +386,17 @@ bool SaveNtmap(const std::string& path, const Tilemap& map,
                 << (t.kind.empty() ? std::string("blob47") : t.kind)
                 << '\n';
         }
+    }
+    // Only emit the parallax section when at least one factor differs
+    // from 1.0 -- the default round-trips without writing anything new
+    // for legacy single-layer maps that never set it.
+    bool anyNonOne = false;
+    for (float f : layerParallax) {
+        if (f != 1.0f) { anyNonOne = true; break; }
+    }
+    if (anyNonOne) {
+        out << "parallax\n";
+        for (float f : layerParallax) out << f << '\n';
     }
     return out.good();
 }
