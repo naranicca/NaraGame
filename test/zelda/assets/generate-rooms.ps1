@@ -115,26 +115,30 @@ $room1 = @{
 
 $room2 = @{
     name = 'room2'
+    # Hub layout. North doors (^) are now regular (unlocked) and lead to
+    # room3 so the player can actually reach the key chamber. East doors
+    # (*) are now locked so the player needs the key from room3 before
+    # they can reach the treasure in room4. West stays plain (back to
+    # room1). This fixes the previous deadlock where the only path to
+    # the key required the key.
     layout = @(
-        '#########**#########'
+        '#########^^#########'
         '#~~......pp........#'
         '#~~~.....pp........#'
         '#~~~.....pp........#'
         '#~~......pp........#'
         '#..e.....pp...e....#'
-        '<pppppppppppppppppp>'
-        '<pppppppppppppppppp>'
+        '<pppppppppppppppppp*'
+        '<pppppppppppppppppp*'
         '#........pp........#'
         '#........pp........#'
         '#........pp........#'
         '####################')
     doors = @{
-        '9,0'   = 'to=room3,side=south'
-        '10,0'  = 'to=room3,side=south'
-        '0,6'   = 'to=room1,side=east'
-        '0,7'   = 'to=room1,side=east'
-        '19,6'  = 'to=room4,side=west'
-        '19,7'  = 'to=room4,side=west'
+        '9,0'  = 'to=room3,side=south'
+        '10,0' = 'to=room3,side=south'
+        '0,6'  = 'to=room1,side=east'
+        '0,7'  = 'to=room1,side=east'
     }
 }
 
@@ -188,12 +192,12 @@ $room4 = @{
 $rooms = @($room1, $room2, $room3, $room4)
 $variantTable = Get-BlobVariantTable
 
-# Special-case the locked-door cells in room2 -- they share x,y with door
-# transitions south, so merge those into the locked-door data via 'L'.
-# The L marker gets the destination + the lock requirement.
+# Locked-door destination map. Each L marker gets `needs=key` plus the
+# transition target so the game can both gate the door and route the
+# player to the next room once they have the key.
 $lockedDoorDestinations = @{
-    'room2-9,0'  = 'needs=key,to=room3,side=south'
-    'room2-10,0' = 'needs=key,to=room3,side=south'
+    'room2-19,6' = 'needs=key,to=room4,side=west'
+    'room2-19,7' = 'needs=key,to=room4,side=west'
 }
 
 foreach ($room in $rooms) {

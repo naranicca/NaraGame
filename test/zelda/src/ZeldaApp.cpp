@@ -59,7 +59,9 @@ constexpr int   kRoomTilesH = 12;
 // Player.
 constexpr float kPlayerR     = 11.0f;
 constexpr float kPlayerSpeed = 115.0f;
-constexpr float kPlayerHurtT = 0.85f;    // post-hit invulnerability
+constexpr float kPlayerHurtT = 1.20f;    // post-hit invulnerability -- long enough
+                                         // for the player to walk well clear of
+                                         // a slime before the next hit lands.
 constexpr float kPlayerSpawnInset = 14.0f;  // distance from door tile center on entry
 
 // Sword swing -- thin rectangle in front of the player.
@@ -68,18 +70,21 @@ constexpr float kSwingReach = 30.0f;
 constexpr float kSwingHalfW = 14.0f;
 
 // Slime. Tuned to be a low threat -- the goal is exercising the editor's
-// .ntmap + marker pipeline, not perfecting combat.
+// .ntmap + marker pipeline, not perfecting combat. The 40px aggro radius
+// (~1.25 tiles) plus 20px/s chase means a slime that catches the player
+// at all gets exactly one hit in before the 1.2s i-frame lets them walk
+// away clean.
 constexpr float kSlimeR        = 10.0f;
-constexpr float kSlimeSpeed    = 28.0f;
+constexpr float kSlimeSpeed    = 20.0f;
 constexpr float kSlimeWanderCd = 1.6f;
 constexpr float kSlimeHurtT    = 0.12f;
-constexpr float kSlimeAggroR   = 60.0f;   // ~2 tiles -- has to be close to chase
+constexpr float kSlimeAggroR   = 40.0f;
 constexpr float kSpawnInvincT  = 1.0f;    // post-entry grace window
 
 // HUD heart strip.
 constexpr float kHudPad   = 24.0f;
 constexpr float kHeartPx  = 40.0f;
-constexpr int   kStartHp  = 3;
+constexpr int   kStartHp  = 4;
 
 // Tile-id constants matching generate-assets.ps1.
 constexpr int kTileGrass     = 0;
@@ -348,6 +353,13 @@ public:
                     m_ctx->makeRoom(i + 1, CardinalDir::S), 0.25f);
                 return;
             }
+        }
+        // Debug cheat: K key grants the dungeon key. Used to verify the
+        // room2 east locked door unlock without having to physically
+        // navigate to room3's key first.
+        if (Input::IsKeyPressed(Key::K)) {
+            m_ctx->hasKey = true;
+            NARAGAME_INFO("zelda: debug -- granted dungeon key");
         }
 
         UpdatePlayer(dt);
