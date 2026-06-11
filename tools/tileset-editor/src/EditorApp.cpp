@@ -679,7 +679,13 @@ protected:
         // are always one per cell).
         if (Input::IsKeyPressed(Key::LeftBracket))  AdjustBrushSize(-1);
         if (Input::IsKeyPressed(Key::RightBracket)) AdjustBrushSize(+1);
-        if (Input::IsKeyPressed(Key::L) || Input::IsKeyPressed(Key::Tab)) {
+        // Bare L / Tab cycles edit modes. Alt is reserved for layer
+        // bindings (Alt+L adds a layer), so skip the cycle whenever the
+        // Alt modifier is held -- otherwise Alt+L would also flip the
+        // edit mode under the user.
+        const bool altForModeCheck = Input::IsKeyDown(Key::LeftAlt);
+        if (!altForModeCheck &&
+            (Input::IsKeyPressed(Key::L) || Input::IsKeyPressed(Key::Tab))) {
             // 3-way cycle: Tile → Collision → Object → Tile.
             m_mode = static_cast<EditLayer>(
                 (static_cast<int>(m_mode) + 1) % 3);
