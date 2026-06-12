@@ -61,10 +61,49 @@ constexpr float kZoom = 1.4f;
 
 enum Tile { EMPTY = -1, GROUND = 0, DIRT = 1, BRICK = 2, QUESTION = 3,
             PIPE_TL = 4, PIPE_TR = 5, PIPE_BL = 6, PIPE_BR = 7, HARD = 8, COIN = 9,
-            USED = 10 };
+            USED = 10,
+            // 11/12 are BG/FG decoration (cloud, tree) -- not solid.
+            // 13..18 are slope tiles. Their AABB doesn't participate in
+            // tile-collider rectangles; ResolveSlopes() snaps each
+            // dynamic body's bottom to the slope surface after Step.
+            SLOPE_45UR  = 13, // 45 deg, rises going right
+            SLOPE_45UL  = 14, // 45 deg, rises going left
+            SLOPE_22URA = 15, // 22.5 deg up-right, left  half (low  -> mid)
+            SLOPE_22URB = 16, // 22.5 deg up-right, right half (mid  -> high)
+            SLOPE_22ULA = 17, // 22.5 deg up-left,  left  half (high -> mid)
+            SLOPE_22ULB = 18, // 22.5 deg up-left,  right half (mid  -> low)
+};
 
 // USED is what a ? block becomes after it is bumped — still solid.
 bool IsSolidTile(int id) { return (id >= GROUND && id <= HARD) || id == USED; }
+
+bool IsSlopeTile(int id) { return id >= SLOPE_45UR && id <= SLOPE_22ULB; }
+
+// Slope-surface y for a body sitting at world-x `bodyCx` on the slope
+// tile (tx, ty). Returns the world y of the slope's top surface at that
+// x. The y goes lower (smaller value) as the slope rises -- matches the
+// engine's "Y points down" convention.
+//
+// The formulas mirror the tileset's pixel layout (see generate-parallax-
+// level.ps1): 45 deg tiles span the full diagonal of a cell, 22.5 deg
+// tiles split a 2-tile run into two cells that each cover half the rise.
+float SlopeSurfaceY(int slopeId, int tx, int ty, float bodyCx,
+                    float tileSize) {
+    // Position within the slope tile, clamped to [0, 1].
+    const float t = std::clamp((bodyCx - tx * tileSize) / tileSize,
+                               0.0f, 1.0f);
+    const float top = ty * tileSize;
+    const float bot = (ty + 1) * tileSize;
+    switch (slopeId) {
+        case SLOPE_45UR:  return bot - (bot - top) * t;
+        case SLOPE_45UL:  return top + (bot - top) * t;
+        case SLOPE_22URA: return bot - (bot - top) * 0.5f * t;
+        case SLOPE_22URB: return (top + bot) * 0.5f - (bot - top) * 0.5f * t;
+        case SLOPE_22ULA: return top + (bot - top) * 0.5f * t;
+        case SLOPE_22ULB: return (top + bot) * 0.5f + (bot - top) * 0.5f * t;
+        default:          return bot;
+    }
+}
 
 // Physics tuned to feel like SMB rather than the looser previous numbers:
 // * small Mario is a 1-tile square (kT x kT), matching the new 16x16 NES
@@ -434,6 +473,8 @@ public:
 
         m_world.Step(dt); // integrates gravity + resolves tile collisions
 
+        ResolveSlopes();  // snap dynamic bodies to slope surfaces
+
         TurnGoombasAtWalls();
         TurnMushroomsAtWalls();
         ResolveFireballContacts();
@@ -661,6 +702,59 @@ public:
     }
 
 private:
+    // Snap every dynamic body's feet onto the slope tile underneath it.
+    // The AABB physics treats slope cells as empty (BuildTileColliders
+    // filters them out), so without this pass the body would just fall
+    // through. The pass runs after Step so we know how far gravity has
+    // pulled the body this frame -- we then push it back up to the
+    // slope's surface and clear any downward velocity, which is what
+    // "resting on the slope" feels like.
+    void ResolveSlopes() {
+        const float kT = m_map.TileWidth();
+        if (kT <= 0.0f) return;
+        const int mw = m_map.Width();
+        const int mh = m_map.Height();
+        // Iterate the read-only body list and re-fetch each via Get(id)
+        // for mutation. The PhysicsWorld API exposes no non-const span,
+        // and Get takes an id rather than an index so this stays correct
+        // even if the body pool develops holes from RemoveBody calls.
+        const auto& bodies = m_world.AllBodies();
+        for (size_t i = 0; i < bodies.size(); ++i) {
+            if (!bodies[i].active || bodies[i].sensor) continue;
+            if (bodies[i].type != BodyType::Dynamic) continue;
+            Body* bp = m_world.Get(bodies[i].id);
+            if (!bp) continue;
+            Body& b = *bp;
+            // Sample at the body's bottom-center x. Slopes are gameplay-
+            // plane tiles so they share m_map's coordinate frame.
+            const float cx = b.position.x + b.size.x * 0.5f;
+            const float footY = b.position.y + b.size.y;
+            const int tx = int(std::floor(cx / kT));
+            // Look one tile above the foot too -- a body partway up the
+            // slope has its feet inside the slope cell, but a body that
+            // is FALLING toward a slope has its feet still above it for
+            // a frame, so the slope cell is at (tx, tyFoot - 1).
+            const int tyFoot = int(std::floor(footY / kT));
+            for (int dy = -1; dy <= 0; ++dy) {
+                const int ty = tyFoot + dy;
+                if (tx < 0 || tx >= mw || ty < 0 || ty >= mh) continue;
+                const int id = m_map.GetTile(tx, ty);
+                if (!IsSlopeTile(id)) continue;
+                const float surfaceY = SlopeSurfaceY(id, tx, ty, cx, kT);
+                // Skip if the body's feet are above the slope's local
+                // surface AND it's still falling toward it -- gravity
+                // will reach it next frame. The "+1" lets us snap when
+                // feet are within 1px above the surface to avoid a
+                // microscopic gap that flickers onGround.
+                if (footY < surfaceY - 1.0f) continue;
+                b.position.y = surfaceY - b.size.y;
+                if (b.velocity.y > 0.0f) b.velocity.y = 0.0f;
+                b.onGround = true;
+                break;
+            }
+        }
+    }
+
     // Merge contiguous solid tiles into maximal rectangles and add one static
     // body per rectangle. Removes the internal seams that a fast/jumping body
     // can otherwise snag on.
