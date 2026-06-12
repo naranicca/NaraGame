@@ -68,17 +68,6 @@ D3D11Device::D3D11Device(const RHIDeviceDesc& desc)
 D3D11Device::~D3D11Device() = default;
 
 void D3D11Device::CreateDefaultStates() {
-    D3D11_RASTERIZER_DESC rs{};
-    rs.FillMode = D3D11_FILL_SOLID;
-    rs.CullMode = D3D11_CULL_NONE; // 2D quads: don't worry about winding
-    rs.DepthClipEnable = TRUE;
-    m_device->CreateRasterizerState(&rs, m_rasterizer.GetAddressOf());
-
-    D3D11_DEPTH_STENCIL_DESC ds{};
-    ds.DepthEnable = FALSE; // painter's order for 2D
-    ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-    m_device->CreateDepthStencilState(&ds, m_depthState.GetAddressOf());
-
     D3D11_SAMPLER_DESC sd{};
     sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
     sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -97,6 +86,25 @@ void D3D11Device::CreateRenderTarget() {
         return;
     m_device->CreateRenderTargetView(backBuffer.Get(), nullptr,
                                      m_renderTarget.ReleaseAndGetAddressOf());
+
+    // Matching depth buffer for the swap chain. Sized to the backbuffer
+    // so any 3D pipeline binding the default RTV also gets a valid DSV
+    // without bookkeeping in the caller. D24_UNORM_S8 is the workhorse
+    // depth format on D3D11 and matches our TextureFormat::Depth24.
+    D3D11_TEXTURE2D_DESC dt{};
+    dt.Width            = m_width;
+    dt.Height           = m_height;
+    dt.MipLevels        = 1;
+    dt.ArraySize        = 1;
+    dt.Format           = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dt.SampleDesc.Count = 1;
+    dt.Usage            = D3D11_USAGE_DEFAULT;
+    dt.BindFlags        = D3D11_BIND_DEPTH_STENCIL;
+    m_device->CreateTexture2D(&dt, nullptr,
+                              m_depthTex.ReleaseAndGetAddressOf());
+    if (m_depthTex)
+        m_device->CreateDepthStencilView(m_depthTex.Get(), nullptr,
+                                         m_depthView.ReleaseAndGetAddressOf());
 }
 
 void D3D11Device::Resize(uint32_t width, uint32_t height) {
@@ -108,6 +116,8 @@ void D3D11Device::Resize(uint32_t width, uint32_t height) {
 
     m_context->OMSetRenderTargets(0, nullptr, nullptr);
     m_renderTarget.Reset();
+    m_depthView.Reset();
+    m_depthTex.Reset();
     m_swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
     CreateRenderTarget();
 }
@@ -118,10 +128,13 @@ void D3D11Device::BeginFrame() {
 
     // Reset to backbuffer at the top of every frame so a target left bound
     // by the previous frame's last draw doesn't leak. Games re-bind via
-    // SetRenderTarget if they want offscreen work this frame.
+    // SetRenderTarget if they want offscreen work this frame. The depth
+    // view goes along with the backbuffer RTV; pipelines that disable
+    // depth simply never touch it.
     m_currentRTV = m_renderTarget.Get();
+    m_currentDSV = m_depthView.Get();
     ID3D11RenderTargetView* targets[] = {m_currentRTV};
-    m_context->OMSetRenderTargets(1, targets, nullptr);
+    m_context->OMSetRenderTargets(1, targets, m_currentDSV);
 
     D3D11_VIEWPORT viewport{};
     viewport.Width = static_cast<float>(m_width);
@@ -130,8 +143,11 @@ void D3D11Device::BeginFrame() {
     viewport.MaxDepth = 1.0f;
     m_context->RSSetViewports(1, &viewport);
 
-    m_context->RSSetState(m_rasterizer.Get());
-    m_context->OMSetDepthStencilState(m_depthState.Get(), 0);
+    // Raster + depth state are now per-pipeline; BindPipeline sets them.
+    // Until a pipeline binds, the context still has whatever state the
+    // last frame left around, which is fine because Clear() doesn't use
+    // raster state.
+
     // Default sampler so any draw that fires before a BindTexture (e.g. a
     // colored quad using the renderer's white texture) still samples cleanly.
     ID3D11SamplerState* samplers[] = {m_linearSampler.Get()};
@@ -145,13 +161,20 @@ void D3D11Device::Clear(const Color& color) {
     m_context->ClearRenderTargetView(m_currentRTV, rgba);
 }
 
+void D3D11Device::ClearDepth(float depth) {
+    if (!m_context || !m_currentDSV) return;
+    m_context->ClearDepthStencilView(m_currentDSV, D3D11_CLEAR_DEPTH,
+                                     depth, 0);
+}
+
 void D3D11Device::SetRenderTarget(RHITexture* target) {
     if (!m_context) return;
     if (target == nullptr) {
-        // Back to backbuffer
+        // Back to backbuffer + its matching depth buffer.
         m_currentRTV = m_renderTarget.Get();
+        m_currentDSV = m_depthView.Get();
         ID3D11RenderTargetView* targets[] = {m_currentRTV};
-        m_context->OMSetRenderTargets(1, targets, nullptr);
+        m_context->OMSetRenderTargets(1, targets, m_currentDSV);
         D3D11_VIEWPORT vp{};
         vp.Width = static_cast<float>(m_width);
         vp.Height = static_cast<float>(m_height);
@@ -161,8 +184,9 @@ void D3D11Device::SetRenderTarget(RHITexture* target) {
     }
     auto* tex = static_cast<D3D11Texture*>(target);
     ID3D11RenderTargetView* rtv = tex->RTV();
-    if (rtv == nullptr) {
-        NARAGAME_ERROR("SetRenderTarget: texture wasn't created with renderTarget=true");
+    ID3D11DepthStencilView* dsv = tex->DSV();
+    if (rtv == nullptr && dsv == nullptr) {
+        NARAGAME_ERROR("SetRenderTarget: texture wasn't created with renderTarget=true and isn't a depth target");
         return;
     }
     // Unbind the texture from any sampler slot it might still be living in,
@@ -172,8 +196,19 @@ void D3D11Device::SetRenderTarget(RHITexture* target) {
         m_context->PSSetShaderResources(i, 1, nullSrv);
 
     m_currentRTV = rtv;
+    m_currentDSV = dsv;
     ID3D11RenderTargetView* targets[] = {m_currentRTV};
-    m_context->OMSetRenderTargets(1, targets, nullptr);
+    // Depth-only RT (shadow map): bind null colour + the texture's DSV
+    // so the geometry just writes depth. Otherwise bind RTV + the
+    // backbuffer depth buffer so a 3D pass into an offscreen colour
+    // target still gets z testing.
+    if (rtv == nullptr) {
+        m_context->OMSetRenderTargets(0, nullptr, dsv);
+    } else {
+        m_context->OMSetRenderTargets(1, targets,
+                                      dsv ? dsv : m_depthView.Get());
+        if (dsv == nullptr) m_currentDSV = m_depthView.Get();
+    }
     D3D11_VIEWPORT vp{};
     vp.Width  = static_cast<float>(tex->Width());
     vp.Height = static_cast<float>(tex->Height());

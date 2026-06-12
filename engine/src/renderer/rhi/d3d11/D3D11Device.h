@@ -22,6 +22,7 @@ public:
 
     void BeginFrame() override;
     void Clear(const Color& color) override;
+    void ClearDepth(float depth = 1.0f) override;
     void EndFrame() override;
     void Present() override;
 
@@ -58,13 +59,18 @@ private:
     ComPtr<ID3D11DeviceContext> m_context;
     ComPtr<IDXGISwapChain> m_swapChain;
     ComPtr<ID3D11RenderTargetView> m_renderTarget;   // backbuffer RTV
+    // Depth buffer matching the swapchain. Recreated on Resize. Every
+    // 3D pipeline gets to see this DSV in BeginFrame so depth testing
+    // just works; 2D pipelines that disable depth simply don't touch it.
+    ComPtr<ID3D11Texture2D>        m_depthTex;
+    ComPtr<ID3D11DepthStencilView> m_depthView;
     ID3D11RenderTargetView* m_currentRTV = nullptr;  // either backbuffer or an RT texture's RTV
+    ID3D11DepthStencilView* m_currentDSV = nullptr;  // either the backbuffer depth or a target's DSV
 
-    // Fixed-function states shared by 2D rendering.
-    ComPtr<ID3D11RasterizerState> m_rasterizer;   // cull none, solid fill
-    ComPtr<ID3D11DepthStencilState> m_depthState; // depth test disabled
-    // One sampler per filter mode; BindTexture picks the matching one from
-    // the texture's TextureDesc::filter. Both clamp on every axis.
+    // Default samplers (one per filter mode). BindTexture picks the
+    // matching one from the texture's TextureDesc::filter. Both clamp
+    // on every axis. Per-pipeline raster and depth states live on each
+    // D3D11Pipeline -- the device no longer keeps a global default.
     ComPtr<ID3D11SamplerState> m_linearSampler;
     ComPtr<ID3D11SamplerState> m_pointSampler;
 };

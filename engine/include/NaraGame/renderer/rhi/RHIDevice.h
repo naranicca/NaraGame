@@ -28,6 +28,11 @@ public:
 
     virtual void BeginFrame() = 0;
     virtual void Clear(const Color& color) = 0;
+    // Wipe the depth attachment to `depth` (0 = near, 1 = far). 3D passes
+    // should call this once per frame after BeginFrame before drawing.
+    // Default no-op so 2D-only backends (or 2D test apps) compile without
+    // implementing it; the D3D11 backend overrides with the real clear.
+    virtual void ClearDepth(float /*depth*/ = 1.0f) {}
     virtual void EndFrame() = 0;
     virtual void Present() = 0;
 

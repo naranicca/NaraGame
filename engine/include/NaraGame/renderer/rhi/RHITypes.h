@@ -31,8 +31,21 @@ enum class RHIBackend { None, D3D11, D3D12, Metal, Vulkan };
 enum class BufferType { Vertex, Index, Uniform };
 enum class BufferUsage { Static, Dynamic };       // Dynamic = CPU-updated per frame
 enum class IndexFormat { Uint16, Uint32 };
-enum class TextureFormat { RGBA8 };
+// RGBA8 is the colour format every 2D/3D pass uses for color buffers and
+// asset textures. Depth24 is a 24-bit depth + 8-bit stencil texture --
+// used by the swapchain's default depth buffer and by shadow-map RTs.
+enum class TextureFormat { RGBA8, Depth24 };
 enum class PrimitiveTopology { TriangleList };
+
+// Depth comparison for pipelines that test depth. `Less` matches the
+// usual 0=near, 1=far convention -- closer fragments win. `Always`
+// disables the test in practice and matches the "no depth" 2D path.
+enum class CompareFunc { Less, LessEqual, Greater, GreaterEqual, Equal, NotEqual, Always, Never };
+
+// Triangle culling. 2D pipelines run with None so a sprite quad with
+// either winding draws; 3D pipelines default to Back so back faces drop
+// out cheaply.
+enum class CullMode { None, Back, Front };
 // Source-over alpha is the default for sprite batches; Additive glows
 // (particles, lights, slash VFX) ignore the destination's alpha and just
 // add the source colour; Multiply darkens by the source (shadows, fog

@@ -70,31 +70,63 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
                            const TextureDesc& desc)
     : m_context(context), m_width(desc.width), m_height(desc.height), m_filter(desc.filter) {
 
+    const bool isDepth = (desc.format == TextureFormat::Depth24);
+
     D3D11_TEXTURE2D_DESC td{};
     td.Width = desc.width;
     td.Height = desc.height;
     td.MipLevels = 1;
     td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    if (desc.renderTarget)
-        td.BindFlags |= D3D11_BIND_RENDER_TARGET;
+    // Depth textures hold the raw typeless format on the resource so we
+    // can put both a DSV (D24S8 view) and an SRV (R24X8 view) on it; the
+    // SRV makes the depth readable in a later pass (shadow mapping).
+    if (isDepth) {
+        td.Format    = DXGI_FORMAT_R24G8_TYPELESS;
+        td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    } else {
+        td.Format    = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (desc.renderTarget) td.BindFlags |= D3D11_BIND_RENDER_TARGET;
+    }
 
     D3D11_SUBRESOURCE_DATA init{};
     init.pSysMem = desc.pixels;
-    init.SysMemPitch = desc.width * 4; // RGBA8
+    init.SysMemPitch = desc.width * 4; // RGBA8 path only
 
-    // Render targets start undefined and get filled by the device's first
-    // draw into them; we never seed them from CPU pixels.
+    // Render targets and depth textures start undefined and get filled
+    // by GPU writes; we never seed them from CPU pixels.
     const D3D11_SUBRESOURCE_DATA* initPtr =
-        (desc.pixels && !desc.renderTarget) ? &init : nullptr;
+        (desc.pixels && !desc.renderTarget && !isDepth) ? &init : nullptr;
 
     HRESULT hr =
         device->CreateTexture2D(&td, initPtr, m_texture.GetAddressOf());
     if (FAILED(hr)) {
         NARAGAME_ERROR("CreateTexture2D failed (0x%08lX)", static_cast<unsigned long>(hr));
+        return;
+    }
+
+    if (isDepth) {
+        // SRV samples the depth as a single-channel float in the .r slot.
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format        = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        hr = device->CreateShaderResourceView(m_texture.Get(), &sd,
+                                              m_srv.GetAddressOf());
+        if (FAILED(hr))
+            NARAGAME_ERROR("CreateShaderResourceView(depth) failed (0x%08lX)",
+                           static_cast<unsigned long>(hr));
+        // DSV uses the matching depth-stencil typed format.
+        D3D11_DEPTH_STENCIL_VIEW_DESC dd{};
+        dd.Format        = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        hr = device->CreateDepthStencilView(m_texture.Get(), &dd,
+                                            m_dsv.GetAddressOf());
+        if (FAILED(hr))
+            NARAGAME_ERROR("CreateDepthStencilView failed (0x%08lX)",
+                           static_cast<unsigned long>(hr));
         return;
     }
 
@@ -230,6 +262,41 @@ D3D11Pipeline::D3D11Pipeline(ID3D11Device* device, const PipelineDesc& desc) {
     }
     device->CreateBlendState(&blend, m_blendState.GetAddressOf());
 
+    // Depth state. 2D pipelines pass depthTest = false here and end up
+    // with "depth disabled, no write" -- equivalent to the global state
+    // the device used before this refactor. 3D pipelines flip both bools
+    // and pick a comparison mode.
+    D3D11_DEPTH_STENCIL_DESC ds{};
+    ds.DepthEnable    = desc.depthTest ? TRUE : FALSE;
+    ds.DepthWriteMask = desc.depthWrite ? D3D11_DEPTH_WRITE_MASK_ALL
+                                        : D3D11_DEPTH_WRITE_MASK_ZERO;
+    switch (desc.depthCompare) {
+        case CompareFunc::Less:         ds.DepthFunc = D3D11_COMPARISON_LESS;          break;
+        case CompareFunc::LessEqual:    ds.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;    break;
+        case CompareFunc::Greater:      ds.DepthFunc = D3D11_COMPARISON_GREATER;       break;
+        case CompareFunc::GreaterEqual: ds.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL; break;
+        case CompareFunc::Equal:        ds.DepthFunc = D3D11_COMPARISON_EQUAL;         break;
+        case CompareFunc::NotEqual:     ds.DepthFunc = D3D11_COMPARISON_NOT_EQUAL;     break;
+        case CompareFunc::Always:       ds.DepthFunc = D3D11_COMPARISON_ALWAYS;        break;
+        case CompareFunc::Never:        ds.DepthFunc = D3D11_COMPARISON_NEVER;         break;
+    }
+    device->CreateDepthStencilState(&ds, m_depthState.GetAddressOf());
+
+    // Rasterizer state. Cull None is the 2D default; Back is the 3D
+    // default (front face = CCW in world space, matching glTF / most
+    // exporter conventions). DepthClipEnable stays on so geometry past
+    // the far plane is dropped cleanly.
+    D3D11_RASTERIZER_DESC rs{};
+    rs.FillMode        = D3D11_FILL_SOLID;
+    switch (desc.cullMode) {
+        case CullMode::None:  rs.CullMode = D3D11_CULL_NONE;  break;
+        case CullMode::Back:  rs.CullMode = D3D11_CULL_BACK;  break;
+        case CullMode::Front: rs.CullMode = D3D11_CULL_FRONT; break;
+    }
+    rs.FrontCounterClockwise = TRUE; // glTF / OpenGL convention
+    rs.DepthClipEnable       = TRUE;
+    device->CreateRasterizerState(&rs, m_rasterState.GetAddressOf());
+
     m_topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 }
 
@@ -241,6 +308,8 @@ void D3D11Pipeline::Bind(ID3D11DeviceContext* context) const {
 
     const float blendFactor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     context->OMSetBlendState(m_blendState.Get(), blendFactor, 0xFFFFFFFF);
+    context->OMSetDepthStencilState(m_depthState.Get(), 0);
+    context->RSSetState(m_rasterState.Get());
 }
 
 } // namespace NaraGame

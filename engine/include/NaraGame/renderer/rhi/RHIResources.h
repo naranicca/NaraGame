@@ -88,6 +88,17 @@ struct PipelineDesc {
     VertexLayout vertexLayout;
     BlendMode blend = BlendMode::Alpha;
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
+    // depthTest gates whether the fragment runs the depthCompare against
+    // the depth buffer. depthWrite gates whether passing fragments write
+    // their depth back. Both default to off so 2D pipelines stay painter's-
+    // order without touching the depth attachment. 3D pipelines flip
+    // both on with Less to get the usual "closer wins, write the new z".
+    bool depthTest = false;
+    bool depthWrite = false;
+    CompareFunc depthCompare = CompareFunc::Less;
+    // 2D defaults to no culling so a flipped sprite quad always draws;
+    // 3D meshes set this to Back and expect counter-clockwise front faces.
+    CullMode cullMode = CullMode::None;
 };
 
 class RHIPipeline {
