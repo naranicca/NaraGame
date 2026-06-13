@@ -7,6 +7,7 @@ set(NARAGAME_SOURCES
     src/assets/AssetWatcher.cpp
     src/assets/BMFont.cpp
     src/assets/Inflate.cpp
+    src/assets/MeshLoader.cpp
     src/assets/MSDFFontLoader.cpp
     src/assets/Ntmap.cpp
     src/assets/Png.cpp

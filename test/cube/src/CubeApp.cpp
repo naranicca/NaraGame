@@ -1,10 +1,13 @@
-// Smoke test for the Renderer3D pipeline. A single textured cube spins
-// in place under one directional light. There is no game logic, no
-// input handling, no asset files -- the cube mesh is hard-coded with
-// flat-shaded normals (24 verts / 36 indices) and the albedo texture is
-// a 16x16 checkerboard built in code so the engine's 3D path can be
-// exercised without dragging in mesh / texture loaders.
+// Smoke test for Renderer3D + the .obj mesh loader. A cube and a sphere
+// load from test/cube/assets, then spin side-by-side in the same scene
+// under one directional light. The cube exercises the flat-shaded path
+// (one normal per face), the sphere exercises the smooth-shaded path
+// (per-vertex normals + many shared vertices via the dedup table).
+//
+// There's no input or game logic; the camera is fixed. F2 would have
+// been useful here but the test app doesn't pull in DebugDraw.
 
+#include <NaraGame/assets/MeshLoader.h>
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
 #include <NaraGame/core/Log.h>
@@ -17,61 +20,17 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <string>
+
+#ifndef NARAGAME_ASSETS_DIR
+#define NARAGAME_ASSETS_DIR "assets"
+#endif
 
 using namespace NaraGame;
 
 namespace {
-
 constexpr uint32_t kWindowW = 1280;
 constexpr uint32_t kWindowH = 720;
-
-// 24 verts: 4 per face × 6 faces. Flat shading needs one normal per
-// face, so each face owns its own 4 corner verts (no sharing across
-// faces). Faces wound CCW when viewed from outside so the Back cull in
-// Renderer3D's default pipeline keeps the inside surfaces hidden.
-const Vertex3D kCubeVerts[24] = {
-    // +X (right)
-    {{ 0.5f, -0.5f, -0.5f}, { 1, 0, 0}, {0, 1}},
-    {{ 0.5f,  0.5f, -0.5f}, { 1, 0, 0}, {0, 0}},
-    {{ 0.5f,  0.5f,  0.5f}, { 1, 0, 0}, {1, 0}},
-    {{ 0.5f, -0.5f,  0.5f}, { 1, 0, 0}, {1, 1}},
-    // -X (left)
-    {{-0.5f, -0.5f,  0.5f}, {-1, 0, 0}, {0, 1}},
-    {{-0.5f,  0.5f,  0.5f}, {-1, 0, 0}, {0, 0}},
-    {{-0.5f,  0.5f, -0.5f}, {-1, 0, 0}, {1, 0}},
-    {{-0.5f, -0.5f, -0.5f}, {-1, 0, 0}, {1, 1}},
-    // +Y (top)
-    {{-0.5f,  0.5f, -0.5f}, { 0, 1, 0}, {0, 1}},
-    {{-0.5f,  0.5f,  0.5f}, { 0, 1, 0}, {0, 0}},
-    {{ 0.5f,  0.5f,  0.5f}, { 0, 1, 0}, {1, 0}},
-    {{ 0.5f,  0.5f, -0.5f}, { 0, 1, 0}, {1, 1}},
-    // -Y (bottom)
-    {{-0.5f, -0.5f,  0.5f}, { 0,-1, 0}, {0, 1}},
-    {{-0.5f, -0.5f, -0.5f}, { 0,-1, 0}, {0, 0}},
-    {{ 0.5f, -0.5f, -0.5f}, { 0,-1, 0}, {1, 0}},
-    {{ 0.5f, -0.5f,  0.5f}, { 0,-1, 0}, {1, 1}},
-    // +Z (front)
-    {{ 0.5f, -0.5f,  0.5f}, { 0, 0, 1}, {0, 1}},
-    {{ 0.5f,  0.5f,  0.5f}, { 0, 0, 1}, {0, 0}},
-    {{-0.5f,  0.5f,  0.5f}, { 0, 0, 1}, {1, 0}},
-    {{-0.5f, -0.5f,  0.5f}, { 0, 0, 1}, {1, 1}},
-    // -Z (back)
-    {{-0.5f, -0.5f, -0.5f}, { 0, 0,-1}, {0, 1}},
-    {{-0.5f,  0.5f, -0.5f}, { 0, 0,-1}, {0, 0}},
-    {{ 0.5f,  0.5f, -0.5f}, { 0, 0,-1}, {1, 0}},
-    {{ 0.5f, -0.5f, -0.5f}, { 0, 0,-1}, {1, 1}},
-};
-
-// Two triangles per face, 6 faces.
-const uint16_t kCubeIndices[36] = {
-     0,  1,  2,    0,  2,  3,    // +X
-     4,  5,  6,    4,  6,  7,    // -X
-     8,  9, 10,    8, 10, 11,    // +Y
-    12, 13, 14,   12, 14, 15,    // -Y
-    16, 17, 18,   16, 18, 19,    // +Z
-    20, 21, 22,   20, 22, 23,    // -Z
-};
-
 } // namespace
 
 class CubeApp : public Application {
@@ -81,9 +40,9 @@ public:
     void OnStart() override {
         m_renderer.Init(GetDevice());
 
-        // 16x16 checkerboard. Even cells are warm orange, odd cells are
-        // cool grey, so each face of the cube reads as having its own
-        // up-direction. RGBA8 packed row-major top-to-bottom.
+        // 16x16 checkerboard albedo, shared by both meshes. RGBA8, even
+        // cells warm orange, odd cells cool grey -- so the faces of the
+        // cube and the seams of the sphere both read clearly.
         std::array<uint8_t, 16 * 16 * 4> pixels{};
         for (int y = 0; y < 16; ++y) {
             for (int x = 0; x < 16; ++x) {
@@ -106,27 +65,17 @@ public:
         td.pixels = pixels.data();
         m_albedo = GetDevice().CreateTexture(td);
 
-        BufferDesc vb;
-        vb.type        = BufferType::Vertex;
-        vb.usage       = BufferUsage::Static;
-        vb.size        = sizeof(kCubeVerts);
-        vb.initialData = kCubeVerts;
-        m_vb = GetDevice().CreateBuffer(vb);
-
-        BufferDesc ib;
-        ib.type        = BufferType::Index;
-        ib.usage       = BufferUsage::Static;
-        ib.size        = sizeof(kCubeIndices);
-        ib.initialData = kCubeIndices;
-        m_ib = GetDevice().CreateBuffer(ib);
+        const std::string assets = NARAGAME_ASSETS_DIR;
+        m_cube   = LoadObj(GetDevice(), assets + "/cube.obj");
+        m_sphere = LoadObj(GetDevice(), assets + "/sphere.obj");
 
         m_camera.SetViewport(float(kWindowW), float(kWindowH));
-        m_camera.SetPosition({2.0f, 1.5f, 3.0f});
+        m_camera.SetPosition({0.0f, 1.2f, 4.5f});
         m_camera.LookAt({0.0f, 0.0f, 0.0f});
         m_camera.SetFovY(1.0472f);          // 60 deg
         m_camera.SetNearFar(0.1f, 50.0f);
 
-        NARAGAME_INFO("Cube: spawned 1 textured cube, 1 directional light");
+        NARAGAME_INFO("Cube: scene = 1 cube (left) + 1 sphere (right)");
     }
 
     void OnStop() override {
@@ -145,12 +94,27 @@ public:
         m_renderer.Begin(m_camera.View(), m_camera.Projection(),
                          /*lightDir=*/{-0.4f, -1.0f, -0.3f},
                          /*ambient=*/Color(0.20f, 0.20f, 0.25f, 1.0f));
-        // Combined yaw + pitch so the texture isn't always seen straight-
-        // on; pitch is half the yaw so every face cycles through view.
-        const Mat4 model = mat4::RotationY(m_yaw) * mat4::RotationX(m_yaw * 0.5f);
-        m_renderer.DrawMesh(m_vb.get(), m_ib.get(),
-                            /*indexCount=*/36, IndexFormat::Uint16,
-                            model, m_albedo.get());
+
+        if (m_cube.valid) {
+            // Cube on the left at x = -1.2, rotating to expose every face.
+            const Mat4 model = mat4::Translation({-1.2f, 0.0f, 0.0f})
+                             * mat4::RotationY(m_yaw)
+                             * mat4::RotationX(m_yaw * 0.5f);
+            m_renderer.DrawMesh(m_cube.vertexBuffer.get(),
+                                m_cube.indexBuffer.get(),
+                                m_cube.indexCount, m_cube.indexFormat,
+                                model, m_albedo.get());
+        }
+        if (m_sphere.valid) {
+            // Sphere on the right at x = +1.2, slower rotation so the
+            // checkerboard wrap is readable.
+            const Mat4 model = mat4::Translation({1.2f, 0.0f, 0.0f})
+                             * mat4::RotationY(m_yaw * 0.7f);
+            m_renderer.DrawMesh(m_sphere.vertexBuffer.get(),
+                                m_sphere.indexBuffer.get(),
+                                m_sphere.indexCount, m_sphere.indexFormat,
+                                model, m_albedo.get());
+        }
         m_renderer.End();
     }
 
@@ -166,8 +130,8 @@ private:
     Renderer3D                  m_renderer;
     Camera3D                    m_camera;
     std::unique_ptr<RHITexture> m_albedo;
-    std::unique_ptr<RHIBuffer>  m_vb;
-    std::unique_ptr<RHIBuffer>  m_ib;
+    Mesh                        m_cube;
+    Mesh                        m_sphere;
     float                       m_yaw = 0.0f;
 };
 
