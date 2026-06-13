@@ -6,6 +6,7 @@
 #include "NaraGame/renderer/rhi/RHITypes.h"
 
 #include <memory>
+#include <vector>
 
 namespace NaraGame {
 
@@ -23,10 +24,38 @@ struct Vertex3D {
     Vec2 uv;
 };
 
-// Immediate-mode mesh renderer for the 3D pipeline. Owns one PSO -- a
-// textured directional-light shader -- and per-frame + per-draw constant
-// buffers. Begin() locks in the camera + light for the current pass;
-// DrawMesh() submits one mesh with its model transform and texture.
+// Hemi-ambient directional light. `direction` points FROM the source
+// TOWARD the lit surface (so {0, -1, 0} is a sun straight overhead).
+// skyAmbient / groundAmbient give the two halves of the hemisphere
+// ambient lookup: surfaces facing up bias toward skyAmbient, surfaces
+// facing down toward groundAmbient. shadowCenter / shadowRadius pin the
+// orthographic light camera used to render the shadow map -- the
+// caller is expected to keep them roughly centered on the visible
+// gameplay area for the shadow resolution to stay useful.
+struct DirectionalLight {
+    Vec3  direction      = {-0.4f, -1.0f, -0.3f};
+    Color skyAmbient     = {0.45f, 0.50f, 0.60f, 1.0f};
+    Color groundAmbient  = {0.15f, 0.12f, 0.10f, 1.0f};
+    Vec3  shadowCenter   = {0.0f,  0.0f,  0.0f};
+    float shadowRadius   = 10.0f;
+};
+
+// Linear depth fog. Fragments closer than startDistance are unaffected;
+// fragments farther than endDistance are fully replaced by `color`.
+// In between they lerp linearly. Set endDistance < startDistance to
+// disable (the saturate in the shader collapses to 0 either side).
+struct FogParams {
+    Color color         = {0.55f, 0.58f, 0.65f, 1.0f};
+    float startDistance = 1000.0f;   // off by default
+    float endDistance   = 2000.0f;
+};
+
+// Immediate-mode mesh renderer for the 3D pipeline. Owns one main PSO
+// (textured + hemi-ambient + 1 directional light + 1 shadow-map + linear
+// fog) plus one depth-only shadow PSO and a 2048x2048 shadow render
+// target. Begin() locks in the camera + light + fog for the current
+// frame; DrawMesh() queues a mesh that will both cast and receive a
+// shadow; End() flushes the queue as a shadow pass + a main pass.
 //
 // Renderer3D is a sibling to Renderer2D: both stand on the same RHI and
 // can be used in the same frame (e.g. 2D HUD on top of a 3D scene).
@@ -41,37 +70,68 @@ public:
     void Init(RHIDevice& device);
     void Shutdown();
 
-    // Lock in the view-projection matrix and a single directional light
-    // (world space, points FROM light source TOWARD the lit surface --
-    // i.e. roughly downward for a sun). Ambient is the colour added to
-    // every fragment so shadowed sides don't fall pure black.
+    // Lock in the camera, light + ambient hemisphere, and fog for the
+    // current frame. The queue starts empty; subsequent DrawMesh calls
+    // populate it. End() does the actual GPU work.
     void Begin(const Mat4& view, const Mat4& projection,
-               const Vec3& lightDir = {-0.4f, -1.0f, -0.3f},
-               const Color& ambient = {0.18f, 0.18f, 0.22f, 1.0f});
-    void End();
+               const DirectionalLight& light = {},
+               const FogParams& fog = {});
 
-    // Draw one mesh. `vb` / `ib` are buffers created via CreateBuffer
-    // with the right BufferType; the mesh data must use the Vertex3D
-    // layout above. `model` is the world-from-local transform; `texture`
-    // is sampled as albedo, `tint` multiplies it.
+    // Queue one mesh for both the shadow pass and the main pass. `vb` /
+    // `ib` are buffers created via CreateBuffer with the right
+    // BufferType; the mesh data must use the Vertex3D layout above.
+    // `model` is the world-from-local transform; `texture` is sampled
+    // as albedo, `tint` multiplies it. `texture` may be null -- a 2x2
+    // white texture is used in its place so the shader always samples
+    // valid data.
     void DrawMesh(RHIBuffer* vb, RHIBuffer* ib, uint32_t indexCount,
                   IndexFormat indexFormat,
                   const Mat4& model, RHITexture* texture,
                   const Color& tint = Color::White());
 
+    // Run the shadow pass + the main pass. The main pass binds the
+    // backbuffer's RTV + depth view, so the caller is expected to have
+    // already called Clear() / ClearDepth() on the device for the
+    // current frame.
+    void End();
+
 private:
+    void RunShadowPass(const Mat4& lightViewProj);
+    void RunMainPass();
+
     RHIDevice* m_device = nullptr;
 
-    std::unique_ptr<RHIShader>   m_shader;
-    std::unique_ptr<RHIPipeline> m_pipeline;
-    // Two CBs: per-frame (camera + light) updated in Begin, per-draw
-    // (model + tint) updated per DrawMesh. Separating them keeps the
-    // per-frame upload to one map per pass instead of per draw.
+    std::unique_ptr<RHIShader>   m_shaderMain;
+    std::unique_ptr<RHIShader>   m_shaderShadow;
+    std::unique_ptr<RHIPipeline> m_pipelineMain;
+    std::unique_ptr<RHIPipeline> m_pipelineShadow;
+
+    // Per-frame uniforms (camera + light + fog) updated in Begin; per-
+    // draw uniforms (model + tint) updated inside the shadow / main pass
+    // for each queued mesh.
     std::unique_ptr<RHIBuffer>   m_frameUB;
     std::unique_ptr<RHIBuffer>   m_drawUB;
-    // 1x1 white texture, bound when DrawMesh is called with texture =
-    // nullptr so the shader always samples something valid.
+    // 2x2 white albedo used when DrawMesh receives a null texture.
     std::unique_ptr<RHITexture>  m_whiteTex;
+    // Depth-format render target written by the shadow pass and sampled
+    // by the main pass as a depth lookup. 2048x2048 is enough for a
+    // single ortho fit covering the cube test scene; CSM is a later
+    // upgrade.
+    std::unique_ptr<RHITexture>  m_shadowMap;
+
+    // Mesh queue collected between Begin and End. Replayed twice (once
+    // for the shadow pass, once for the main pass) so the caller only
+    // submits each mesh once.
+    struct QueuedMesh {
+        RHIBuffer*  vb;
+        RHIBuffer*  ib;
+        uint32_t    indexCount;
+        IndexFormat indexFormat;
+        Mat4        model;
+        RHITexture* texture;
+        Color       tint;
+    };
+    std::vector<QueuedMesh> m_queue;
     bool m_inPass = false;
 };
 
