@@ -11,6 +11,7 @@ set(NARAGAME_SOURCES
     src/assets/MeshLoader.cpp
     src/assets/MiniJson.cpp
     src/assets/MSDFFontLoader.cpp
+    src/assets/SkinnedMeshAnim.cpp
     src/assets/Ntmap.cpp
     src/assets/Png.cpp
     src/assets/TextureLoader.cpp

@@ -1,0 +1,306 @@
+{
+    "scene":  0,
+    "nodes":  [
+                  {
+                      "skin":  0,
+                      "mesh":  0,
+                      "children":  [
+                                       1
+                                   ]
+                  },
+                  {
+                      "children":  [
+                                       2
+                                   ],
+                      "translation":  [
+                                          0,
+                                          0,
+                                          0
+                                      ]
+                  },
+                  {
+                      "children":  [
+                                       3
+                                   ],
+                      "translation":  [
+                                          0,
+                                          0.4,
+                                          0
+                                      ]
+                  },
+                  {
+                      "children":  [
+                                       4
+                                   ],
+                      "translation":  [
+                                          0,
+                                          0.4,
+                                          0
+                                      ]
+                  },
+                  {
+                      "translation":  [
+                                          0,
+                                          0.4,
+                                          0
+                                      ]
+                  }
+              ],
+    "accessors":  [
+                      {
+                          "type":  "VEC3",
+                          "componentType":  5126,
+                          "count":  60,
+                          "bufferView":  0,
+                          "min":  [
+                                      -0.18,
+                                      0,
+                                      -0.18
+                                  ],
+                          "max":  [
+                                      0.18,
+                                      1.6,
+                                      0.18
+                                  ]
+                      },
+                      {
+                          "type":  "VEC3",
+                          "bufferView":  1,
+                          "count":  60,
+                          "componentType":  5126
+                      },
+                      {
+                          "type":  "VEC2",
+                          "bufferView":  2,
+                          "count":  60,
+                          "componentType":  5126
+                      },
+                      {
+                          "type":  "VEC4",
+                          "bufferView":  3,
+                          "count":  60,
+                          "componentType":  5121
+                      },
+                      {
+                          "type":  "VEC4",
+                          "bufferView":  4,
+                          "count":  60,
+                          "componentType":  5126
+                      },
+                      {
+                          "type":  "SCALAR",
+                          "bufferView":  5,
+                          "count":  288,
+                          "componentType":  5123
+                      },
+                      {
+                          "type":  "MAT4",
+                          "bufferView":  6,
+                          "count":  4,
+                          "componentType":  5126
+                      },
+                      {
+                          "type":  "SCALAR",
+                          "componentType":  5126,
+                          "count":  32,
+                          "bufferView":  7,
+                          "max":  [
+                                      2
+                                  ]
+                      },
+                      {
+                          "type":  "VEC4",
+                          "bufferView":  8,
+                          "count":  32,
+                          "componentType":  5126
+                      },
+                      {
+                          "type":  "VEC4",
+                          "bufferView":  9,
+                          "count":  32,
+                          "componentType":  5126
+                      },
+                      {
+                          "type":  "VEC4",
+                          "bufferView":  10,
+                          "count":  32,
+                          "componentType":  5126
+                      },
+                      {
+                          "type":  "VEC4",
+                          "bufferView":  11,
+                          "count":  32,
+                          "componentType":  5126
+                      }
+                  ],
+    "scenes":  [
+                   {
+                       "nodes":  [
+                                     0
+                                 ]
+                   }
+               ],
+    "buffers":  [
+                    {
+                        "uri":  "rigged-rod.bin",
+                        "byteLength":  6128
+                    }
+                ],
+    "asset":  {
+                  "version":  "2.0",
+                  "generator":  "NaraGame gen-rigged-rod.ps1"
+              },
+    "skins":  [
+                  {
+                      "inverseBindMatrices":  6,
+                      "joints":  [
+                                     1,
+                                     2,
+                                     3,
+                                     4
+                                 ]
+                  }
+              ],
+    "bufferViews":  [
+                        {
+                            "byteLength":  720,
+                            "byteOffset":  0,
+                            "target":  34962,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  720,
+                            "byteOffset":  720,
+                            "target":  34962,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  480,
+                            "byteOffset":  1440,
+                            "target":  34962,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  240,
+                            "byteOffset":  1920,
+                            "target":  34962,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  960,
+                            "byteOffset":  2160,
+                            "target":  34962,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  576,
+                            "byteOffset":  3120,
+                            "target":  34963,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  256,
+                            "byteOffset":  3696,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  128,
+                            "byteOffset":  3952,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  512,
+                            "byteOffset":  4080,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  512,
+                            "byteOffset":  4592,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  512,
+                            "byteOffset":  5104,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  512,
+                            "byteOffset":  5616,
+                            "buffer":  0
+                        }
+                    ],
+    "meshes":  [
+                   {
+                       "primitives":  [
+                                          {
+                                              "attributes":  {
+                                                                 "POSITION":  0,
+                                                                 "JOINTS_0":  3,
+                                                                 "WEIGHTS_0":  4,
+                                                                 "TEXCOORD_0":  2,
+                                                                 "NORMAL":  1
+                                                             },
+                                              "indices":  5,
+                                              "mode":  4
+                                          }
+                                      ]
+                   }
+               ],
+    "animations":  [
+                       {
+                           "channels":  [
+                                            {
+                                                "target":  {
+                                                               "node":  1,
+                                                               "path":  "rotation"
+                                                           },
+                                                "sampler":  0
+                                            },
+                                            {
+                                                "target":  {
+                                                               "node":  2,
+                                                               "path":  "rotation"
+                                                           },
+                                                "sampler":  1
+                                            },
+                                            {
+                                                "target":  {
+                                                               "node":  3,
+                                                               "path":  "rotation"
+                                                           },
+                                                "sampler":  2
+                                            },
+                                            {
+                                                "target":  {
+                                                               "node":  4,
+                                                               "path":  "rotation"
+                                                           },
+                                                "sampler":  3
+                                            }
+                                        ],
+                           "name":  "wave",
+                           "samplers":  [
+                                            {
+                                                "input":  7,
+                                                "interpolation":  "LINEAR",
+                                                "output":  8
+                                            },
+                                            {
+                                                "input":  7,
+                                                "interpolation":  "LINEAR",
+                                                "output":  9
+                                            },
+                                            {
+                                                "input":  7,
+                                                "interpolation":  "LINEAR",
+                                                "output":  10
+                                            },
+                                            {
+                                                "input":  7,
+                                                "interpolation":  "LINEAR",
+                                                "output":  11
+                                            }
+                                        ]
+                       }
+                   ]
+}

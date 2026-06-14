@@ -18,9 +18,12 @@ namespace NaraGame {
 
 namespace {
 
-constexpr int kGltfFloat  = 5126;
+constexpr int kGltfByte   = 5120;
+constexpr int kGltfUByte  = 5121;
+constexpr int kGltfShort  = 5122;
 constexpr int kGltfUShort = 5123;
 constexpr int kGltfUInt   = 5125;
+constexpr int kGltfFloat  = 5126;
 
 std::string DirOf(const std::string& path) {
     const size_t slash = path.find_last_of("/\\");
@@ -309,6 +312,337 @@ Mesh LoadGltf(RHIDevice& device, const std::string& path) {
     if (mesh.valid)
         NARAGAME_INFO("LoadGltf: '%s' loaded (%d verts, %u indices)",
                       path.c_str(), vertexCount, mesh.indexCount);
+    return mesh;
+}
+
+// --- Skinned + animated loader --------------------------------------------
+
+namespace {
+
+// Read JOINTS_0 indices as Float4. glTF can pack joint indices as UByte
+// or UShort -- promote to float so the Vertex3DSkin layout (Float4) can
+// hold them directly. Indices are typically tiny so float precision is
+// fine; the shader casts back to int4 before lookup.
+std::vector<float> ReadJointIndices(const MiniJson::Value& accessor,
+                                    const MiniJson::Value& bufferViews,
+                                    const std::string& bin) {
+    const int componentType = accessor.GetInt("componentType");
+    const int count         = accessor.GetInt("count");
+    const int viewIdx       = accessor.GetInt("bufferView", -1);
+    if (viewIdx < 0 || count <= 0) return {};
+    if (size_t(viewIdx) >= bufferViews.arrayValue.size()) return {};
+    const MiniJson::Value& bv = bufferViews.arrayValue[size_t(viewIdx)];
+    const size_t byteOffset = size_t(bv.GetInt("byteOffset"))
+                            + size_t(accessor.GetInt("byteOffset"));
+    std::vector<float> out;
+    out.resize(size_t(count) * 4);
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(bin.data())
+                         + byteOffset;
+    if (componentType == kGltfUByte) {
+        if (byteOffset + size_t(count) * 4 > bin.size()) return {};
+        for (int i = 0; i < count; ++i)
+            for (int j = 0; j < 4; ++j)
+                out[size_t(i) * 4 + j] = float(src[i * 4 + j]);
+    } else if (componentType == kGltfUShort) {
+        if (byteOffset + size_t(count) * 8 > bin.size()) return {};
+        for (int i = 0; i < count; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                const size_t o = (i * 4 + j) * 2;
+                const uint16_t v = uint16_t(src[o + 0])
+                                  | (uint16_t(src[o + 1]) << 8);
+                out[size_t(i) * 4 + j] = float(v);
+            }
+        }
+    } else {
+        NARAGAME_WARN("LoadGltfSkinned: JOINTS_0 componentType %d unsupported",
+                      componentType);
+        return {};
+    }
+    return out;
+}
+
+// Same as ReadFloatAccessor but allowed any component count and asserted
+// at the call site; helpful for inverseBindMatrices (16 floats per
+// matrix) and animation sampler output (3 or 4 floats per key).
+std::vector<float> ReadFloatBlob(const MiniJson::Value& accessor,
+                                 const MiniJson::Value& bufferViews,
+                                 const std::string& bin,
+                                 int components,
+                                 const char* what) {
+    if (accessor.GetInt("componentType") != kGltfFloat) {
+        NARAGAME_WARN("LoadGltfSkinned: %s isn't FLOAT, skipping", what);
+        return {};
+    }
+    const int count = accessor.GetInt("count");
+    const int viewIdx = accessor.GetInt("bufferView", -1);
+    if (viewIdx < 0 || count <= 0) return {};
+    if (size_t(viewIdx) >= bufferViews.arrayValue.size()) return {};
+    const MiniJson::Value& bv = bufferViews.arrayValue[size_t(viewIdx)];
+    const size_t byteOffset = size_t(bv.GetInt("byteOffset"))
+                            + size_t(accessor.GetInt("byteOffset"));
+    const size_t byteLength = size_t(count) * size_t(components) * sizeof(float);
+    if (byteOffset + byteLength > bin.size()) return {};
+    std::vector<float> out;
+    out.resize(size_t(count) * components);
+    std::memcpy(out.data(), bin.data() + byteOffset, byteLength);
+    return out;
+}
+
+} // namespace
+
+SkinnedMesh LoadGltfSkinned(RHIDevice& device, const std::string& path) {
+    SkinnedMesh mesh;
+
+    bool ok = false;
+    const std::string source = ReadAllBytes(path, ok);
+    if (!ok) {
+        NARAGAME_ERROR("LoadGltfSkinned: cannot open '%s'", path.c_str());
+        return mesh;
+    }
+    std::string jsonErr;
+    const MiniJson::Value root = MiniJson::Parse(source, &jsonErr);
+    if (!root.IsObject()) {
+        NARAGAME_ERROR("LoadGltfSkinned: '%s' parse failed: %s",
+                       path.c_str(), jsonErr.c_str());
+        return mesh;
+    }
+
+    const MiniJson::Value* meshes      = root.Find("meshes");
+    const MiniJson::Value* accessors   = root.Find("accessors");
+    const MiniJson::Value* bufferViews = root.Find("bufferViews");
+    const MiniJson::Value* buffers     = root.Find("buffers");
+    const MiniJson::Value* nodesV      = root.Find("nodes");
+    const MiniJson::Value* skinsV      = root.Find("skins");
+    const MiniJson::Value* animsV      = root.Find("animations");
+    if (!meshes || !accessors || !bufferViews || !buffers) {
+        NARAGAME_ERROR("LoadGltfSkinned: '%s' missing core arrays", path.c_str());
+        return mesh;
+    }
+
+    const std::string& bufUri = buffers->arrayValue[0].GetString("uri");
+    if (bufUri.empty() || bufUri.rfind("data:", 0) == 0) {
+        NARAGAME_ERROR("LoadGltfSkinned: '%s' uses embedded buffer (unsupported)",
+                       path.c_str());
+        return mesh;
+    }
+    const std::string binPath = DirOf(path) + bufUri;
+    const std::string bin = ReadAllBytes(binPath, ok);
+    if (!ok) {
+        NARAGAME_ERROR("LoadGltfSkinned: cannot open buffer '%s'", binPath.c_str());
+        return mesh;
+    }
+
+    const MiniJson::Value& m0 = meshes->arrayValue[0];
+    const MiniJson::Value* prims = m0.Find("primitives");
+    if (!prims || prims->arrayValue.empty()) return mesh;
+    const MiniJson::Value& prim = prims->arrayValue[0];
+    const MiniJson::Value* attrs = prim.Find("attributes");
+    if (!attrs) return mesh;
+
+    const int posIdx = attrs->GetInt("POSITION", -1);
+    const int nrmIdx = attrs->GetInt("NORMAL", -1);
+    const int uvIdx  = attrs->GetInt("TEXCOORD_0", -1);
+    const int jIdx   = attrs->GetInt("JOINTS_0", -1);
+    const int wIdx   = attrs->GetInt("WEIGHTS_0", -1);
+    const int idxAccessorIdx = prim.GetInt("indices", -1);
+    if (posIdx < 0 || idxAccessorIdx < 0 || jIdx < 0 || wIdx < 0) {
+        NARAGAME_ERROR("LoadGltfSkinned: '%s' missing POSITION / indices / JOINTS_0 / WEIGHTS_0",
+                       path.c_str());
+        return mesh;
+    }
+
+    const auto positions = ReadFloatAccessor(
+        accessors->arrayValue[size_t(posIdx)], *bufferViews, bin, 3, "POSITION");
+    if (positions.empty()) return mesh;
+    const int vertexCount = int(positions.size() / 3);
+
+    auto normals = (nrmIdx >= 0)
+        ? ReadFloatAccessor(accessors->arrayValue[size_t(nrmIdx)],
+                            *bufferViews, bin, 3, "NORMAL")
+        : std::vector<float>{};
+    auto uvs = (uvIdx >= 0)
+        ? ReadFloatAccessor(accessors->arrayValue[size_t(uvIdx)],
+                            *bufferViews, bin, 2, "TEXCOORD_0")
+        : std::vector<float>{};
+    const auto jointIndices = ReadJointIndices(
+        accessors->arrayValue[size_t(jIdx)], *bufferViews, bin);
+    auto jointWeights = ReadFloatAccessor(
+        accessors->arrayValue[size_t(wIdx)], *bufferViews, bin, 4, "WEIGHTS_0");
+    if (jointIndices.empty() || jointWeights.empty()) {
+        NARAGAME_ERROR("LoadGltfSkinned: '%s' JOINTS_0 / WEIGHTS_0 unreadable",
+                       path.c_str());
+        return mesh;
+    }
+
+    auto indices = ReadIndexAccessor(
+        accessors->arrayValue[size_t(idxAccessorIdx)], *bufferViews, bin);
+    if (indices.empty() || indices.size() % 3 != 0) return mesh;
+
+    // Build the Vertex3DSkin array.
+    std::vector<Vertex3DSkin> verts;
+    verts.resize(size_t(vertexCount));
+    for (int i = 0; i < vertexCount; ++i) {
+        Vertex3DSkin& v = verts[size_t(i)];
+        v.position = {positions[i * 3 + 0], positions[i * 3 + 1], positions[i * 3 + 2]};
+        if (!normals.empty())
+            v.normal = {normals[i * 3 + 0], normals[i * 3 + 1], normals[i * 3 + 2]};
+        else
+            v.normal = {0.0f, 1.0f, 0.0f};
+        if (!uvs.empty())
+            v.uv = {uvs[i * 2 + 0], uvs[i * 2 + 1]};
+        else
+            v.uv = {0.0f, 0.0f};
+        for (int j = 0; j < 4; ++j) {
+            v.jointIndices[j] = jointIndices[size_t(i) * 4 + j];
+            v.jointWeights[j] = jointWeights[size_t(i) * 4 + j];
+        }
+    }
+
+    // Parse nodes (TRS hierarchy) -- needed even before the skin lookup
+    // so animation channels can reference any node by index.
+    if (nodesV && nodesV->IsArray()) {
+        mesh.nodes.resize(nodesV->arrayValue.size());
+        for (size_t i = 0; i < nodesV->arrayValue.size(); ++i) {
+            const MiniJson::Value& n = nodesV->arrayValue[i];
+            SkinnedMeshNode& d = mesh.nodes[i];
+            if (const auto* t = n.Find("translation")) {
+                if (t->IsArray() && t->arrayValue.size() >= 3) {
+                    d.translation = {float(t->arrayValue[0].numberValue),
+                                     float(t->arrayValue[1].numberValue),
+                                     float(t->arrayValue[2].numberValue)};
+                }
+            }
+            if (const auto* r = n.Find("rotation")) {
+                if (r->IsArray() && r->arrayValue.size() >= 4) {
+                    d.rotation = {float(r->arrayValue[0].numberValue),
+                                  float(r->arrayValue[1].numberValue),
+                                  float(r->arrayValue[2].numberValue),
+                                  float(r->arrayValue[3].numberValue)};
+                }
+            }
+            if (const auto* s = n.Find("scale")) {
+                if (s->IsArray() && s->arrayValue.size() >= 3) {
+                    d.scale = {float(s->arrayValue[0].numberValue),
+                               float(s->arrayValue[1].numberValue),
+                               float(s->arrayValue[2].numberValue)};
+                }
+            }
+        }
+        // Walk children arrays to populate parent indices.
+        for (size_t i = 0; i < nodesV->arrayValue.size(); ++i) {
+            const auto* kids = nodesV->arrayValue[i].Find("children");
+            if (!kids || !kids->IsArray()) continue;
+            for (const auto& c : kids->arrayValue) {
+                const int ci = int(c.numberValue);
+                if (ci >= 0 && size_t(ci) < mesh.nodes.size()) {
+                    mesh.nodes[size_t(ci)].parent = int(i);
+                }
+            }
+        }
+    }
+
+    // Skin: joints[] + inverseBindMatrices (16 floats per).
+    if (skinsV && skinsV->IsArray() && !skinsV->arrayValue.empty()) {
+        const MiniJson::Value& skin0 = skinsV->arrayValue[0];
+        if (const auto* j = skin0.Find("joints")) {
+            if (j->IsArray()) {
+                mesh.joints.reserve(j->arrayValue.size());
+                for (const auto& v : j->arrayValue) {
+                    mesh.joints.push_back(int(v.numberValue));
+                }
+            }
+        }
+        if (const auto* ibm = skin0.Find("inverseBindMatrices")) {
+            const int ibmIdx = int(ibm->numberValue);
+            if (ibmIdx >= 0 && size_t(ibmIdx) < accessors->arrayValue.size()) {
+                auto floats = ReadFloatBlob(
+                    accessors->arrayValue[size_t(ibmIdx)],
+                    *bufferViews, bin, 16, "inverseBindMatrices");
+                const size_t matrixCount = floats.size() / 16;
+                mesh.inverseBindMatrices.resize(matrixCount);
+                for (size_t i = 0; i < matrixCount; ++i) {
+                    std::memcpy(mesh.inverseBindMatrices[i].data,
+                                floats.data() + i * 16, 16 * sizeof(float));
+                }
+            }
+        }
+    }
+
+    // Animations: walk channels + samplers and pull keyframe streams.
+    // glTF channel.target.path is "translation" / "rotation" / "scale";
+    // we drop morph-target weights for the MVP.
+    if (animsV && animsV->IsArray()) {
+        for (const auto& a : animsV->arrayValue) {
+            SkinnedMeshAnim clip;
+            clip.name = a.GetString("name", "<anim>");
+            const auto* channels = a.Find("channels");
+            const auto* samplers = a.Find("samplers");
+            if (!channels || !samplers) continue;
+            for (const auto& chV : channels->arrayValue) {
+                const int sIdx = chV.GetInt("sampler", -1);
+                const auto* targetV = chV.Find("target");
+                if (sIdx < 0 || !targetV) continue;
+                if (size_t(sIdx) >= samplers->arrayValue.size()) continue;
+                const int nodeIdx = targetV->GetInt("node", -1);
+                const std::string& propPath = targetV->GetString("path");
+                SkinnedMeshAnimChannel ch;
+                ch.nodeIndex = nodeIdx;
+                if      (propPath == "translation") ch.property = SkinnedMeshAnimChannel::Translation;
+                else if (propPath == "rotation")    ch.property = SkinnedMeshAnimChannel::Rotation;
+                else if (propPath == "scale")       ch.property = SkinnedMeshAnimChannel::Scale;
+                else continue;
+
+                const auto& smp = samplers->arrayValue[size_t(sIdx)];
+                const int inAcc  = smp.GetInt("input", -1);
+                const int outAcc = smp.GetInt("output", -1);
+                if (inAcc < 0 || outAcc < 0) continue;
+                if (size_t(inAcc)  >= accessors->arrayValue.size()) continue;
+                if (size_t(outAcc) >= accessors->arrayValue.size()) continue;
+                ch.times = ReadFloatBlob(accessors->arrayValue[size_t(inAcc)],
+                                         *bufferViews, bin, 1, "anim times");
+                const int comps = (ch.property == SkinnedMeshAnimChannel::Rotation) ? 4 : 3;
+                ch.values = ReadFloatBlob(accessors->arrayValue[size_t(outAcc)],
+                                          *bufferViews, bin, comps, "anim values");
+                if (ch.times.empty() || ch.values.empty()) continue;
+                clip.duration = std::max(clip.duration, ch.times.back());
+                clip.channels.push_back(std::move(ch));
+            }
+            mesh.animations.push_back(std::move(clip));
+        }
+    }
+
+    // Upload to GPU.
+    BufferDesc vb;
+    vb.type        = BufferType::Vertex;
+    vb.usage       = BufferUsage::Static;
+    vb.size        = verts.size() * sizeof(Vertex3DSkin);
+    vb.initialData = verts.data();
+    mesh.vertexBuffer = device.CreateBuffer(vb);
+
+    BufferDesc ib;
+    ib.type  = BufferType::Index;
+    ib.usage = BufferUsage::Static;
+    if (vertexCount <= 0xFFFF) {
+        std::vector<uint16_t> i16(indices.size());
+        for (size_t i = 0; i < indices.size(); ++i) i16[i] = uint16_t(indices[i]);
+        ib.size        = i16.size() * sizeof(uint16_t);
+        ib.initialData = i16.data();
+        mesh.indexBuffer = device.CreateBuffer(ib);
+        mesh.indexFormat = IndexFormat::Uint16;
+    } else {
+        ib.size        = indices.size() * sizeof(uint32_t);
+        ib.initialData = indices.data();
+        mesh.indexBuffer = device.CreateBuffer(ib);
+        mesh.indexFormat = IndexFormat::Uint32;
+    }
+    mesh.indexCount = uint32_t(indices.size());
+    mesh.vertices   = std::move(verts);
+    mesh.indices    = std::move(indices);
+    mesh.valid      = (mesh.vertexBuffer && mesh.indexBuffer);
+    if (mesh.valid)
+        NARAGAME_INFO("LoadGltfSkinned: '%s' loaded (%d verts, %u indices, %zu joints, %zu anims)",
+                      path.c_str(), vertexCount, mesh.indexCount,
+                      mesh.joints.size(), mesh.animations.size());
     return mesh;
 }
 
