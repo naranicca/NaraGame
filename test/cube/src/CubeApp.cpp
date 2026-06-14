@@ -11,6 +11,7 @@
 #include <NaraGame/core/Log.h>
 #include <NaraGame/math/Math.h>
 #include <NaraGame/renderer/Camera3D.h>
+#include <NaraGame/renderer/PostProcess.h>
 #include <NaraGame/renderer/Renderer3D.h>
 #include <NaraGame/renderer/rhi/RHIDevice.h>
 #include <NaraGame/renderer/rhi/RHIResources.h>
@@ -52,6 +53,7 @@ public:
 
     void OnStart() override {
         m_renderer.Init(GetDevice());
+        m_post.Init(GetDevice(), kWindowW, kWindowH);
 
         // 16x16 white texture so the PBR material's albedoFactor /
         // metallic-roughness scalars drive the look entirely. Real
@@ -87,6 +89,7 @@ public:
     }
 
     void OnStop() override {
+        m_post.Shutdown();
         m_renderer.Shutdown();
     }
 
@@ -96,6 +99,10 @@ public:
     }
 
     void OnRender() override {
+        // Bind the HDR scene RT + its matching depth so the 3D pass
+        // writes into the post-process domain instead of the LDR
+        // backbuffer.
+        m_post.BindSceneTarget();
         GetDevice().Clear(Color(0.55f, 0.58f, 0.65f, 1.0f));
         GetDevice().ClearDepth(1.0f);
 
@@ -111,7 +118,9 @@ public:
         fog.startDistance = 6.0f;
         fog.endDistance   = 18.0f;
 
-        m_renderer.Begin(m_camera.View(), m_camera.Projection(), light, fog);
+        m_renderer.Begin(m_camera.View(), m_camera.Projection(),
+                         light, fog,
+                         m_post.SceneColor(), m_post.SceneDepth());
 
         // Ground plane below the spheres.
         const Mat4 planeModel = mat4::Translation({0.0f, -0.6f, 0.0f});
@@ -146,6 +155,18 @@ public:
                                          /*roughness=*/0.35f});
         }
         m_renderer.End();
+
+        // Bright pass + 2-pass Gaussian blur + ACES composite (with DoF)
+        // into the backbuffer. Knobs are tuned so the metallic spheres'
+        // highlights bloom subtly and the far edges of the plane fall
+        // out of focus.
+        PostProcessParams pp;
+        pp.bloomThreshold = 0.9f;
+        pp.bloomStrength  = 0.55f;
+        pp.focusDistance  = 5.0f;
+        pp.focusRange     = 8.0f;
+        pp.exposure       = 1.1f;
+        m_post.RunPost(pp);
     }
 
 private:
@@ -207,6 +228,7 @@ private:
     }
 
     Renderer3D                  m_renderer;
+    PostProcess                 m_post;
     Camera3D                    m_camera;
     std::unique_ptr<RHITexture> m_white;
     std::unique_ptr<RHITexture> m_ground;

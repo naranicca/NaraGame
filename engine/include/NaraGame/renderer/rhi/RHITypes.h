@@ -32,9 +32,12 @@ enum class BufferType { Vertex, Index, Uniform };
 enum class BufferUsage { Static, Dynamic };       // Dynamic = CPU-updated per frame
 enum class IndexFormat { Uint16, Uint32 };
 // RGBA8 is the colour format every 2D/3D pass uses for color buffers and
-// asset textures. Depth24 is a 24-bit depth + 8-bit stencil texture --
-// used by the swapchain's default depth buffer and by shadow-map RTs.
-enum class TextureFormat { RGBA8, Depth24 };
+// asset textures. RGBA16F is the half-float HDR format used for the
+// scene render target before tone mapping. Depth24 is a 24-bit depth +
+// 8-bit stencil texture, used by the swapchain depth buffer and by
+// shadow-map / post-process depth RTs (Depth24 with renderTarget=false
+// + an SRV path so post-processing can sample it).
+enum class TextureFormat { RGBA8, RGBA16F, Depth24 };
 enum class PrimitiveTopology { TriangleList };
 
 // Depth comparison for pipelines that test depth. `Less` matches the

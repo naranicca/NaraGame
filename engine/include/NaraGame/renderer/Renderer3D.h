@@ -88,9 +88,18 @@ public:
     // Lock in the camera, light + ambient hemisphere, and fog for the
     // current frame. The queue starts empty; subsequent DrawMesh calls
     // populate it. End() does the actual GPU work.
+    //
+    // sceneColor / sceneDepth optionally route the main-pass output to
+    // an offscreen render target (e.g. a PostProcess HDR RT + its
+    // matching depth). Both null = render straight to the backbuffer
+    // (the simple path the cube test app used before Phase 6). If
+    // either is null the corresponding default (backbuffer colour or
+    // backbuffer depth) is used.
     void Begin(const Mat4& view, const Mat4& projection,
                const DirectionalLight& light = {},
-               const FogParams& fog = {});
+               const FogParams& fog = {},
+               RHITexture* sceneColor = nullptr,
+               RHITexture* sceneDepth = nullptr);
 
     // Queue one mesh for both the shadow pass and the main pass. `vb` /
     // `ib` are buffers created via CreateBuffer with the right
@@ -147,6 +156,11 @@ private:
         Material    material;
     };
     std::vector<QueuedMesh> m_queue;
+    // Scene target captured in Begin so the main pass can route to it
+    // after the shadow pass swaps the RT to the shadow map. Both null =
+    // backbuffer + backbuffer depth.
+    RHITexture* m_sceneColor = nullptr;
+    RHITexture* m_sceneDepth = nullptr;
     bool m_inPass = false;
 };
 

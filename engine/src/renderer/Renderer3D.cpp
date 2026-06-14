@@ -329,13 +329,17 @@ void Renderer3D::Shutdown() {
 
 void Renderer3D::Begin(const Mat4& view, const Mat4& projection,
                        const DirectionalLight& light,
-                       const FogParams& fog) {
+                       const FogParams& fog,
+                       RHITexture* sceneColor,
+                       RHITexture* sceneDepth) {
     if (!m_device || !m_pipelineMain || !m_frameUB) return;
     if (m_inPass) {
         NARAGAME_WARN("Renderer3D::Begin called without matching End");
     }
     m_inPass = true;
     m_queue.clear();
+    m_sceneColor = sceneColor;
+    m_sceneDepth = sceneDepth;
 
     // Fit an orthographic light camera around the shadow volume. The
     // light "position" doesn't matter physically; place the eye outside
@@ -478,10 +482,16 @@ void Renderer3D::RunShadowPass(const Mat4& /*lightViewProj*/) {
 }
 
 void Renderer3D::RunMainPass() {
-    // Back to the backbuffer + its matching depth view. The Clear /
-    // ClearDepth for the main framebuffer is the caller's responsibility
+    // Route the main pass back to whatever the caller staged in Begin.
+    // The shadow pass swapped to the shadow map; without restoring
+    // here the main draws would silently land on the shadow texture.
+    // Clear / ClearDepth on the target is the caller's responsibility
     // (we don't want to wipe e.g. a 2D HUD that was drawn first).
-    m_device->SetRenderTarget(nullptr);
+    if (m_sceneColor || m_sceneDepth) {
+        m_device->SetRenderTargets(m_sceneColor, m_sceneDepth);
+    } else {
+        m_device->SetRenderTarget(nullptr);
+    }
 
     m_device->BindPipeline(m_pipelineMain.get());
     m_device->BindUniformBuffer(0, m_frameUB.get());

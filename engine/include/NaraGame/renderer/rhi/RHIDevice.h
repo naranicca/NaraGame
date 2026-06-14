@@ -43,6 +43,18 @@ public:
     // The previous target's contents become readable as a sampled texture.
     virtual void SetRenderTarget(RHITexture* target) = 0;
 
+    // Bind a colour target and a depth target together. Use when the
+    // post-process pipeline needs the scene rendered into an HDR colour
+    // RT and its own depth RT so a later pass can sample the depth as
+    // a texture (DoF, edge detection, ...). Default falls back to
+    // SetRenderTarget(colorTex) for backends that haven't implemented
+    // the dual-RT path; that loses the custom depth attachment but
+    // keeps the colour render working.
+    virtual void SetRenderTargets(RHITexture* colorTex, RHITexture* depthTex) {
+        (void)depthTex;
+        SetRenderTarget(colorTex);
+    }
+
     // --- Resource creation ---
     virtual std::unique_ptr<RHIBuffer> CreateBuffer(const BufferDesc& desc) = 0;
     virtual std::unique_ptr<RHITexture> CreateTexture(const TextureDesc& desc) = 0;

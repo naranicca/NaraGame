@@ -71,6 +71,7 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
     : m_context(context), m_width(desc.width), m_height(desc.height), m_filter(desc.filter) {
 
     const bool isDepth = (desc.format == TextureFormat::Depth24);
+    const bool isHDR   = (desc.format == TextureFormat::RGBA16F);
 
     D3D11_TEXTURE2D_DESC td{};
     td.Width = desc.width;
@@ -85,6 +86,10 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
     if (isDepth) {
         td.Format    = DXGI_FORMAT_R24G8_TYPELESS;
         td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    } else if (isHDR) {
+        td.Format    = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (desc.renderTarget) td.BindFlags |= D3D11_BIND_RENDER_TARGET;
     } else {
         td.Format    = DXGI_FORMAT_R8G8B8A8_UNORM;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -95,10 +100,11 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
     init.pSysMem = desc.pixels;
     init.SysMemPitch = desc.width * 4; // RGBA8 path only
 
-    // Render targets and depth textures start undefined and get filled
-    // by GPU writes; we never seed them from CPU pixels.
+    // Render targets, depth textures, and HDR float targets start
+    // undefined and get filled by GPU writes; we never seed them from
+    // CPU pixels.
     const D3D11_SUBRESOURCE_DATA* initPtr =
-        (desc.pixels && !desc.renderTarget && !isDepth) ? &init : nullptr;
+        (desc.pixels && !desc.renderTarget && !isDepth && !isHDR) ? &init : nullptr;
 
     HRESULT hr =
         device->CreateTexture2D(&td, initPtr, m_texture.GetAddressOf());

@@ -27,6 +27,7 @@ public:
     void Present() override;
 
     void SetRenderTarget(RHITexture* target) override;
+    void SetRenderTargets(RHITexture* colorTex, RHITexture* depthTex) override;
 
     std::unique_ptr<RHIBuffer> CreateBuffer(const BufferDesc& desc) override;
     std::unique_ptr<RHITexture> CreateTexture(const TextureDesc& desc) override;

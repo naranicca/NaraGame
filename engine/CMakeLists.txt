@@ -30,6 +30,7 @@ set(NARAGAME_SOURCES
     src/renderer/MSDFFont.cpp
     src/renderer/ParticleSystem.cpp
     src/renderer/Renderer2D.cpp
+    src/renderer/PostProcess.cpp
     src/renderer/Renderer3D.cpp
     src/renderer/SpriteSheet.cpp
     src/renderer/TextureAtlas.cpp

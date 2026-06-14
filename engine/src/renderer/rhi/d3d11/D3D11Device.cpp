@@ -216,6 +216,48 @@ void D3D11Device::SetRenderTarget(RHITexture* target) {
     m_context->RSSetViewports(1, &vp);
 }
 
+void D3D11Device::SetRenderTargets(RHITexture* colorTex, RHITexture* depthTex) {
+    if (!m_context) return;
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    uint32_t w = m_width, h = m_height;
+    if (colorTex) {
+        auto* c = static_cast<D3D11Texture*>(colorTex);
+        rtv = c->RTV();
+        w   = c->Width();
+        h   = c->Height();
+    } else {
+        rtv = m_renderTarget.Get();
+    }
+    if (depthTex) {
+        auto* d = static_cast<D3D11Texture*>(depthTex);
+        dsv = d->DSV();
+        if (colorTex == nullptr) {
+            w = d->Width();
+            h = d->Height();
+        }
+    } else {
+        dsv = m_depthView.Get();
+    }
+    // Unbind anything that might be sampled from these textures so the
+    // device doesn't silently null the views on the OM bind.
+    ID3D11ShaderResourceView* nullSrv[1] = {nullptr};
+    for (uint32_t i = 0; i < 8; ++i)
+        m_context->PSSetShaderResources(i, 1, nullSrv);
+
+    m_currentRTV = rtv;
+    m_currentDSV = dsv;
+    ID3D11RenderTargetView* targets[] = {rtv};
+    m_context->OMSetRenderTargets(rtv ? 1 : 0, rtv ? targets : nullptr, dsv);
+
+    D3D11_VIEWPORT vp{};
+    vp.Width    = static_cast<float>(w);
+    vp.Height   = static_cast<float>(h);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    m_context->RSSetViewports(1, &vp);
+}
+
 void D3D11Device::EndFrame() {}
 
 void D3D11Device::Present() {
