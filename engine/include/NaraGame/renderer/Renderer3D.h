@@ -24,6 +24,23 @@ struct Vertex3D {
     Vec2 uv;
 };
 
+// Skinned vertex format: Vertex3D layout plus four joint indices and
+// four blend weights per vertex. Indices ride as floats (cast to int
+// in the shader) so we can reuse VertexFormat::Float4 without adding
+// a UByte4 path to the RHI. Weights should sum to 1 across the four
+// influences; unused slots get index 0 / weight 0.
+struct Vertex3DSkin {
+    Vec3  position;
+    Vec3  normal;
+    Vec2  uv;
+    float jointIndices[4];
+    float jointWeights[4];
+};
+
+// Maximum joints supported by the skinning cbuffer. Bumping this means
+// editing kMaxJoints in Renderer3D.cpp's HLSL too.
+constexpr int kMaxJoints = 64;
+
 // Hemi-ambient directional light. `direction` points FROM the source
 // TOWARD the lit surface (so {0, -1, 0} is a sun straight overhead).
 // skyAmbient / groundAmbient give the two halves of the hemisphere
@@ -113,6 +130,20 @@ public:
                   const Mat4& model, RHITexture* texture,
                   const Material& material = {});
 
+    // Same as DrawMesh but the mesh data uses Vertex3DSkin (per-vertex
+    // joint indices + weights) and the caller hands in an array of
+    // skin matrices = jointWorld * inverseBindMatrix already composed.
+    // `jointCount` <= kMaxJoints; extra indices in the cbuffer stay at
+    // identity so a smaller skeleton still works. Both the shadow pass
+    // and the main pass replay the skinning, so animated characters
+    // cast and receive shadows the same way static meshes do.
+    void DrawSkinnedMesh(RHIBuffer* vb, RHIBuffer* ib, uint32_t indexCount,
+                         IndexFormat indexFormat,
+                         const Mat4& model,
+                         const Mat4* jointMatrices, int jointCount,
+                         RHITexture* texture,
+                         const Material& material = {});
+
     // Run the shadow pass + the main pass. The main pass binds the
     // backbuffer's RTV + depth view, so the caller is expected to have
     // already called Clear() / ClearDepth() on the device for the
@@ -127,14 +158,21 @@ private:
 
     std::unique_ptr<RHIShader>   m_shaderMain;
     std::unique_ptr<RHIShader>   m_shaderShadow;
+    std::unique_ptr<RHIShader>   m_shaderMainSkin;
+    std::unique_ptr<RHIShader>   m_shaderShadowSkin;
     std::unique_ptr<RHIPipeline> m_pipelineMain;
     std::unique_ptr<RHIPipeline> m_pipelineShadow;
+    std::unique_ptr<RHIPipeline> m_pipelineMainSkin;
+    std::unique_ptr<RHIPipeline> m_pipelineShadowSkin;
 
     // Per-frame uniforms (camera + light + fog) updated in Begin; per-
     // draw uniforms (model + tint) updated inside the shadow / main pass
     // for each queued mesh.
     std::unique_ptr<RHIBuffer>   m_frameUB;
     std::unique_ptr<RHIBuffer>   m_drawUB;
+    // SkinCB carries up to kMaxJoints float4x4 matrices in cbuffer b2.
+    // Bound only during skinned draws; the static path leaves it alone.
+    std::unique_ptr<RHIBuffer>   m_skinUB;
     // 2x2 white albedo used when DrawMesh receives a null texture.
     std::unique_ptr<RHITexture>  m_whiteTex;
     // Depth-format render target written by the shadow pass and sampled
@@ -156,6 +194,25 @@ private:
         Material    material;
     };
     std::vector<QueuedMesh> m_queue;
+
+    // Separate queue for skinned meshes so we can swap the PSO (and
+    // upload SkinCB) only on the boundary between static and skinned
+    // draws. jointStart / jointCount index into m_skinPool below so
+    // each queued mesh keeps its own joint matrices around for the
+    // shadow + main replay.
+    struct QueuedSkinned {
+        RHIBuffer*  vb;
+        RHIBuffer*  ib;
+        uint32_t    indexCount;
+        IndexFormat indexFormat;
+        Mat4        model;
+        RHITexture* texture;
+        Material    material;
+        int         jointStart;
+        int         jointCount;
+    };
+    std::vector<QueuedSkinned> m_skinQueue;
+    std::vector<Mat4>          m_skinPool;
     // Scene target captured in Begin so the main pass can route to it
     // after the shadow pass swaps the RT to the shadow map. Both null =
     // backbuffer + backbuffer depth.

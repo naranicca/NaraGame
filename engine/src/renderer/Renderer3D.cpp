@@ -33,6 +33,12 @@ struct DrawCB {
     float albedoFactor[4];   // .rgba multiplied against albedo sample
     float mrParams[4];       // .x = metallic, .y = roughness, .zw unused
 };
+// kMaxJoints comes from Renderer3D.h; mirror it here so the cbuffer
+// stays sized correctly. 64 joints * 64 bytes = 4 KiB, well under the
+// 64 KiB D3D11 cbuffer cap.
+struct SkinCB {
+    float jointMatrices[kMaxJoints * 16];
+};
 
 // One shader source with four entry points. The pipeline picks two of
 // them: VSMain/PSMain for the lit main pass, VSShadow/PSShadow for the
@@ -198,7 +204,63 @@ float4 VSShadow(VSIn input) : SV_POSITION {
 void PSShadow() {
     // Depth-only pass; nothing to write.
 }
+
+// --- Skinned variants ------------------------------------------------
+//
+// The skin matrices come in cbuffer b2 as an array of float4x4. The
+// vertex carries up to four joint influences as float indices (cast to
+// int) + four weights that should sum to 1. The blend is the standard
+// linear-blend skinning sum: SkinM = sum(W[i] * jointMatrices[Idx[i]]).
+cbuffer SkinCB : register(b2) {
+    row_major float4x4 jointMatrices[64];
+};
+
+struct VSInSkin {
+    float3 position : POSITION;
+    float3 normal   : NORMAL;
+    float2 uv       : TEXCOORD0;
+    float4 jIdx     : JOINTINDEX;
+    float4 jWeight  : JOINTWEIGHT;
+};
+
+float4x4 BlendSkin(VSInSkin input) {
+    int4 idx = int4(input.jIdx);
+    float4x4 skin =
+        jointMatrices[idx.x] * input.jWeight.x +
+        jointMatrices[idx.y] * input.jWeight.y +
+        jointMatrices[idx.z] * input.jWeight.z +
+        jointMatrices[idx.w] * input.jWeight.w;
+    return skin;
+}
+
+VSOut VSMainSkin(VSInSkin input) {
+    float4x4 skin = BlendSkin(input);
+    float4 lp = mul(skin, float4(input.position, 1.0));
+    float4 wp = mul(model, lp);
+    VSOut output;
+    output.position      = mul(viewProj, wp);
+    output.worldPos      = wp.xyz;
+    output.viewPos       = mul(view, wp).xyz;
+    output.lightSpacePos = mul(lightViewProj, wp);
+    // Skinning rotates the normal too; assume rigid joints (no per-vertex
+    // shear), so the upper 3x3 of the blended skin matrix rotates the
+    // normal cleanly.
+    float3 skinnedNormal = mul((float3x3)skin, input.normal);
+    output.worldNormal   = mul((float3x3)model, skinnedNormal);
+    output.uv            = input.uv;
+    return output;
+}
+
+float4 VSShadowSkin(VSInSkin input) : SV_POSITION {
+    float4x4 skin = BlendSkin(input);
+    float4 wp = mul(model, mul(skin, float4(input.position, 1.0)));
+    return mul(lightViewProj, wp);
+}
 )HLSL";
+
+// Compile-time sanity: HLSL hard-codes 64 above; keep the C++ side in
+// sync.
+static_assert(kMaxJoints == 64, "Update HLSL jointMatrices[N] to match");
 
 void CopyMatrix(const Mat4& src, float dst[16]) {
     for (int i = 0; i < 16; ++i) dst[i] = src.data[i];
@@ -270,6 +332,51 @@ void Renderer3D::Init(RHIDevice& device) {
     pdShadow.cullMode      = CullMode::Front;
     m_pipelineShadow = device.CreatePipeline(pdShadow);
 
+    // Skinned shaders share the source -- only the entry point differs.
+    ShaderDesc sdMainSkin;
+    sdMainSkin.vertexSource = kShaderSrc;
+    sdMainSkin.pixelSource  = kShaderSrc;
+    sdMainSkin.vertexEntry  = "VSMainSkin";
+    sdMainSkin.pixelEntry   = "PSMain";
+    sdMainSkin.debugName    = "Renderer3D.MainSkin";
+    m_shaderMainSkin = device.CreateShader(sdMainSkin);
+
+    ShaderDesc sdShadowSkin;
+    sdShadowSkin.vertexSource = kShaderSrc;
+    sdShadowSkin.pixelSource  = kShaderSrc;
+    sdShadowSkin.vertexEntry  = "VSShadowSkin";
+    sdShadowSkin.pixelEntry   = "PSShadow";
+    sdShadowSkin.debugName    = "Renderer3D.ShadowSkin";
+    m_shaderShadowSkin = device.CreateShader(sdShadowSkin);
+
+    VertexLayout skinLayout;
+    skinLayout.stride = sizeof(Vertex3DSkin);
+    skinLayout.attributes.push_back({"POSITION", 0, VertexFormat::Float3, 0});
+    skinLayout.attributes.push_back({"NORMAL",   0, VertexFormat::Float3,
+                                     uint32_t(offsetof(Vertex3DSkin, normal))});
+    skinLayout.attributes.push_back({"TEXCOORD", 0, VertexFormat::Float2,
+                                     uint32_t(offsetof(Vertex3DSkin, uv))});
+    skinLayout.attributes.push_back({"JOINTINDEX",  0, VertexFormat::Float4,
+                                     uint32_t(offsetof(Vertex3DSkin, jointIndices))});
+    skinLayout.attributes.push_back({"JOINTWEIGHT", 0, VertexFormat::Float4,
+                                     uint32_t(offsetof(Vertex3DSkin, jointWeights))});
+
+    PipelineDesc pdMainSkin = pdMain;
+    pdMainSkin.shader       = m_shaderMainSkin.get();
+    pdMainSkin.vertexLayout = skinLayout;
+    m_pipelineMainSkin = device.CreatePipeline(pdMainSkin);
+
+    PipelineDesc pdShadowSkin = pdShadow;
+    pdShadowSkin.shader       = m_shaderShadowSkin.get();
+    pdShadowSkin.vertexLayout = skinLayout;
+    m_pipelineShadowSkin = device.CreatePipeline(pdShadowSkin);
+
+    BufferDesc skb;
+    skb.type  = BufferType::Uniform;
+    skb.usage = BufferUsage::Dynamic;
+    skb.size  = sizeof(SkinCB);
+    m_skinUB = device.CreateBuffer(skb);
+
     // Per-frame + per-draw constant buffers, dynamic so we can update
     // them every frame / draw with Map(DISCARD).
     BufferDesc fb;
@@ -316,12 +423,19 @@ void Renderer3D::Init(RHIDevice& device) {
 
 void Renderer3D::Shutdown() {
     m_queue.clear();
+    m_skinQueue.clear();
+    m_skinPool.clear();
     m_shadowMap.reset();
     m_whiteTex.reset();
+    m_skinUB.reset();
     m_drawUB.reset();
     m_frameUB.reset();
+    m_pipelineShadowSkin.reset();
+    m_pipelineMainSkin.reset();
     m_pipelineShadow.reset();
     m_pipelineMain.reset();
+    m_shaderShadowSkin.reset();
+    m_shaderMainSkin.reset();
     m_shaderShadow.reset();
     m_shaderMain.reset();
     m_device = nullptr;
@@ -338,6 +452,8 @@ void Renderer3D::Begin(const Mat4& view, const Mat4& projection,
     }
     m_inPass = true;
     m_queue.clear();
+    m_skinQueue.clear();
+    m_skinPool.clear();
     m_sceneColor = sceneColor;
     m_sceneDepth = sceneDepth;
 
@@ -408,6 +524,42 @@ void Renderer3D::Begin(const Mat4& view, const Mat4& projection,
     m_frameUB->Update(&cb, sizeof(cb));
 }
 
+void Renderer3D::DrawSkinnedMesh(RHIBuffer* vb, RHIBuffer* ib,
+                                 uint32_t indexCount,
+                                 IndexFormat indexFormat,
+                                 const Mat4& model,
+                                 const Mat4* jointMatrices, int jointCount,
+                                 RHITexture* texture,
+                                 const Material& material) {
+    if (!m_device || !vb || !ib || indexCount == 0) return;
+    if (!m_inPass) {
+        NARAGAME_WARN("Renderer3D::DrawSkinnedMesh called outside Begin/End");
+        return;
+    }
+    if (jointCount <= 0 || jointMatrices == nullptr) {
+        NARAGAME_WARN("Renderer3D::DrawSkinnedMesh requires at least one joint");
+        return;
+    }
+    if (jointCount > kMaxJoints) {
+        NARAGAME_WARN("Renderer3D::DrawSkinnedMesh: %d joints > max %d, clamping",
+                      jointCount, kMaxJoints);
+        jointCount = kMaxJoints;
+    }
+    QueuedSkinned q;
+    q.vb          = vb;
+    q.ib          = ib;
+    q.indexCount  = indexCount;
+    q.indexFormat = indexFormat;
+    q.model       = model;
+    q.texture     = texture ? texture : m_whiteTex.get();
+    q.material    = material;
+    q.jointStart  = int(m_skinPool.size());
+    q.jointCount  = jointCount;
+    m_skinPool.insert(m_skinPool.end(), jointMatrices,
+                      jointMatrices + jointCount);
+    m_skinQueue.push_back(q);
+}
+
 void Renderer3D::DrawMesh(RHIBuffer* vb, RHIBuffer* ib, uint32_t indexCount,
                           IndexFormat indexFormat,
                           const Mat4& model, RHITexture* texture,
@@ -432,9 +584,11 @@ void Renderer3D::End() {
     if (!m_device || !m_pipelineMain) {
         m_inPass = false;
         m_queue.clear();
+        m_skinQueue.clear();
+        m_skinPool.clear();
         return;
     }
-    if (m_queue.empty()) {
+    if (m_queue.empty() && m_skinQueue.empty()) {
         m_inPass = false;
         return;
     }
@@ -444,6 +598,8 @@ void Renderer3D::End() {
                         // later split frame data per pass
     RunMainPass();
     m_queue.clear();
+    m_skinQueue.clear();
+    m_skinPool.clear();
     m_inPass = false;
 }
 
@@ -478,6 +634,40 @@ void Renderer3D::RunShadowPass(const Mat4& /*lightViewProj*/) {
         m_device->BindVertexBuffer(q.vb, sizeof(Vertex3D), 0);
         m_device->BindIndexBuffer(q.ib, q.indexFormat);
         m_device->DrawIndexed(q.indexCount, 0);
+    }
+
+    // Skinned shadow pass: swap PSO + upload SkinCB per mesh. SkinCB is
+    // sized for kMaxJoints; copy in what the caller supplied and leave
+    // the rest as zero-filled (the shader only indexes the joints it
+    // needs).
+    if (!m_skinQueue.empty()) {
+        m_device->BindPipeline(m_pipelineShadowSkin.get());
+        m_device->BindUniformBuffer(0, m_frameUB.get());
+        SkinCB skinCB{};
+        for (const QueuedSkinned& q : m_skinQueue) {
+            DrawCB dcb;
+            QueuedMesh stub;
+            stub.model    = q.model;
+            stub.material = q.material;
+            packDraw(stub, dcb);
+            m_drawUB->Update(&dcb, sizeof(dcb));
+            for (int j = 0; j < q.jointCount; ++j) {
+                CopyMatrix(m_skinPool[size_t(q.jointStart + j)],
+                           &skinCB.jointMatrices[j * 16]);
+            }
+            // Fill remaining joints with identity so a stray index out
+            // of [0, jointCount) still produces a finite vertex.
+            for (int j = q.jointCount; j < kMaxJoints; ++j) {
+                Mat4 id;
+                CopyMatrix(id, &skinCB.jointMatrices[j * 16]);
+            }
+            m_skinUB->Update(&skinCB, sizeof(skinCB));
+            m_device->BindUniformBuffer(1, m_drawUB.get());
+            m_device->BindUniformBuffer(2, m_skinUB.get());
+            m_device->BindVertexBuffer(q.vb, sizeof(Vertex3DSkin), 0);
+            m_device->BindIndexBuffer(q.ib, q.indexFormat);
+            m_device->DrawIndexed(q.indexCount, 0);
+        }
     }
 }
 
@@ -519,6 +709,38 @@ void Renderer3D::RunMainPass() {
         m_device->BindVertexBuffer(q.vb, sizeof(Vertex3D), 0);
         m_device->BindIndexBuffer(q.ib, q.indexFormat);
         m_device->DrawIndexed(q.indexCount, 0);
+    }
+
+    // Skinned main pass: swap to the skin PSO + upload SkinCB. Shadow
+    // map stays bound at t1 from the static draws above.
+    if (!m_skinQueue.empty()) {
+        m_device->BindPipeline(m_pipelineMainSkin.get());
+        m_device->BindUniformBuffer(0, m_frameUB.get());
+        m_device->BindTexture(1, m_shadowMap.get());
+        SkinCB skinCB{};
+        for (const QueuedSkinned& q : m_skinQueue) {
+            DrawCB dcb;
+            QueuedMesh stub;
+            stub.model    = q.model;
+            stub.material = q.material;
+            packDraw(stub, dcb);
+            m_drawUB->Update(&dcb, sizeof(dcb));
+            for (int j = 0; j < q.jointCount; ++j) {
+                CopyMatrix(m_skinPool[size_t(q.jointStart + j)],
+                           &skinCB.jointMatrices[j * 16]);
+            }
+            for (int j = q.jointCount; j < kMaxJoints; ++j) {
+                Mat4 id;
+                CopyMatrix(id, &skinCB.jointMatrices[j * 16]);
+            }
+            m_skinUB->Update(&skinCB, sizeof(skinCB));
+            m_device->BindUniformBuffer(1, m_drawUB.get());
+            m_device->BindUniformBuffer(2, m_skinUB.get());
+            m_device->BindTexture(0, q.texture);
+            m_device->BindVertexBuffer(q.vb, sizeof(Vertex3DSkin), 0);
+            m_device->BindIndexBuffer(q.ib, q.indexFormat);
+            m_device->DrawIndexed(q.indexCount, 0);
+        }
     }
 }
 
