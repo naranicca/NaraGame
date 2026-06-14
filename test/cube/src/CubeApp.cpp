@@ -1,11 +1,9 @@
-// Smoke test for Renderer3D + the .obj mesh loader + the Phase 4
-// shadow / hemi-ambient / fog pipeline. A flat ground plane sits below
-// a rotating cube and sphere; both meshes cast shadows onto the plane.
-// Hemi ambient tints surfaces facing up vs down, and linear fog fades
-// the plane's far edge into the background colour.
-//
-// There's no input or game logic; the camera is fixed. F2 would have
-// been useful here but the test app doesn't pull in DebugDraw.
+// Smoke test for the Phase 5 PBR pipeline. A 2x5 grid of spheres sits
+// above a ground plane: the top row is dielectric (metallic = 0) and
+// the bottom row is metallic (metallic = 1); roughness goes 0 -> 1
+// left to right. The directional light + hemi ambient + shadow + fog
+// from Phase 4 all carry over, so a single render frame shows the full
+// stack of features.
 
 #include <NaraGame/assets/MeshLoader.h>
 #include <NaraGame/core/Application.h>
@@ -33,21 +31,19 @@ namespace {
 constexpr uint32_t kWindowW = 1280;
 constexpr uint32_t kWindowH = 720;
 
-// 16x16 ground plane mesh. Big enough that the shadows under the
-// rotating shapes always land on it, small enough that its far edges
-// don't fall completely into fog. Four corners share a single up-
-// facing normal; UVs tile the checker ~one cell per world unit so the
-// perspective foreshortening reads clearly.
-constexpr float kPlaneSize = 8.0f;
+constexpr float kPlaneSize = 12.0f;
 const Vertex3D kPlaneVerts[4] = {
     {{-kPlaneSize, 0.0f, -kPlaneSize}, {0, 1, 0}, {0.0f, 0.0f}},
     {{ kPlaneSize, 0.0f, -kPlaneSize}, {0, 1, 0}, {1.0f, 0.0f}},
     {{ kPlaneSize, 0.0f,  kPlaneSize}, {0, 1, 0}, {1.0f, 1.0f}},
     {{-kPlaneSize, 0.0f,  kPlaneSize}, {0, 1, 0}, {0.0f, 1.0f}},
 };
-// Reversed winding (CCW when viewed FROM ABOVE, which is what the
-// camera sees) so the back-face cull doesn't drop the top of the plane.
+// CCW-from-above winding so the back-face cull doesn't drop the top.
 const uint16_t kPlaneIndices[6] = {0, 2, 1, 0, 3, 2};
+
+constexpr int   kSphereCols = 5;        // roughness 0 .. 1 across
+constexpr float kSphereSpacing = 1.3f;
+constexpr float kRowHeight     = 0.0f;  // both rows on the same plane
 } // namespace
 
 class CubeApp : public Application {
@@ -57,12 +53,13 @@ public:
     void OnStart() override {
         m_renderer.Init(GetDevice());
 
-        // 16x16 checkerboard albedo for the cube + sphere (warm
-        // orange / dark grey) and a dark earth checker for the ground
-        // plane -- darker than the sky-blue fog so far edges still
-        // stand out against the background.
-        m_albedo  = MakeChecker(0xE5, 0x9A, 0x4A, 0x30, 0x33, 0x3A);
-        m_ground  = MakeChecker(0x6A, 0x55, 0x3A, 0x3A, 0x2C, 0x1E);
+        // 16x16 white texture so the PBR material's albedoFactor /
+        // metallic-roughness scalars drive the look entirely. Real
+        // textured spheres land in Phase 5.5 once the loader knows
+        // about MR maps.
+        m_white = MakeSolid(0xFF, 0xFF, 0xFF);
+        // Dark earth checker for the ground, same as Phase 4.
+        m_ground = MakeChecker(0x6A, 0x55, 0x3A, 0x3A, 0x2C, 0x1E);
 
         BufferDesc vb;
         vb.type        = BufferType::Vertex;
@@ -70,7 +67,6 @@ public:
         vb.size        = sizeof(kPlaneVerts);
         vb.initialData = kPlaneVerts;
         m_planeVB = GetDevice().CreateBuffer(vb);
-
         BufferDesc ib;
         ib.type        = BufferType::Index;
         ib.usage       = BufferUsage::Static;
@@ -79,16 +75,15 @@ public:
         m_planeIB = GetDevice().CreateBuffer(ib);
 
         const std::string assets = NARAGAME_ASSETS_DIR;
-        m_cube   = LoadObj(GetDevice(), assets + "/cube.obj");
         m_sphere = LoadObj(GetDevice(), assets + "/sphere.obj");
 
         m_camera.SetViewport(float(kWindowW), float(kWindowH));
-        m_camera.SetPosition({0.0f, 3.5f, 5.5f});
-        m_camera.LookAt({0.0f, -0.2f, 0.0f});
+        m_camera.SetPosition({0.0f, 1.8f, 5.0f});
+        m_camera.LookAt({0.0f, 0.4f, 0.0f});
         m_camera.SetFovY(1.0472f);          // 60 deg
         m_camera.SetNearFar(0.1f, 100.0f);
 
-        NARAGAME_INFO("Cube: plane + cube + sphere, dir light + hemi + fog");
+        NARAGAME_INFO("Cube: 2x5 PBR sphere grid (dielectric / metal x roughness)");
     }
 
     void OnStop() override {
@@ -96,57 +91,75 @@ public:
     }
 
     void OnUpdate(float dt) override {
-        m_yaw += dt * 0.6f;
+        m_yaw += dt * 0.4f;
         if (m_yaw > 6.28318f) m_yaw -= 6.28318f;
     }
 
     void OnRender() override {
-        // Sky-blue clear so the fog colour blends into the background.
         GetDevice().Clear(Color(0.55f, 0.58f, 0.65f, 1.0f));
         GetDevice().ClearDepth(1.0f);
 
         DirectionalLight light;
-        light.direction      = {-0.5f, -1.0f, -0.3f};
-        light.skyAmbient     = {0.45f, 0.55f, 0.65f, 1.0f};   // cool top
-        light.groundAmbient  = {0.20f, 0.16f, 0.12f, 1.0f};   // warm dark bottom
-        light.shadowCenter   = {0.0f, 0.3f, 0.0f};
-        light.shadowRadius   = 6.0f;
+        light.direction     = {-0.4f, -1.0f, -0.3f};
+        light.skyAmbient    = {0.40f, 0.50f, 0.60f, 1.0f};
+        light.groundAmbient = {0.16f, 0.13f, 0.10f, 1.0f};
+        light.shadowCenter  = {0.0f, 0.5f, 0.0f};
+        light.shadowRadius  = 6.0f;
 
         FogParams fog;
-        fog.color            = {0.55f, 0.58f, 0.65f, 1.0f};   // matches clear
-        fog.startDistance    = 6.0f;
-        fog.endDistance      = 16.0f;
+        fog.color         = {0.55f, 0.58f, 0.65f, 1.0f};
+        fog.startDistance = 6.0f;
+        fog.endDistance   = 18.0f;
 
         m_renderer.Begin(m_camera.View(), m_camera.Projection(), light, fog);
 
-        // Ground plane sits at y = -0.6 so the cube and sphere (radius
-        // 0.5 around their origin) just rest on it.
+        // Ground plane below the spheres.
         const Mat4 planeModel = mat4::Translation({0.0f, -0.6f, 0.0f});
         m_renderer.DrawMesh(m_planeVB.get(), m_planeIB.get(),
                             6, IndexFormat::Uint16,
-                            planeModel, m_ground.get());
+                            planeModel, m_ground.get(), {});
 
-        if (m_cube.valid) {
-            const Mat4 model = mat4::Translation({-1.4f, 0.0f, 0.0f})
-                             * mat4::RotationY(m_yaw)
-                             * mat4::RotationX(m_yaw * 0.5f);
-            m_renderer.DrawMesh(m_cube.vertexBuffer.get(),
-                                m_cube.indexBuffer.get(),
-                                m_cube.indexCount, m_cube.indexFormat,
-                                model, m_albedo.get());
-        }
         if (m_sphere.valid) {
-            const Mat4 model = mat4::Translation({1.4f, 0.0f, 0.0f})
-                             * mat4::RotationY(m_yaw * 0.7f);
+            const float gridX0 = -(kSphereCols - 1) * 0.5f * kSphereSpacing;
+            for (int col = 0; col < kSphereCols; ++col) {
+                const float roughness = float(col) / float(kSphereCols - 1);
+                const float x = gridX0 + col * kSphereSpacing;
+                // Top row: dielectric (cream albedo, no metal). Bottom
+                // row: copper-tinted metal so the F0 = albedo path is
+                // visible.
+                DrawSphere(x, 0.6f,  0.0f, 0.0f, roughness,
+                           Color(0.90f, 0.88f, 0.82f, 1.0f));
+                DrawSphere(x, 0.6f, -1.4f, 1.0f, roughness,
+                           Color(0.95f, 0.65f, 0.45f, 1.0f));
+            }
+            // Spin a single sphere on the camera-facing edge so the
+            // shadow lighting changes obviously over time.
+            const float ax = 0.0f, az = 1.6f;
+            const Mat4 spin = mat4::Translation({ax, 0.0f, az})
+                            * mat4::RotationY(m_yaw);
             m_renderer.DrawMesh(m_sphere.vertexBuffer.get(),
                                 m_sphere.indexBuffer.get(),
                                 m_sphere.indexCount, m_sphere.indexFormat,
-                                model, m_albedo.get());
+                                spin, m_white.get(),
+                                Material{Color(0.20f, 0.60f, 0.85f, 1.0f),
+                                         /*metallic=*/0.0f,
+                                         /*roughness=*/0.35f});
         }
         m_renderer.End();
     }
 
 private:
+    void DrawSphere(float x, float y, float z, float metallic, float roughness,
+                    const Color& albedo) {
+        const Mat4 model = mat4::Translation({x, y, z})
+                         * mat4::Scale({0.45f, 0.45f, 0.45f});
+        m_renderer.DrawMesh(m_sphere.vertexBuffer.get(),
+                            m_sphere.indexBuffer.get(),
+                            m_sphere.indexCount, m_sphere.indexFormat,
+                            model, m_white.get(),
+                            Material{albedo, metallic, roughness});
+    }
+
     static AppConfig MakeConfig() {
         AppConfig c;
         c.title  = "NaraGame - Cube";
@@ -155,6 +168,22 @@ private:
         return c;
     }
 
+    std::unique_ptr<RHITexture> MakeSolid(uint8_t r, uint8_t g, uint8_t b) {
+        std::array<uint8_t, 16 * 16 * 4> pixels{};
+        for (size_t i = 0; i < pixels.size(); i += 4) {
+            pixels[i + 0] = r;
+            pixels[i + 1] = g;
+            pixels[i + 2] = b;
+            pixels[i + 3] = 0xFF;
+        }
+        TextureDesc td;
+        td.width  = 16;
+        td.height = 16;
+        td.format = TextureFormat::RGBA8;
+        td.filter = TextureFilter::Linear;
+        td.pixels = pixels.data();
+        return GetDevice().CreateTexture(td);
+    }
     std::unique_ptr<RHITexture> MakeChecker(uint8_t r0, uint8_t g0, uint8_t b0,
                                             uint8_t r1, uint8_t g1, uint8_t b1) {
         std::array<uint8_t, 16 * 16 * 4> pixels{};
@@ -179,11 +208,10 @@ private:
 
     Renderer3D                  m_renderer;
     Camera3D                    m_camera;
-    std::unique_ptr<RHITexture> m_albedo;
+    std::unique_ptr<RHITexture> m_white;
     std::unique_ptr<RHITexture> m_ground;
     std::unique_ptr<RHIBuffer>  m_planeVB;
     std::unique_ptr<RHIBuffer>  m_planeIB;
-    Mesh                        m_cube;
     Mesh                        m_sphere;
     float                       m_yaw = 0.0f;
 };

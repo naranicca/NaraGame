@@ -50,6 +50,21 @@ struct FogParams {
     float endDistance   = 2000.0f;
 };
 
+// PBR material parameters for one mesh. `albedoFactor` tints whatever
+// the bound albedo texture samples to (white = pass-through). `metallic`
+// is 0 for plain dielectrics (paint, wood, plastic) and 1 for raw
+// metals (steel, gold, copper); intermediate values give the dirty-
+// metal look but aren't physically meaningful. `roughness` runs from 0
+// (mirror-smooth) to 1 (matte) and drives the GGX microfacet width.
+// The MVP material has no texture slots yet -- the shader takes its
+// metallic / roughness from these scalars; an albedoMap can ride along
+// in the existing DrawMesh `texture` parameter.
+struct Material {
+    Color albedoFactor = Color::White();
+    float metallic     = 0.0f;
+    float roughness    = 0.5f;
+};
+
 // Immediate-mode mesh renderer for the 3D pipeline. Owns one main PSO
 // (textured + hemi-ambient + 1 directional light + 1 shadow-map + linear
 // fog) plus one depth-only shadow PSO and a 2048x2048 shadow render
@@ -81,13 +96,13 @@ public:
     // `ib` are buffers created via CreateBuffer with the right
     // BufferType; the mesh data must use the Vertex3D layout above.
     // `model` is the world-from-local transform; `texture` is sampled
-    // as albedo, `tint` multiplies it. `texture` may be null -- a 2x2
-    // white texture is used in its place so the shader always samples
-    // valid data.
+    // as albedo, `material` drives the BRDF (metallic / roughness /
+    // tint). `texture` may be null -- a 2x2 white texture is used in
+    // its place so the shader always samples valid data.
     void DrawMesh(RHIBuffer* vb, RHIBuffer* ib, uint32_t indexCount,
                   IndexFormat indexFormat,
                   const Mat4& model, RHITexture* texture,
-                  const Color& tint = Color::White());
+                  const Material& material = {});
 
     // Run the shadow pass + the main pass. The main pass binds the
     // backbuffer's RTV + depth view, so the caller is expected to have
@@ -129,7 +144,7 @@ private:
         IndexFormat indexFormat;
         Mat4        model;
         RHITexture* texture;
-        Color       tint;
+        Material    material;
     };
     std::vector<QueuedMesh> m_queue;
     bool m_inPass = false;
