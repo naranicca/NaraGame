@@ -1,0 +1,120 @@
+{
+    "nodes":  [
+                  {
+                      "mesh":  0
+                  }
+              ],
+    "bufferViews":  [
+                        {
+                            "byteLength":  5100,
+                            "byteOffset":  0,
+                            "target":  34962,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  5100,
+                            "byteOffset":  5100,
+                            "target":  34962,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  3400,
+                            "byteOffset":  10200,
+                            "target":  34962,
+                            "buffer":  0
+                        },
+                        {
+                            "byteLength":  4608,
+                            "byteOffset":  13600,
+                            "target":  34963,
+                            "buffer":  0
+                        }
+                    ],
+    "meshes":  [
+                   {
+                       "primitives":  [
+                                          {
+                                              "attributes":  {
+                                                                 "POSITION":  0,
+                                                                 "TEXCOORD_0":  2,
+                                                                 "NORMAL":  1
+                                                             },
+                                              "indices":  3,
+                                              "mode":  4
+                                          }
+                                      ]
+                   }
+               ],
+    "asset":  {
+                  "version":  "2.0",
+                  "generator":  "NaraGame obj-to-gltf.ps1"
+              },
+    "accessors":  [
+                      {
+                          "type":  "VEC3",
+                          "componentType":  5126,
+                          "count":  425,
+                          "bufferView":  0,
+                          "min":  [
+                                      -1,
+                                      -1,
+                                      -1
+                                  ],
+                          "max":  [
+                                      1,
+                                      1,
+                                      1
+                                  ]
+                      },
+                      {
+                          "type":  "VEC3",
+                          "componentType":  5126,
+                          "count":  425,
+                          "bufferView":  1,
+                          "min":  [
+                                      -1,
+                                      -1,
+                                      -1
+                                  ],
+                          "max":  [
+                                      1,
+                                      1,
+                                      1
+                                  ]
+                      },
+                      {
+                          "type":  "VEC2",
+                          "componentType":  5126,
+                          "count":  425,
+                          "bufferView":  2,
+                          "min":  [
+                                      0,
+                                      0
+                                  ],
+                          "max":  [
+                                      1,
+                                      1
+                                  ]
+                      },
+                      {
+                          "type":  "SCALAR",
+                          "bufferView":  3,
+                          "count":  2304,
+                          "componentType":  5123
+                      }
+                  ],
+    "scenes":  [
+                   {
+                       "nodes":  [
+                                     0
+                                 ]
+                   }
+               ],
+    "buffers":  [
+                    {
+                        "uri":  "sphere.bin",
+                        "byteLength":  18208
+                    }
+                ],
+    "scene":  0
+}

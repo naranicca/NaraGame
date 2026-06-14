@@ -79,7 +79,10 @@ public:
         m_planeIB = GetDevice().CreateBuffer(ib);
 
         const std::string assets = NARAGAME_ASSETS_DIR;
-        m_sphere = LoadObj(GetDevice(), assets + "/sphere.obj");
+        // sphere.gltf is generated from sphere.obj by obj-to-gltf.ps1
+        // and checked in alongside it -- proves the glTF path is live
+        // without yanking the OBJ loader.
+        m_sphere = LoadGltf(GetDevice(), assets + "/sphere.gltf");
 
         BuildRod();
 

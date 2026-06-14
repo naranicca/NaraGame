@@ -55,4 +55,22 @@ Mesh LoadObj(RHIDevice& device, const std::string& path);
 Mesh LoadObjFromString(RHIDevice& device, const std::string& source,
                        const std::string& debugName = "<inline>");
 
+// Load a glTF 2.0 static mesh from a `.gltf` file. The companion `.bin`
+// buffer is resolved relative to the .gltf's directory.
+//
+// Supported features:
+//   meshes[0].primitives[0] attributes: POSITION, NORMAL, TEXCOORD_0
+//   indices: SCALAR USHORT or UINT
+//   accessor componentType FLOAT for vertex attributes
+//
+// Not supported (silently warned + skipped):
+//   embedded buffers (data: URIs) -- needs an external .bin
+//   skins, animations (Phase 7.5)
+//   morph targets, multiple primitives, materials, .glb container
+//
+// Missing NORMAL is synthesised from face geometry like LoadObj does;
+// missing TEXCOORD_0 defaults to (0, 0). Multiple meshes in the file
+// are warned about and only the first is loaded.
+Mesh LoadGltf(RHIDevice& device, const std::string& path);
+
 } // namespace NaraGame
