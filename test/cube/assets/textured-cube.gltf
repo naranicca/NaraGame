@@ -5,37 +5,47 @@
   "nodes":  [{ "mesh": 0 }],
   "meshes": [{
     "primitives": [{
-      "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
-      "indices": 3,
+      "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2, "TANGENT": 3 },
+      "indices": 4,
       "material": 0
     }]
   }],
   "materials": [{
-    "name": "ColourBlocks",
+    "name": "ColourBlocksBumpy",
     "pbrMetallicRoughness": {
       "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
       "baseColorTexture": { "index": 0 },
       "metallicFactor": 0.0,
       "roughnessFactor": 0.7
-    }
+    },
+    "normalTexture": { "index": 1 }
   }],
-  "textures": [{ "source": 0 }],
-  "images":   [{ "bufferView": 4, "mimeType": "image/png" }],
+  "textures": [
+    { "source": 0 },
+    { "source": 1 }
+  ],
+  "images": [
+    { "bufferView": 5, "mimeType": "image/png" },
+    { "bufferView": 6, "mimeType": "image/png" }
+  ],
   "buffers": [{
     "uri": "textured-cube.bin",
-    "byteLength": 996
+    "byteLength": 1796
   }],
   "bufferViews": [
     { "buffer": 0, "byteOffset": 0, "byteLength": 288 },
     { "buffer": 0, "byteOffset": 288, "byteLength": 288 },
     { "buffer": 0, "byteOffset": 576,  "byteLength": 192  },
-    { "buffer": 0, "byteOffset": 768, "byteLength": 72 },
-    { "buffer": 0, "byteOffset": 840, "byteLength": 156 }
+    { "buffer": 0, "byteOffset": 768, "byteLength": 384 },
+    { "buffer": 0, "byteOffset": 1152, "byteLength": 72 },
+    { "buffer": 0, "byteOffset": 1224, "byteLength": 156 },
+    { "buffer": 0, "byteOffset": 1380, "byteLength": 416 }
   ],
   "accessors": [
     { "bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 24, "type": "VEC3" },
     { "bufferView": 1, "byteOffset": 0, "componentType": 5126, "count": 24, "type": "VEC3" },
     { "bufferView": 2, "byteOffset": 0, "componentType": 5126, "count": 24, "type": "VEC2" },
-    { "bufferView": 3, "byteOffset": 0, "componentType": 5123, "count": 36, "type": "SCALAR" }
+    { "bufferView": 3, "byteOffset": 0, "componentType": 5126, "count": 24, "type": "VEC4" },
+    { "bufferView": 4, "byteOffset": 0, "componentType": 5123, "count": 36, "type": "SCALAR" }
   ]
 }

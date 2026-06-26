@@ -16,12 +16,18 @@ class RHIPipeline;
 class RHIShader;
 class RHITexture;
 
-// One Renderer3D vertex. Position + normal in world units, UV in [0, 1].
-// Stride 32; the shader's input layout expects this exact ordering.
+// One Renderer3D vertex. Position + normal in world units, UV in [0, 1],
+// plus a tangent for normal mapping. Tangent.xyz is the +U direction in
+// tangent space (model space at the vertex); tangent.w is +1 or -1 and
+// determines the bitangent sign (B = cross(N, T.xyz) * T.w) per the
+// glTF 2.0 convention. Meshes without normal maps can leave the tangent
+// at its default {1, 0, 0, 1}: the shader still computes a TBN, but the
+// flat-normal fallback texture turns the perturbation into a no-op.
 struct Vertex3D {
     Vec3 position;
     Vec3 normal;
     Vec2 uv;
+    Vec4 tangent = {1.0f, 0.0f, 0.0f, 1.0f};
 };
 
 // Skinned vertex format: Vertex3D layout plus four joint indices and
@@ -33,6 +39,7 @@ struct Vertex3DSkin {
     Vec3  position;
     Vec3  normal;
     Vec2  uv;
+    Vec4  tangent = {1.0f, 0.0f, 0.0f, 1.0f};
     float jointIndices[4];
     float jointWeights[4];
 };
@@ -190,6 +197,10 @@ private:
     // Keeps the shader on one code path: it always samples a texture and
     // multiplies by the factor.
     std::unique_ptr<RHITexture>  m_whiteTex;
+    // 2x2 flat-normal fallback (RGB = 128,128,255). Decoded in the shader
+    // as tangent normal (0, 0, 1), so meshes without a normal map render
+    // exactly as if normal mapping were off -- without a shader branch.
+    std::unique_ptr<RHITexture>  m_flatNormalTex;
     // Depth-format render target written by the shadow pass and sampled
     // by the main pass as a depth lookup. 2048x2048 is enough for a
     // single ortho fit covering the cube test scene; CSM is a later

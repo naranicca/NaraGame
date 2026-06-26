@@ -429,6 +429,7 @@ Mesh LoadGltf(RHIDevice& device, const std::string& path) {
     const int posIdx = attrs->GetInt("POSITION", -1);
     const int nrmIdx = attrs->GetInt("NORMAL", -1);
     const int uvIdx  = attrs->GetInt("TEXCOORD_0", -1);
+    const int tanIdx = attrs->GetInt("TANGENT", -1);
     const int idxAccessorIdx = prim.GetInt("indices", -1);
     if (posIdx < 0 || idxAccessorIdx < 0) {
         NARAGAME_ERROR("LoadGltf: '%s' primitive missing POSITION or indices",
@@ -455,6 +456,15 @@ Mesh LoadGltf(RHIDevice& device, const std::string& path) {
     if (uvIdx >= 0 && size_t(uvIdx) < accessors->arrayValue.size()) {
         uvs = ReadFloatAccessor(
             accessors->arrayValue[size_t(uvIdx)], *bufferViews, bin, 2, "TEXCOORD_0");
+    }
+    // TANGENT is VEC4: xyz = tangent direction, w = bitangent sign per
+    // glTF 2.0. Absent for meshes that don't need normal mapping; we
+    // fall back to {1, 0, 0, 1} per-vertex so the TBN math still runs
+    // (the flat-normal fallback texture turns it into a no-op).
+    std::vector<float> tangents;
+    if (tanIdx >= 0 && size_t(tanIdx) < accessors->arrayValue.size()) {
+        tangents = ReadFloatAccessor(
+            accessors->arrayValue[size_t(tanIdx)], *bufferViews, bin, 4, "TANGENT");
     }
 
     std::vector<uint32_t> indices = ReadIndexAccessor(
@@ -494,6 +504,15 @@ Mesh LoadGltf(RHIDevice& device, const std::string& path) {
         } else {
             verts[size_t(i)].uv = {0.0f, 0.0f};
         }
+        if (!tangents.empty()) {
+            verts[size_t(i)].tangent = {
+                tangents[size_t(i) * 4 + 0],
+                tangents[size_t(i) * 4 + 1],
+                tangents[size_t(i) * 4 + 2],
+                tangents[size_t(i) * 4 + 3],
+            };
+        }
+        // else: keep the struct default {1, 0, 0, 1}.
     }
     if (normals.empty()) {
         // Accumulate face normals; normalize at the end. The face winding
@@ -690,6 +709,7 @@ SkinnedMesh LoadGltfSkinned(RHIDevice& device, const std::string& path) {
     const int posIdx = attrs->GetInt("POSITION", -1);
     const int nrmIdx = attrs->GetInt("NORMAL", -1);
     const int uvIdx  = attrs->GetInt("TEXCOORD_0", -1);
+    const int tanIdx = attrs->GetInt("TANGENT", -1);
     const int jIdx   = attrs->GetInt("JOINTS_0", -1);
     const int wIdx   = attrs->GetInt("WEIGHTS_0", -1);
     const int idxAccessorIdx = prim.GetInt("indices", -1);
@@ -711,6 +731,10 @@ SkinnedMesh LoadGltfSkinned(RHIDevice& device, const std::string& path) {
     auto uvs = (uvIdx >= 0)
         ? ReadFloatAccessor(accessors->arrayValue[size_t(uvIdx)],
                             *bufferViews, bin, 2, "TEXCOORD_0")
+        : std::vector<float>{};
+    auto tangents = (tanIdx >= 0)
+        ? ReadFloatAccessor(accessors->arrayValue[size_t(tanIdx)],
+                            *bufferViews, bin, 4, "TANGENT")
         : std::vector<float>{};
     const auto jointIndices = ReadJointIndices(
         accessors->arrayValue[size_t(jIdx)], *bufferViews, bin);
@@ -740,6 +764,11 @@ SkinnedMesh LoadGltfSkinned(RHIDevice& device, const std::string& path) {
             v.uv = {uvs[i * 2 + 0], uvs[i * 2 + 1]};
         else
             v.uv = {0.0f, 0.0f};
+        if (!tangents.empty()) {
+            v.tangent = {tangents[i * 4 + 0], tangents[i * 4 + 1],
+                         tangents[i * 4 + 2], tangents[i * 4 + 3]};
+        }
+        // else: Vertex3DSkin's default tangent {1, 0, 0, 1} stands.
         for (int j = 0; j < 4; ++j) {
             v.jointIndices[j] = jointIndices[size_t(i) * 4 + j];
             v.jointWeights[j] = jointWeights[size_t(i) * 4 + j];

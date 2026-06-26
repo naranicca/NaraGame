@@ -68,6 +68,7 @@ struct VSIn {
     float3 position : POSITION;
     float3 normal   : NORMAL;
     float2 uv       : TEXCOORD0;
+    float4 tangent  : TANGENT;  // xyz = tangent dir, w = bitangent sign
 };
 
 struct VSOut {
@@ -77,6 +78,10 @@ struct VSOut {
     float3 viewPos       : TEXCOORD0;
     float2 uv            : TEXCOORD1;
     float4 lightSpacePos : TEXCOORD2;
+    // Tangent travels into the pixel shader so we can rebuild the TBN.
+    // xyz = world-space tangent direction, w = bitangent sign carried
+    // straight from glTF.
+    float4 worldTangent  : TEXCOORD3;
 };
 
 VSOut VSMain(VSIn input) {
@@ -89,6 +94,8 @@ VSOut VSMain(VSIn input) {
     // Upper 3x3 of model rotates / scales the normal. Assumes uniform
     // scale; a non-uniform scale would need the inverse-transpose.
     output.worldNormal   = mul((float3x3)model, input.normal);
+    output.worldTangent  = float4(mul((float3x3)model, input.tangent.xyz),
+                                  input.tangent.w);
     output.uv            = input.uv;
     return output;
 }
@@ -104,6 +111,11 @@ Texture2D    shadowMap   : register(t1);
 // emissiveTex is treated as plain RGB; alpha is unused.
 Texture2D    mrTex       : register(t2);
 Texture2D    emissiveTex : register(t3);
+// Tangent-space normal map (glTF normalTexture). RGB is the tangent
+// normal encoded into [0, 1] (xyz * 0.5 + 0.5). A null bind on the C++
+// side falls back to a 2x2 (128, 128, 255) texture so the decoded
+// normal is (0, 0, 1) and the perturbation is a no-op.
+Texture2D    normalTex   : register(t4);
 
 float SampleShadow(float4 lightSpacePos) {
     float3 lsp = lightSpacePos.xyz / lightSpacePos.w;
@@ -171,7 +183,17 @@ float3 BRDF(float3 N, float3 V, float3 L,
 }
 
 float4 PSMain(VSOut input) : SV_TARGET {
-    float3 N = normalize(input.worldNormal);
+    // Build the TBN from the interpolated normal + tangent and use it
+    // to bring the tangent-space normal sample into world space. The
+    // flat-normal fallback texture (128, 128, 255) decodes to (0, 0, 1)
+    // so meshes without a real normal map come out perturbed by N
+    // alone -- exactly as if normal mapping were off.
+    float3 Ng = normalize(input.worldNormal);
+    float3 T  = normalize(input.worldTangent.xyz);
+    float3 B  = cross(Ng, T) * input.worldTangent.w;
+    float3 nSample = normalTex.Sample(sampLinear, input.uv).rgb * 2.0 - 1.0;
+    float3 N  = normalize(nSample.x * T + nSample.y * B + nSample.z * Ng);
+
     float3 V = normalize(cameraPosWorld.xyz - input.worldPos);
     // lightDirWorld points FROM source TOWARD surface; flip to get the
     // vector from the surface back to the source.
@@ -234,6 +256,7 @@ struct VSInSkin {
     float3 position : POSITION;
     float3 normal   : NORMAL;
     float2 uv       : TEXCOORD0;
+    float4 tangent  : TANGENT;
     float4 jIdx     : JOINTINDEX;
     float4 jWeight  : JOINTWEIGHT;
 };
@@ -257,12 +280,16 @@ VSOut VSMainSkin(VSInSkin input) {
     output.worldPos      = wp.xyz;
     output.viewPos       = mul(view, wp).xyz;
     output.lightSpacePos = mul(lightViewProj, wp);
-    // Skinning rotates the normal too; assume rigid joints (no per-vertex
-    // shear), so the upper 3x3 of the blended skin matrix rotates the
-    // normal cleanly.
-    float3 skinnedNormal = mul((float3x3)skin, input.normal);
-    output.worldNormal   = mul((float3x3)model, skinnedNormal);
-    output.uv            = input.uv;
+    // Skinning rotates the normal + tangent too; assume rigid joints (no
+    // per-vertex shear), so the upper 3x3 of the blended skin matrix
+    // rotates both cleanly. Bitangent sign (tangent.w) is invariant
+    // under rotation, so just carry it through.
+    float3 skinnedNormal  = mul((float3x3)skin, input.normal);
+    float3 skinnedTangent = mul((float3x3)skin, input.tangent.xyz);
+    output.worldNormal    = mul((float3x3)model, skinnedNormal);
+    output.worldTangent   = float4(mul((float3x3)model, skinnedTangent),
+                                   input.tangent.w);
+    output.uv             = input.uv;
     return output;
 }
 
@@ -321,6 +348,8 @@ void Renderer3D::Init(RHIDevice& device) {
                                  uint32_t(offsetof(Vertex3D, normal))});
     layout.attributes.push_back({"TEXCOORD", 0, VertexFormat::Float2,
                                  uint32_t(offsetof(Vertex3D, uv))});
+    layout.attributes.push_back({"TANGENT",  0, VertexFormat::Float4,
+                                 uint32_t(offsetof(Vertex3D, tangent))});
 
     PipelineDesc pdMain;
     pdMain.shader        = m_shaderMain.get();
@@ -371,6 +400,8 @@ void Renderer3D::Init(RHIDevice& device) {
                                      uint32_t(offsetof(Vertex3DSkin, normal))});
     skinLayout.attributes.push_back({"TEXCOORD", 0, VertexFormat::Float2,
                                      uint32_t(offsetof(Vertex3DSkin, uv))});
+    skinLayout.attributes.push_back({"TANGENT",  0, VertexFormat::Float4,
+                                     uint32_t(offsetof(Vertex3DSkin, tangent))});
     skinLayout.attributes.push_back({"JOINTINDEX",  0, VertexFormat::Float4,
                                      uint32_t(offsetof(Vertex3DSkin, jointIndices))});
     skinLayout.attributes.push_back({"JOINTWEIGHT", 0, VertexFormat::Float4,
@@ -421,6 +452,22 @@ void Renderer3D::Init(RHIDevice& device) {
     td.pixels = whitePixels;
     m_whiteTex = device.CreateTexture(td);
 
+    // 2x2 flat normal map. RGB (128, 128, 255) decodes in the shader to
+    // tangent normal (0, 0, 1) -- straight out of the surface -- so a
+    // mesh without a real normal map renders as if normal mapping were
+    // off, with no shader branch.
+    const uint8_t flatNormalPixels[16] = {
+        0x80, 0x80, 0xFF, 0xFF,  0x80, 0x80, 0xFF, 0xFF,
+        0x80, 0x80, 0xFF, 0xFF,  0x80, 0x80, 0xFF, 0xFF,
+    };
+    TextureDesc nd;
+    nd.width  = 2;
+    nd.height = 2;
+    nd.format = TextureFormat::RGBA8;
+    nd.filter = TextureFilter::Point;
+    nd.pixels = flatNormalPixels;
+    m_flatNormalTex = device.CreateTexture(nd);
+
     // Shadow map: square depth texture. The D3D11 backend wires up
     // both a DSV (so SetRenderTarget recognises it as depth-only) and
     // an SRV (so the main pass can sample it as a regular texture).
@@ -441,6 +488,7 @@ void Renderer3D::Shutdown() {
     m_skinQueue.clear();
     m_skinPool.clear();
     m_shadowMap.reset();
+    m_flatNormalTex.reset();
     m_whiteTex.reset();
     m_skinUB.reset();
     m_drawUB.reset();
@@ -723,9 +771,13 @@ void Renderer3D::RunMainPass() {
         out.emissiveFactor[3] = 0.0f;
     };
 
-    RHITexture* whiteFallback = m_whiteTex.get();
+    RHITexture* whiteFallback  = m_whiteTex.get();
+    RHITexture* normalFallback = m_flatNormalTex.get();
     auto bindTex = [this, whiteFallback](int slot, RHITexture* t) {
         m_device->BindTexture(slot, t ? t : whiteFallback);
+    };
+    auto bindNormal = [this, normalFallback](RHITexture* t) {
+        m_device->BindTexture(4, t ? t : normalFallback);
     };
 
     DrawCB cb;
@@ -736,6 +788,7 @@ void Renderer3D::RunMainPass() {
         bindTex(0, q.material.baseColorTex);
         bindTex(2, q.material.metallicRoughnessTex);
         bindTex(3, q.material.emissiveTex);
+        bindNormal(q.material.normalTex);
         m_device->BindVertexBuffer(q.vb, sizeof(Vertex3D), 0);
         m_device->BindIndexBuffer(q.ib, q.indexFormat);
         m_device->DrawIndexed(q.indexCount, 0);
@@ -769,6 +822,7 @@ void Renderer3D::RunMainPass() {
             bindTex(0, q.material.baseColorTex);
             bindTex(2, q.material.metallicRoughnessTex);
             bindTex(3, q.material.emissiveTex);
+            bindNormal(q.material.normalTex);
             m_device->BindVertexBuffer(q.vb, sizeof(Vertex3DSkin), 0);
             m_device->BindIndexBuffer(q.ib, q.indexFormat);
             m_device->DrawIndexed(q.indexCount, 0);
