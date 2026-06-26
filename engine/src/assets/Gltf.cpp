@@ -40,6 +40,102 @@ std::string ReadAllBytes(const std::string& path, bool& ok) {
     return ss.str();
 }
 
+// glTF container abstraction. `.gltf` carries JSON text and points at a
+// sidecar `.bin`; `.glb` is one binary file holding (header + JSON chunk
+// + optional BIN chunk). The caller just wants "JSON to parse" plus the
+// "bytes the accessors index into" -- this struct hands both back the
+// same way for either format.
+struct GltfContainer {
+    std::string json;  // JSON text to feed MiniJson::Parse
+    std::string bin;   // .glb BIN chunk; empty for .gltf (caller resolves URI)
+    bool        ok = false;
+};
+
+// Read u32 little-endian out of a byte string at offset. The .glb spec
+// fixes byte order at LE which matches x86 / x64 native, but we go
+// through the bits explicitly so a big-endian rebuild would still work.
+uint32_t ReadU32LE(const std::string& src, size_t offset) {
+    return  uint32_t(uint8_t(src[offset + 0]))
+         | (uint32_t(uint8_t(src[offset + 1])) <<  8)
+         | (uint32_t(uint8_t(src[offset + 2])) << 16)
+         | (uint32_t(uint8_t(src[offset + 3])) << 24);
+}
+
+// Open a `.gltf` or `.glb` and return its JSON text + (for .glb) the
+// embedded buffer. Magic bytes "glTF" trigger the binary decoder; any
+// other content is treated as a plain JSON .gltf file and the caller is
+// responsible for resolving buffers[0].uri to a sidecar .bin.
+GltfContainer OpenGltfContainer(const std::string& path) {
+    GltfContainer out;
+    bool ok = false;
+    std::string bytes = ReadAllBytes(path, ok);
+    if (!ok) return out;
+
+    // glTF binary magic is the ASCII bytes "glTF" -- 0x46546C67 LE u32.
+    const bool isGlb = bytes.size() >= 12
+                    && bytes[0] == 'g' && bytes[1] == 'l'
+                    && bytes[2] == 'T' && bytes[3] == 'F';
+    if (!isGlb) {
+        out.json = std::move(bytes);
+        out.ok   = true;
+        return out;
+    }
+
+    const uint32_t version    = ReadU32LE(bytes, 4);
+    const uint32_t totalBytes = ReadU32LE(bytes, 8);
+    if (version != 2) {
+        NARAGAME_ERROR("OpenGltfContainer: '%s' is glTF binary v%u (need 2)",
+                       path.c_str(), version);
+        return out;
+    }
+    if (totalBytes > bytes.size()) {
+        NARAGAME_ERROR("OpenGltfContainer: '%s' header length %u > file %zu",
+                       path.c_str(), totalBytes, bytes.size());
+        return out;
+    }
+
+    // chunk-type magic constants:
+    //   JSON: 'JSON' little-endian (0x4E4F534A) -- 'J','S','O','N'
+    //   BIN : 'BIN\0' little-endian (0x004E4942) -- 'B','I','N','\0'
+    constexpr uint32_t kChunkJson = 0x4E4F534Au;
+    constexpr uint32_t kChunkBin  = 0x004E4942u;
+
+    size_t cursor = 12;  // past the header
+    bool sawJson = false;
+    while (cursor + 8 <= size_t(totalBytes)) {
+        const uint32_t chunkLen  = ReadU32LE(bytes, cursor + 0);
+        const uint32_t chunkType = ReadU32LE(bytes, cursor + 4);
+        const size_t dataStart = cursor + 8;
+        if (dataStart + chunkLen > size_t(totalBytes)) {
+            NARAGAME_ERROR("OpenGltfContainer: '%s' chunk len %u runs past EOF",
+                           path.c_str(), chunkLen);
+            return out;
+        }
+        if (!sawJson) {
+            if (chunkType != kChunkJson) {
+                NARAGAME_ERROR("OpenGltfContainer: '%s' first chunk isn't JSON (0x%08X)",
+                               path.c_str(), chunkType);
+                return out;
+            }
+            out.json.assign(bytes.data() + dataStart, chunkLen);
+            sawJson = true;
+        } else if (chunkType == kChunkBin && out.bin.empty()) {
+            // First BIN chunk wins; any further chunks (e.g. extension
+            // payloads) are silently skipped -- the spec allows them and
+            // we don't need them yet.
+            out.bin.assign(bytes.data() + dataStart, chunkLen);
+        }
+        cursor = dataStart + chunkLen;
+    }
+
+    if (!sawJson) {
+        NARAGAME_ERROR("OpenGltfContainer: '%s' has no JSON chunk", path.c_str());
+        return out;
+    }
+    out.ok = true;
+    return out;
+}
+
 // Pull a tightly packed array of `count` * `components` floats out of the
 // .bin at the accessor's view offset. The accessor must point at FLOAT
 // components for us to read it; if it doesn't we log and return empty so
@@ -118,15 +214,14 @@ std::vector<uint32_t> ReadIndexAccessor(const MiniJson::Value& accessor,
 Mesh LoadGltf(RHIDevice& device, const std::string& path) {
     Mesh mesh;
 
-    bool ok = false;
-    const std::string source = ReadAllBytes(path, ok);
-    if (!ok) {
+    const GltfContainer cont = OpenGltfContainer(path);
+    if (!cont.ok) {
         NARAGAME_ERROR("LoadGltf: cannot open '%s'", path.c_str());
         return mesh;
     }
 
     std::string jsonErr;
-    const MiniJson::Value root = MiniJson::Parse(source, &jsonErr);
+    const MiniJson::Value root = MiniJson::Parse(cont.json, &jsonErr);
     if (!root.IsObject()) {
         NARAGAME_ERROR("LoadGltf: '%s' parse failed: %s",
                        path.c_str(), jsonErr.c_str());
@@ -153,18 +248,24 @@ Mesh LoadGltf(RHIDevice& device, const std::string& path) {
                       path.c_str(), meshes->arrayValue.size());
     }
 
-    // External .bin only (no data: URIs, no .glb yet).
-    const std::string& bufUri = buffers->arrayValue[0].GetString("uri");
-    if (bufUri.empty() || bufUri.rfind("data:", 0) == 0) {
-        NARAGAME_ERROR("LoadGltf: '%s' uses embedded / data: buffer (unsupported)",
-                       path.c_str());
-        return mesh;
-    }
-    const std::string binPath = DirOf(path) + bufUri;
-    const std::string bin = ReadAllBytes(binPath, ok);
-    if (!ok) {
-        NARAGAME_ERROR("LoadGltf: cannot open buffer '%s'", binPath.c_str());
-        return mesh;
+    // .glb hands us the BIN chunk directly. For .gltf we still resolve
+    // buffers[0].uri to a sidecar file. data: URIs remain unsupported --
+    // most pipelines emit .glb when they want self-contained assets.
+    std::string bin = cont.bin;
+    if (bin.empty()) {
+        const std::string& bufUri = buffers->arrayValue[0].GetString("uri");
+        if (bufUri.empty() || bufUri.rfind("data:", 0) == 0) {
+            NARAGAME_ERROR("LoadGltf: '%s' uses embedded / data: buffer (unsupported)",
+                           path.c_str());
+            return mesh;
+        }
+        const std::string binPath = DirOf(path) + bufUri;
+        bool ok = false;
+        bin = ReadAllBytes(binPath, ok);
+        if (!ok) {
+            NARAGAME_ERROR("LoadGltf: cannot open buffer '%s'", binPath.c_str());
+            return mesh;
+        }
     }
 
     // Walk meshes[0].primitives[0].
@@ -393,14 +494,13 @@ std::vector<float> ReadFloatBlob(const MiniJson::Value& accessor,
 SkinnedMesh LoadGltfSkinned(RHIDevice& device, const std::string& path) {
     SkinnedMesh mesh;
 
-    bool ok = false;
-    const std::string source = ReadAllBytes(path, ok);
-    if (!ok) {
+    const GltfContainer cont = OpenGltfContainer(path);
+    if (!cont.ok) {
         NARAGAME_ERROR("LoadGltfSkinned: cannot open '%s'", path.c_str());
         return mesh;
     }
     std::string jsonErr;
-    const MiniJson::Value root = MiniJson::Parse(source, &jsonErr);
+    const MiniJson::Value root = MiniJson::Parse(cont.json, &jsonErr);
     if (!root.IsObject()) {
         NARAGAME_ERROR("LoadGltfSkinned: '%s' parse failed: %s",
                        path.c_str(), jsonErr.c_str());
@@ -419,17 +519,21 @@ SkinnedMesh LoadGltfSkinned(RHIDevice& device, const std::string& path) {
         return mesh;
     }
 
-    const std::string& bufUri = buffers->arrayValue[0].GetString("uri");
-    if (bufUri.empty() || bufUri.rfind("data:", 0) == 0) {
-        NARAGAME_ERROR("LoadGltfSkinned: '%s' uses embedded buffer (unsupported)",
-                       path.c_str());
-        return mesh;
-    }
-    const std::string binPath = DirOf(path) + bufUri;
-    const std::string bin = ReadAllBytes(binPath, ok);
-    if (!ok) {
-        NARAGAME_ERROR("LoadGltfSkinned: cannot open buffer '%s'", binPath.c_str());
-        return mesh;
+    std::string bin = cont.bin;
+    if (bin.empty()) {
+        const std::string& bufUri = buffers->arrayValue[0].GetString("uri");
+        if (bufUri.empty() || bufUri.rfind("data:", 0) == 0) {
+            NARAGAME_ERROR("LoadGltfSkinned: '%s' uses embedded buffer (unsupported)",
+                           path.c_str());
+            return mesh;
+        }
+        const std::string binPath = DirOf(path) + bufUri;
+        bool ok = false;
+        bin = ReadAllBytes(binPath, ok);
+        if (!ok) {
+            NARAGAME_ERROR("LoadGltfSkinned: cannot open buffer '%s'", binPath.c_str());
+            return mesh;
+        }
     }
 
     const MiniJson::Value& m0 = meshes->arrayValue[0];
