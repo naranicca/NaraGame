@@ -14,7 +14,15 @@ namespace NaraGame {
 
 namespace {
 
-constexpr uint32_t kShadowMapSize = 2048;
+// Cascaded shadow maps: three concentric cascades centred on the
+// DirectionalLight's shadowCenter, each rendered to its own 1024x1024
+// depth texture. Per-fragment cascade selection in the pixel shader
+// picks the smallest cascade whose ortho fit still contains the
+// fragment. Smaller cascades give crisper shadows on nearby geometry;
+// the far cascade catches distant casters without blowing up resolution
+// uniformly across the whole scene.
+constexpr int      kCascadeCount       = 3;
+constexpr uint32_t kCascadeShadowSize  = 1024;
 
 // CB layout matches HLSL exactly. Default cbuffer matrix layout in HLSL
 // is column_major which matches the engine's Mat4 storage
@@ -22,18 +30,20 @@ constexpr uint32_t kShadowMapSize = 2048;
 struct FrameCB {
     float view[16];
     float viewProj[16];
-    float lightViewProj[16];
+    float lightViewProj[kCascadeCount * 16];
     float lightDirWorld[4];   // .xyz = normalized direction, .w unused
-    float skyAmbient[4];      // .rgb top of hemisphere
-    float groundAmbient[4];   // .rgb bottom of hemisphere
+    float skyAmbient[4];      // .rgb top of hemisphere (unused since IBL)
+    float groundAmbient[4];   // .rgb bottom of hemisphere (unused since IBL)
     float fogColor[4];        // .rgb
     float fogParams[4];       // .x = start, .y = end, .zw unused
     float cameraPosWorld[4];  // .xyz = camera world position
+    float shadowCenter[4];    // .xyz = world-space cascade centre
+    float cascadeRadii[4];    // .x/.y/.z = ortho radii per cascade
 };
 struct DrawCB {
     float model[16];
     float albedoFactor[4];   // .rgba multiplied against albedo sample
-    float mrParams[4];       // .x = metallic, .y = roughness, .zw unused
+    float mrParams[4];       // .x metallic .y roughness .z cascadeIdx (shadow pass) .w unused
     float emissiveFactor[4]; // .rgb multiplied against emissive sample
 };
 // kMaxJoints comes from Renderer3D.h; mirror it here so the cbuffer
@@ -50,13 +60,15 @@ constexpr const char* kShaderSrc = R"HLSL(
 cbuffer FrameCB : register(b0) {
     float4x4 view;
     float4x4 viewProj;
-    float4x4 lightViewProj;
+    float4x4 lightViewProj[3];   // one per cascade
     float4   lightDirWorld;
     float4   skyAmbient;
     float4   groundAmbient;
     float4   fogColor;
-    float4   fogParams;       // .x start, .y end
+    float4   fogParams;          // .x start, .y end
     float4   cameraPosWorld;
+    float4   shadowCenter;       // .xyz = world-space cascade centre
+    float4   cascadeRadii;       // .xyz = ortho radii per cascade
 };
 
 cbuffer DrawCB : register(b1) {
@@ -79,11 +91,10 @@ struct VSOut {
     float3 worldNormal   : NORMAL;
     float3 viewPos       : TEXCOORD0;
     float2 uv            : TEXCOORD1;
-    float4 lightSpacePos : TEXCOORD2;
     // Tangent travels into the pixel shader so we can rebuild the TBN.
     // xyz = world-space tangent direction, w = bitangent sign carried
     // straight from glTF.
-    float4 worldTangent  : TEXCOORD3;
+    float4 worldTangent  : TEXCOORD2;
 };
 
 VSOut VSMain(VSIn input) {
@@ -92,7 +103,6 @@ VSOut VSMain(VSIn input) {
     output.position      = mul(viewProj, wp);
     output.worldPos      = wp.xyz;
     output.viewPos       = mul(view, wp).xyz;
-    output.lightSpacePos = mul(lightViewProj, wp);
     // Upper 3x3 of model rotates / scales the normal. Assumes uniform
     // scale; a non-uniform scale would need the inverse-transpose.
     output.worldNormal   = mul((float3x3)model, input.normal);
@@ -102,12 +112,15 @@ VSOut VSMain(VSIn input) {
     return output;
 }
 
-Texture2D    albedoTex   : register(t0);
-SamplerState sampLinear  : register(s0);
-// Shadow map is a depth texture (R24_UNORM_X8 SRV in the D3D11 backend)
-// so the .r channel holds the depth value directly. Sample with the
-// default linear sampler -- PCF / comparison sampler is a later upgrade.
-Texture2D    shadowMap   : register(t1);
+Texture2D    albedoTex      : register(t0);
+SamplerState sampLinear     : register(s0);
+// Cascaded shadow maps -- one Texture2D per cascade (R24_UNORM_X8 SRV
+// on the D3D11 backend) so the .r channel holds the depth value
+// directly. The pixel shader picks a cascade by world distance from
+// shadowCenter and only samples that cascade's map.
+Texture2D    shadowMap0     : register(t1);
+Texture2D    shadowMap1     : register(t8);
+Texture2D    shadowMap2     : register(t9);
 // glTF pbrMetallicRoughness packs roughness in .g and metallic in .b
 // (R is unused; A is occlusion in some pipelines but we ignore it).
 // emissiveTex is treated as plain RGB; alpha is unused.
@@ -148,34 +161,48 @@ float3 SamplePrefilteredStrip(float3 dir, int level) {
     return prefilteredEnvTex.SampleLevel(sampLinear, uv, 0).rgb;
 }
 
-// 5x5 box PCF: 25 depth taps around the projected UV, averaged. Taps
-// are spaced two texels apart, giving a ~10-texel fringe in shadow-map
-// space (so with kShadowMapSize = 2048 and a shadow radius of 6 units,
-// roughly 6 cm of feathering in world space). Loops are static-bounded
-// so HLSL unrolls; per-pixel cost is one Sample per tap and stays in
-// the noise compared to the BRDF math.
-float SampleShadow(float4 lightSpacePos) {
-    float3 lsp = lightSpacePos.xyz / lightSpacePos.w;
-    float2 uv = float2(lsp.x * 0.5 + 0.5, 1.0 - (lsp.y * 0.5 + 0.5));
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-    if (lsp.z < 0.0 || lsp.z > 1.0) return 1.0;
-
+// 5x5 box PCF in a cascade's shadow map. Templated over the texture by
+// passing the Texture2D in directly (HLSL SM5+ supports texture function
+// parameters), so the cascade branch only happens once outside the loop
+// instead of 25 times. Tap spacing is 2 texels of the cascade's own
+// 1024 size, giving each cascade a similarly-soft penumbra regardless
+// of the world-space area it covers.
+float PCF5x5(Texture2D tex, float2 uv, float refDepth) {
     const float bias       = 0.0015;
-    // Must match kShadowMapSize on the C++ side (2048). Hardcoded so the
-    // hot loop avoids a cbuffer read per tap. The 2x spacing widens the
-    // softness without doubling the tap count.
-    const float texelSize  = 1.0 / 2048.0;
+    const float texelSize  = 1.0 / 1024.0;
     const float tapSpacing = texelSize * 2.0;
-
     float sum = 0.0;
     [unroll] for (int y = -2; y <= 2; ++y) {
         [unroll] for (int x = -2; x <= 2; ++x) {
             float2 off = float2(x, y) * tapSpacing;
-            float  closest = shadowMap.Sample(sampLinear, uv + off).r;
-            sum += (lsp.z - bias > closest) ? 0.0 : 1.0;
+            float closest = tex.Sample(sampLinear, uv + off).r;
+            sum += (refDepth - bias > closest) ? 0.0 : 1.0;
         }
     }
     return sum / 25.0;
+}
+
+// Project worldPos into the picked cascade and run PCF. Out-of-bounds
+// UV or depth means "no shadow info here" -> return 1.0 (lit) so casters
+// beyond the shadow region don't smear dark across the scene.
+float SampleShadow(float3 worldPos) {
+    // Pick the smallest cascade whose ortho fit still contains this
+    // fragment. cascadeRadii is sorted (small -> large) on the C++ side.
+    float3 fromCenter = worldPos - shadowCenter.xyz;
+    float  dist = max(abs(fromCenter.x), max(abs(fromCenter.y), abs(fromCenter.z)));
+    int cascade = 2;
+    if (dist < cascadeRadii.x)      cascade = 0;
+    else if (dist < cascadeRadii.y) cascade = 1;
+
+    float4 lsp = mul(lightViewProj[cascade], float4(worldPos, 1.0));
+    float3 lsp3 = lsp.xyz / lsp.w;
+    float2 uv = float2(lsp3.x * 0.5 + 0.5, 1.0 - (lsp3.y * 0.5 + 0.5));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    if (lsp3.z < 0.0 || lsp3.z > 1.0) return 1.0;
+
+    if (cascade == 0) return PCF5x5(shadowMap0, uv, lsp3.z);
+    if (cascade == 1) return PCF5x5(shadowMap1, uv, lsp3.z);
+    return PCF5x5(shadowMap2, uv, lsp3.z);
 }
 
 // --- Cook-Torrance GGX -----------------------------------------------
@@ -258,7 +285,7 @@ float4 PSMain(VSOut input) : SV_TARGET {
     float  metallic  = saturate(mrParams.x * mrSample.b);
     float  roughness = clamp(mrParams.y * mrSample.g, 0.04, 1.0);
 
-    float  shadow = SampleShadow(input.lightSpacePos);
+    float  shadow = SampleShadow(input.worldPos);
     float3 direct = BRDF(N, V, L, base.rgb, metallic, roughness) * shadow;
 
     // Image-based lighting -- Karis split-sum approximation.
@@ -308,10 +335,13 @@ float4 PSMain(VSOut input) : SV_TARGET {
 }
 
 // Shadow pass: project verts into the light's clip space, write depth.
-// The pixel shader is empty -- depth-only output, no color writes.
+// The pixel shader is empty -- depth-only output, no color writes. The
+// cascade index for this pass rides in DrawCB's mrParams.z; the renderer
+// updates it per cascade before walking the queue.
 float4 VSShadow(VSIn input) : SV_POSITION {
     float4 wp = mul(model, float4(input.position, 1.0));
-    return mul(lightViewProj, wp);
+    int cascade = (int)mrParams.z;
+    return mul(lightViewProj[cascade], wp);
 }
 
 void PSShadow() {
@@ -355,7 +385,6 @@ VSOut VSMainSkin(VSInSkin input) {
     output.position      = mul(viewProj, wp);
     output.worldPos      = wp.xyz;
     output.viewPos       = mul(view, wp).xyz;
-    output.lightSpacePos = mul(lightViewProj, wp);
     // Skinning rotates the normal + tangent too; assume rigid joints (no
     // per-vertex shear), so the upper 3x3 of the blended skin matrix
     // rotates both cleanly. Bitangent sign (tangent.w) is invariant
@@ -372,7 +401,8 @@ VSOut VSMainSkin(VSInSkin input) {
 float4 VSShadowSkin(VSInSkin input) : SV_POSITION {
     float4x4 skin = BlendSkin(input);
     float4 wp = mul(model, mul(skin, float4(input.position, 1.0)));
-    return mul(lightViewProj, wp);
+    int cascade = (int)mrParams.z;
+    return mul(lightViewProj[cascade], wp);
 }
 )HLSL";
 
@@ -830,26 +860,28 @@ void Renderer3D::Init(RHIDevice& device) {
     lut.pixels = lutPixels.data();
     m_brdfLutTex = device.CreateTexture(lut);
 
-    // Shadow map: square depth texture. The D3D11 backend wires up
-    // both a DSV (so SetRenderTarget recognises it as depth-only) and
-    // an SRV (so the main pass can sample it as a regular texture).
-    TextureDesc sm;
-    sm.width        = kShadowMapSize;
-    sm.height       = kShadowMapSize;
-    sm.format       = TextureFormat::Depth24;
-    sm.filter       = TextureFilter::Linear;
-    sm.renderTarget = false; // depth bind flag added by the format check
-    m_shadowMap = device.CreateTexture(sm);
+    // Three cascade shadow maps. Each backend wires up both a DSV (so
+    // SetRenderTarget recognises it as depth-only) and an SRV (so the
+    // main pass can sample it as a regular texture).
+    for (int c = 0; c < kCascadeCount; ++c) {
+        TextureDesc sm;
+        sm.width        = kCascadeShadowSize;
+        sm.height       = kCascadeShadowSize;
+        sm.format       = TextureFormat::Depth24;
+        sm.filter       = TextureFilter::Linear;
+        sm.renderTarget = false;
+        m_cascadeShadowMaps[c] = device.CreateTexture(sm);
+    }
 
-    NARAGAME_INFO("Renderer3D initialized (shadow %ux%u + hemi ambient + linear fog)",
-                  kShadowMapSize, kShadowMapSize);
+    NARAGAME_INFO("Renderer3D initialized (%d cascades @ %ux%u + IBL)",
+                  kCascadeCount, kCascadeShadowSize, kCascadeShadowSize);
 }
 
 void Renderer3D::Shutdown() {
     m_queue.clear();
     m_skinQueue.clear();
     m_skinPool.clear();
-    m_shadowMap.reset();
+    for (auto& tex : m_cascadeShadowMaps) tex.reset();
     m_brdfLutTex.reset();
     m_prefilteredEnvTex.reset();
     m_skyEnvTex.reset();
@@ -885,26 +917,32 @@ void Renderer3D::Begin(const Mat4& view, const Mat4& projection,
     m_sceneColor = sceneColor;
     m_sceneDepth = sceneDepth;
 
-    // Fit an orthographic light camera around the shadow volume. The
-    // light "position" doesn't matter physically; place the eye outside
-    // the volume so all casters fall in front of the near plane.
-    const float r = light.shadowRadius;
+    // Fit three orthographic light cameras around concentric shadow
+    // volumes, all centred on light.shadowCenter. Radii nest 0.3 / 0.6 /
+    // 1.0 of the full shadow radius so close geometry samples the
+    // tightest cascade and the far cascade still catches distant
+    // casters. The pixel shader picks the smallest cascade that
+    // contains the fragment.
+    const float R = light.shadowRadius;
     const Vec3& c = light.shadowCenter;
-    // Normalize direction; if it degenerates we use a default.
     Vec3 dir = light.direction;
     float dl = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     if (dl > 1e-6f) { dir.x /= dl; dir.y /= dl; dir.z /= dl; }
     else            { dir = {0.0f, -1.0f, 0.0f}; }
-    const Vec3 eye{c.x - dir.x * r * 2.0f,
-                   c.y - dir.y * r * 2.0f,
-                   c.z - dir.z * r * 2.0f};
-    // Up vector: use +Y unless the light is shining straight down/up,
-    // in which case pick +Z so LookAt doesn't degenerate.
     Vec3 up{0.0f, 1.0f, 0.0f};
     if (std::abs(dir.y) > 0.999f) up = {0.0f, 0.0f, 1.0f};
-    const Mat4 lightView = mat4::LookAt(eye, c, up);
-    const Mat4 lightProj = mat4::Ortho(-r, r, -r, r, 0.1f, r * 4.0f);
-    const Mat4 lightVP   = lightProj * lightView;
+
+    const float cascadeRadii[kCascadeCount] = {R * 0.3f, R * 0.6f, R};
+    Mat4 cascadeVP[kCascadeCount];
+    for (int k = 0; k < kCascadeCount; ++k) {
+        const float r = cascadeRadii[k];
+        const Vec3 eye{c.x - dir.x * r * 2.0f,
+                       c.y - dir.y * r * 2.0f,
+                       c.z - dir.z * r * 2.0f};
+        const Mat4 lightView = mat4::LookAt(eye, c, up);
+        const Mat4 lightProj = mat4::Ortho(-r, r, -r, r, 0.1f, r * 4.0f);
+        cascadeVP[k] = lightProj * lightView;
+    }
 
     // Recover the camera world position by inverting the view matrix's
     // translation column. View = R | t with R the rotated basis and t
@@ -924,7 +962,9 @@ void Renderer3D::Begin(const Mat4& view, const Mat4& projection,
     FrameCB cb;
     CopyMatrix(view,        cb.view);
     CopyMatrix(projection * view, cb.viewProj);
-    CopyMatrix(lightVP,     cb.lightViewProj);
+    for (int k = 0; k < kCascadeCount; ++k) {
+        CopyMatrix(cascadeVP[k], cb.lightViewProj + k * 16);
+    }
     cb.lightDirWorld[0]    = dir.x;
     cb.lightDirWorld[1]    = dir.y;
     cb.lightDirWorld[2]    = dir.z;
@@ -949,6 +989,14 @@ void Renderer3D::Begin(const Mat4& view, const Mat4& projection,
     cb.cameraPosWorld[1]   = camPos.y;
     cb.cameraPosWorld[2]   = camPos.z;
     cb.cameraPosWorld[3]   = 0.0f;
+    cb.shadowCenter[0]     = c.x;
+    cb.shadowCenter[1]     = c.y;
+    cb.shadowCenter[2]     = c.z;
+    cb.shadowCenter[3]     = 0.0f;
+    cb.cascadeRadii[0]     = cascadeRadii[0];
+    cb.cascadeRadii[1]     = cascadeRadii[1];
+    cb.cascadeRadii[2]     = cascadeRadii[2];
+    cb.cascadeRadii[3]     = 0.0f;
     m_frameUB->Update(&cb, sizeof(cb));
 }
 
@@ -1029,17 +1077,11 @@ void Renderer3D::End() {
 }
 
 void Renderer3D::RunShadowPass(const Mat4& /*lightViewProj*/) {
-    // Bind the shadow map as a depth-only render target. D3D11Device's
-    // SetRenderTarget detects the depth-only case (rtv == null, dsv !=
-    // null) and clears the colour binding for us; ClearDepth wipes the
-    // map to 1.0 (far).
-    m_device->SetRenderTarget(m_shadowMap.get());
-    m_device->ClearDepth(1.0f);
-
-    m_device->BindPipeline(m_pipelineShadow.get());
-    m_device->BindUniformBuffer(0, m_frameUB.get());
-
-    auto packDraw = [](const QueuedMesh& q, DrawCB& out) {
+    // Render the queue once per cascade. The cascade-specific light VP
+    // already lives in FrameCB.lightViewProj[cascade]; the vertex shader
+    // reads which one to use from mrParams.z, which we update per draw
+    // per cascade below.
+    auto packDraw = [](const QueuedMesh& q, int cascade, DrawCB& out) {
         CopyMatrix(q.model, out.model);
         out.albedoFactor[0]   = q.material.albedoFactor.r;
         out.albedoFactor[1]   = q.material.albedoFactor.g;
@@ -1047,7 +1089,7 @@ void Renderer3D::RunShadowPass(const Mat4& /*lightViewProj*/) {
         out.albedoFactor[3]   = q.material.albedoFactor.a;
         out.mrParams[0]       = q.material.metallic;
         out.mrParams[1]       = q.material.roughness;
-        out.mrParams[2]       = 0.0f;
+        out.mrParams[2]       = float(cascade);  // VSShadow reads this
         out.mrParams[3]       = 0.0f;
         out.emissiveFactor[0] = q.material.emissiveFactor.r;
         out.emissiveFactor[1] = q.material.emissiveFactor.g;
@@ -1055,47 +1097,52 @@ void Renderer3D::RunShadowPass(const Mat4& /*lightViewProj*/) {
         out.emissiveFactor[3] = 0.0f;
     };
 
-    DrawCB cb;
-    for (const QueuedMesh& q : m_queue) {
-        packDraw(q, cb);
-        m_drawUB->Update(&cb, sizeof(cb));
-        m_device->BindUniformBuffer(1, m_drawUB.get());
-        m_device->BindVertexBuffer(q.vb, sizeof(Vertex3D), 0);
-        m_device->BindIndexBuffer(q.ib, q.indexFormat);
-        m_device->DrawIndexed(q.indexCount, 0);
-    }
+    for (int cascade = 0; cascade < kCascadeCount; ++cascade) {
+        m_device->SetRenderTarget(m_cascadeShadowMaps[cascade].get());
+        m_device->ClearDepth(1.0f);
 
-    // Skinned shadow pass: swap PSO + upload SkinCB per mesh. SkinCB is
-    // sized for kMaxJoints; copy in what the caller supplied and leave
-    // the rest as zero-filled (the shader only indexes the joints it
-    // needs).
-    if (!m_skinQueue.empty()) {
-        m_device->BindPipeline(m_pipelineShadowSkin.get());
+        m_device->BindPipeline(m_pipelineShadow.get());
         m_device->BindUniformBuffer(0, m_frameUB.get());
-        SkinCB skinCB{};
-        for (const QueuedSkinned& q : m_skinQueue) {
-            DrawCB dcb;
-            QueuedMesh stub;
-            stub.model    = q.model;
-            stub.material = q.material;
-            packDraw(stub, dcb);
-            m_drawUB->Update(&dcb, sizeof(dcb));
-            for (int j = 0; j < q.jointCount; ++j) {
-                CopyMatrix(m_skinPool[size_t(q.jointStart + j)],
-                           &skinCB.jointMatrices[j * 16]);
-            }
-            // Fill remaining joints with identity so a stray index out
-            // of [0, jointCount) still produces a finite vertex.
-            for (int j = q.jointCount; j < kMaxJoints; ++j) {
-                Mat4 id;
-                CopyMatrix(id, &skinCB.jointMatrices[j * 16]);
-            }
-            m_skinUB->Update(&skinCB, sizeof(skinCB));
+
+        DrawCB cb;
+        for (const QueuedMesh& q : m_queue) {
+            packDraw(q, cascade, cb);
+            m_drawUB->Update(&cb, sizeof(cb));
             m_device->BindUniformBuffer(1, m_drawUB.get());
-            m_device->BindUniformBuffer(2, m_skinUB.get());
-            m_device->BindVertexBuffer(q.vb, sizeof(Vertex3DSkin), 0);
+            m_device->BindVertexBuffer(q.vb, sizeof(Vertex3D), 0);
             m_device->BindIndexBuffer(q.ib, q.indexFormat);
             m_device->DrawIndexed(q.indexCount, 0);
+        }
+
+        // Skinned shadow pass for this cascade: swap PSO + upload SkinCB
+        // per mesh. SkinCB is sized for kMaxJoints; copy in what the
+        // caller supplied and leave the rest as zero-filled.
+        if (!m_skinQueue.empty()) {
+            m_device->BindPipeline(m_pipelineShadowSkin.get());
+            m_device->BindUniformBuffer(0, m_frameUB.get());
+            SkinCB skinCB{};
+            for (const QueuedSkinned& q : m_skinQueue) {
+                DrawCB dcb;
+                QueuedMesh stub;
+                stub.model    = q.model;
+                stub.material = q.material;
+                packDraw(stub, cascade, dcb);
+                m_drawUB->Update(&dcb, sizeof(dcb));
+                for (int j = 0; j < q.jointCount; ++j) {
+                    CopyMatrix(m_skinPool[size_t(q.jointStart + j)],
+                               &skinCB.jointMatrices[j * 16]);
+                }
+                for (int j = q.jointCount; j < kMaxJoints; ++j) {
+                    Mat4 id;
+                    CopyMatrix(id, &skinCB.jointMatrices[j * 16]);
+                }
+                m_skinUB->Update(&skinCB, sizeof(skinCB));
+                m_device->BindUniformBuffer(1, m_drawUB.get());
+                m_device->BindUniformBuffer(2, m_skinUB.get());
+                m_device->BindVertexBuffer(q.vb, sizeof(Vertex3DSkin), 0);
+                m_device->BindIndexBuffer(q.ib, q.indexFormat);
+                m_device->DrawIndexed(q.indexCount, 0);
+            }
         }
     }
 }
@@ -1114,12 +1161,12 @@ void Renderer3D::RunMainPass() {
 
     m_device->BindPipeline(m_pipelineMain.get());
     m_device->BindUniformBuffer(0, m_frameUB.get());
-    // Shadow map sits at t1 for the whole main pass; per-mesh material
-    // textures land at t0 (baseColor), t2 (metallic-roughness), and t3
-    // (emissive) below. Null pointers fall back to the 2x2 white texture
-    // so the shader's sample-then-multiply path is always valid. The IBL
-    // sky env at t5 is renderer-owned and stays bound for every draw.
-    m_device->BindTexture(1, m_shadowMap.get());
+    // Cascade shadow maps sit at t1 / t8 / t9, IBL chain at t5..t7. All
+    // renderer-owned so they stay bound for every draw; per-mesh
+    // material textures land at t0 / t2 / t3 / t4 below.
+    m_device->BindTexture(1, m_cascadeShadowMaps[0].get());
+    m_device->BindTexture(8, m_cascadeShadowMaps[1].get());
+    m_device->BindTexture(9, m_cascadeShadowMaps[2].get());
     m_device->BindTexture(5, m_skyEnvTex.get());
     m_device->BindTexture(6, m_prefilteredEnvTex.get());
     m_device->BindTexture(7, m_brdfLutTex.get());
@@ -1168,7 +1215,9 @@ void Renderer3D::RunMainPass() {
     if (!m_skinQueue.empty()) {
         m_device->BindPipeline(m_pipelineMainSkin.get());
         m_device->BindUniformBuffer(0, m_frameUB.get());
-        m_device->BindTexture(1, m_shadowMap.get());
+        m_device->BindTexture(1, m_cascadeShadowMaps[0].get());
+        m_device->BindTexture(8, m_cascadeShadowMaps[1].get());
+        m_device->BindTexture(9, m_cascadeShadowMaps[2].get());
         m_device->BindTexture(5, m_skyEnvTex.get());
         m_device->BindTexture(6, m_prefilteredEnvTex.get());
         m_device->BindTexture(7, m_brdfLutTex.get());

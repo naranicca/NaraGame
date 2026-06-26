@@ -217,11 +217,13 @@ private:
     // integration; sampled by (NdotV, roughness). Combined with the
     // Fresnel F at NdotV: specular = envSpec * (F * lut.r + lut.g).
     std::unique_ptr<RHITexture>  m_brdfLutTex;
-    // Depth-format render target written by the shadow pass and sampled
-    // by the main pass as a depth lookup. 2048x2048 is enough for a
-    // single ortho fit covering the cube test scene; CSM is a later
-    // upgrade.
-    std::unique_ptr<RHITexture>  m_shadowMap;
+    // Cascaded shadow maps: three concentric cascades centred on
+    // DirectionalLight::shadowCenter, each rendered into its own
+    // 1024x1024 depth texture. The pixel shader picks a cascade per
+    // fragment by world distance from the centre, so close geometry
+    // gets tight shadow texels and the far cascade keeps distant
+    // casters covered without blowing up resolution uniformly.
+    std::unique_ptr<RHITexture>  m_cascadeShadowMaps[3];
 
     // Mesh queue collected between Begin and End. Replayed twice (once
     // for the shadow pass, once for the main pass) so the caller only
