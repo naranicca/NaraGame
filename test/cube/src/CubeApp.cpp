@@ -78,6 +78,12 @@ public:
         // animation as a single file.
         m_rigged = LoadGltfSkinned(GetDevice(),
                                    assets + "/rigged-rod.glb");
+        // textured-cube.glb exercises the glTF material path: an embedded
+        // PNG (image bufferView in the .glb's BIN chunk) feeds the
+        // baseColorTexture; the loader populates m_texturedCube.material
+        // directly and we hand it to DrawMesh as-is.
+        m_texturedCube = LoadGltf(GetDevice(),
+                                  assets + "/textured-cube.glb");
 
         m_camera.SetViewport(float(kWindowW), float(kWindowH));
         m_camera.SetPosition({0.0f, 1.8f, 5.0f});
@@ -122,9 +128,12 @@ public:
 
         // Ground plane.
         const Mat4 planeModel = mat4::Translation({0.0f, -0.6f, 0.0f});
+        Material groundMat;
+        groundMat.baseColorTex = m_ground.get();
+        groundMat.roughness    = 0.85f;
         m_renderer.DrawMesh(m_planeVB.get(), m_planeIB.get(),
                             6, IndexFormat::Uint16,
-                            planeModel, m_ground.get(), {});
+                            planeModel, groundMat);
 
         // 2x5 PBR sphere grid kept from Phase 5.
         if (m_sphere.valid) {
@@ -147,14 +156,30 @@ public:
             const int animIdx = m_rigged.animations.empty() ? -1 : 0;
             SampleSkinnedMeshAnim(m_rigged, animIdx, m_time, skinMats.data());
             const Mat4 rodModel = mat4::Translation({0.0f, -0.6f, 1.6f});
+            Material rodMat;
+            rodMat.albedoFactor = Color(0.85f, 0.30f, 0.35f, 1.0f);
+            rodMat.metallic     = 0.0f;
+            rodMat.roughness    = 0.35f;
             m_renderer.DrawSkinnedMesh(
                 m_rigged.vertexBuffer.get(), m_rigged.indexBuffer.get(),
                 m_rigged.indexCount, m_rigged.indexFormat,
                 rodModel, skinMats.data(), int(m_rigged.joints.size()),
-                m_white.get(),
-                Material{Color(0.85f, 0.30f, 0.35f, 1.0f),
-                         /*metallic=*/0.0f,
-                         /*roughness=*/0.35f});
+                rodMat);
+        }
+
+        // Textured cube -- proves the new glTF material path: the .glb
+        // carries an embedded PNG (image bufferView) + a pbrMetallic-
+        // Roughness material block, and we draw it straight from
+        // m_texturedCube.material without overriding anything.
+        if (m_texturedCube.valid) {
+            const Mat4 cubeModel = mat4::Translation({-2.8f, 0.0f, 0.5f})
+                                 * mat4::RotationY(m_yaw)
+                                 * mat4::Scale({0.7f, 0.7f, 0.7f});
+            m_renderer.DrawMesh(m_texturedCube.vertexBuffer.get(),
+                                m_texturedCube.indexBuffer.get(),
+                                m_texturedCube.indexCount,
+                                m_texturedCube.indexFormat,
+                                cubeModel, m_texturedCube.material);
         }
 
         m_renderer.End();
@@ -173,11 +198,14 @@ private:
                     const Color& albedo) {
         const Mat4 model = mat4::Translation({x, y, z})
                          * mat4::Scale({0.45f, 0.45f, 0.45f});
+        Material mat;
+        mat.albedoFactor = albedo;
+        mat.metallic     = metallic;
+        mat.roughness    = roughness;
         m_renderer.DrawMesh(m_sphere.vertexBuffer.get(),
                             m_sphere.indexBuffer.get(),
                             m_sphere.indexCount, m_sphere.indexFormat,
-                            model, m_white.get(),
-                            Material{albedo, metallic, roughness});
+                            model, mat);
     }
 
     static AppConfig MakeConfig() {
@@ -234,6 +262,7 @@ private:
     std::unique_ptr<RHIBuffer>  m_planeVB;
     std::unique_ptr<RHIBuffer>  m_planeIB;
     Mesh                        m_sphere;
+    Mesh                        m_texturedCube;
     SkinnedMesh                 m_rigged;
     float                       m_yaw  = 0.0f;
     float                       m_time = 0.0f;

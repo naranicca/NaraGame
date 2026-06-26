@@ -32,6 +32,7 @@ struct DrawCB {
     float model[16];
     float albedoFactor[4];   // .rgba multiplied against albedo sample
     float mrParams[4];       // .x = metallic, .y = roughness, .zw unused
+    float emissiveFactor[4]; // .rgb multiplied against emissive sample
 };
 // kMaxJoints comes from Renderer3D.h; mirror it here so the cbuffer
 // stays sized correctly. 64 joints * 64 bytes = 4 KiB, well under the
@@ -60,6 +61,7 @@ cbuffer DrawCB : register(b1) {
     float4x4 model;
     float4   albedoFactor;
     float4   mrParams;        // .x metallic, .y roughness
+    float4   emissiveFactor;  // .rgb emissive tint
 };
 
 struct VSIn {
@@ -91,12 +93,17 @@ VSOut VSMain(VSIn input) {
     return output;
 }
 
-Texture2D    albedoTex : register(t0);
-SamplerState sampLinear : register(s0);
+Texture2D    albedoTex   : register(t0);
+SamplerState sampLinear  : register(s0);
 // Shadow map is a depth texture (R24_UNORM_X8 SRV in the D3D11 backend)
 // so the .r channel holds the depth value directly. Sample with the
 // default linear sampler -- PCF / comparison sampler is a later upgrade.
-Texture2D    shadowMap : register(t1);
+Texture2D    shadowMap   : register(t1);
+// glTF pbrMetallicRoughness packs roughness in .g and metallic in .b
+// (R is unused; A is occlusion in some pipelines but we ignore it).
+// emissiveTex is treated as plain RGB; alpha is unused.
+Texture2D    mrTex       : register(t2);
+Texture2D    emissiveTex : register(t3);
 
 float SampleShadow(float4 lightSpacePos) {
     float3 lsp = lightSpacePos.xyz / lightSpacePos.w;
@@ -171,8 +178,12 @@ float4 PSMain(VSOut input) : SV_TARGET {
     float3 L = normalize(-lightDirWorld.xyz);
 
     float4 base = albedoTex.Sample(sampLinear, input.uv) * albedoFactor;
-    float  metallic  = saturate(mrParams.x);
-    float  roughness = clamp(mrParams.y, 0.04, 1.0);
+    // Sample metallic-roughness texture per glTF spec (G=roughness,
+    // B=metallic); the factors multiply against the sampled values so a
+    // 1x1 white fallback texture leaves the factor alone.
+    float4 mrSample = mrTex.Sample(sampLinear, input.uv);
+    float  metallic  = saturate(mrParams.x * mrSample.b);
+    float  roughness = clamp(mrParams.y * mrSample.g, 0.04, 1.0);
 
     float  shadow = SampleShadow(input.lightSpacePos);
     float3 direct = BRDF(N, V, L, base.rgb, metallic, roughness) * shadow;
@@ -185,7 +196,11 @@ float4 PSMain(VSOut input) : SV_TARGET {
     float3 hemi    = lerp(groundAmbient.rgb, skyAmbient.rgb, hemiK);
     float3 ambient = hemi * base.rgb * (1.0 - metallic * 0.7);
 
-    float3 lit = ambient + direct;
+    // Emissive is unshadowed self-emission added on top of the BRDF.
+    float3 emissive = emissiveTex.Sample(sampLinear, input.uv).rgb
+                    * emissiveFactor.rgb;
+
+    float3 lit = ambient + direct + emissive;
 
     float viewDist = -input.viewPos.z;
     float f = saturate((viewDist - fogParams.x) / (fogParams.y - fogParams.x));
@@ -529,7 +544,6 @@ void Renderer3D::DrawSkinnedMesh(RHIBuffer* vb, RHIBuffer* ib,
                                  IndexFormat indexFormat,
                                  const Mat4& model,
                                  const Mat4* jointMatrices, int jointCount,
-                                 RHITexture* texture,
                                  const Material& material) {
     if (!m_device || !vb || !ib || indexCount == 0) return;
     if (!m_inPass) {
@@ -551,7 +565,6 @@ void Renderer3D::DrawSkinnedMesh(RHIBuffer* vb, RHIBuffer* ib,
     q.indexCount  = indexCount;
     q.indexFormat = indexFormat;
     q.model       = model;
-    q.texture     = texture ? texture : m_whiteTex.get();
     q.material    = material;
     q.jointStart  = int(m_skinPool.size());
     q.jointCount  = jointCount;
@@ -562,7 +575,7 @@ void Renderer3D::DrawSkinnedMesh(RHIBuffer* vb, RHIBuffer* ib,
 
 void Renderer3D::DrawMesh(RHIBuffer* vb, RHIBuffer* ib, uint32_t indexCount,
                           IndexFormat indexFormat,
-                          const Mat4& model, RHITexture* texture,
+                          const Mat4& model,
                           const Material& material) {
     if (!m_device || !vb || !ib || indexCount == 0) return;
     if (!m_inPass) {
@@ -575,7 +588,6 @@ void Renderer3D::DrawMesh(RHIBuffer* vb, RHIBuffer* ib, uint32_t indexCount,
     q.indexCount  = indexCount;
     q.indexFormat = indexFormat;
     q.model       = model;
-    q.texture     = texture ? texture : m_whiteTex.get();
     q.material    = material;
     m_queue.push_back(q);
 }
@@ -616,14 +628,18 @@ void Renderer3D::RunShadowPass(const Mat4& /*lightViewProj*/) {
 
     auto packDraw = [](const QueuedMesh& q, DrawCB& out) {
         CopyMatrix(q.model, out.model);
-        out.albedoFactor[0] = q.material.albedoFactor.r;
-        out.albedoFactor[1] = q.material.albedoFactor.g;
-        out.albedoFactor[2] = q.material.albedoFactor.b;
-        out.albedoFactor[3] = q.material.albedoFactor.a;
-        out.mrParams[0]     = q.material.metallic;
-        out.mrParams[1]     = q.material.roughness;
-        out.mrParams[2]     = 0.0f;
-        out.mrParams[3]     = 0.0f;
+        out.albedoFactor[0]   = q.material.albedoFactor.r;
+        out.albedoFactor[1]   = q.material.albedoFactor.g;
+        out.albedoFactor[2]   = q.material.albedoFactor.b;
+        out.albedoFactor[3]   = q.material.albedoFactor.a;
+        out.mrParams[0]       = q.material.metallic;
+        out.mrParams[1]       = q.material.roughness;
+        out.mrParams[2]       = 0.0f;
+        out.mrParams[3]       = 0.0f;
+        out.emissiveFactor[0] = q.material.emissiveFactor.r;
+        out.emissiveFactor[1] = q.material.emissiveFactor.g;
+        out.emissiveFactor[2] = q.material.emissiveFactor.b;
+        out.emissiveFactor[3] = 0.0f;
     };
 
     DrawCB cb;
@@ -685,19 +701,31 @@ void Renderer3D::RunMainPass() {
 
     m_device->BindPipeline(m_pipelineMain.get());
     m_device->BindUniformBuffer(0, m_frameUB.get());
-    // Shadow map sits at t1; the per-mesh albedo will land at t0 below.
+    // Shadow map sits at t1 for the whole main pass; per-mesh material
+    // textures land at t0 (baseColor), t2 (metallic-roughness), and t3
+    // (emissive) below. Null pointers fall back to the 2x2 white texture
+    // so the shader's sample-then-multiply path is always valid.
     m_device->BindTexture(1, m_shadowMap.get());
 
     auto packDraw = [](const QueuedMesh& q, DrawCB& out) {
         CopyMatrix(q.model, out.model);
-        out.albedoFactor[0] = q.material.albedoFactor.r;
-        out.albedoFactor[1] = q.material.albedoFactor.g;
-        out.albedoFactor[2] = q.material.albedoFactor.b;
-        out.albedoFactor[3] = q.material.albedoFactor.a;
-        out.mrParams[0]     = q.material.metallic;
-        out.mrParams[1]     = q.material.roughness;
-        out.mrParams[2]     = 0.0f;
-        out.mrParams[3]     = 0.0f;
+        out.albedoFactor[0]   = q.material.albedoFactor.r;
+        out.albedoFactor[1]   = q.material.albedoFactor.g;
+        out.albedoFactor[2]   = q.material.albedoFactor.b;
+        out.albedoFactor[3]   = q.material.albedoFactor.a;
+        out.mrParams[0]       = q.material.metallic;
+        out.mrParams[1]       = q.material.roughness;
+        out.mrParams[2]       = 0.0f;
+        out.mrParams[3]       = 0.0f;
+        out.emissiveFactor[0] = q.material.emissiveFactor.r;
+        out.emissiveFactor[1] = q.material.emissiveFactor.g;
+        out.emissiveFactor[2] = q.material.emissiveFactor.b;
+        out.emissiveFactor[3] = 0.0f;
+    };
+
+    RHITexture* whiteFallback = m_whiteTex.get();
+    auto bindTex = [this, whiteFallback](int slot, RHITexture* t) {
+        m_device->BindTexture(slot, t ? t : whiteFallback);
     };
 
     DrawCB cb;
@@ -705,7 +733,9 @@ void Renderer3D::RunMainPass() {
         packDraw(q, cb);
         m_drawUB->Update(&cb, sizeof(cb));
         m_device->BindUniformBuffer(1, m_drawUB.get());
-        m_device->BindTexture(0, q.texture);
+        bindTex(0, q.material.baseColorTex);
+        bindTex(2, q.material.metallicRoughnessTex);
+        bindTex(3, q.material.emissiveTex);
         m_device->BindVertexBuffer(q.vb, sizeof(Vertex3D), 0);
         m_device->BindIndexBuffer(q.ib, q.indexFormat);
         m_device->DrawIndexed(q.indexCount, 0);
@@ -736,7 +766,9 @@ void Renderer3D::RunMainPass() {
             m_skinUB->Update(&skinCB, sizeof(skinCB));
             m_device->BindUniformBuffer(1, m_drawUB.get());
             m_device->BindUniformBuffer(2, m_skinUB.get());
-            m_device->BindTexture(0, q.texture);
+            bindTex(0, q.material.baseColorTex);
+            bindTex(2, q.material.metallicRoughnessTex);
+            bindTex(3, q.material.emissiveTex);
             m_device->BindVertexBuffer(q.vb, sizeof(Vertex3DSkin), 0);
             m_device->BindIndexBuffer(q.ib, q.indexFormat);
             m_device->DrawIndexed(q.indexCount, 0);

@@ -27,7 +27,15 @@ struct Mesh {
     // reset. Empty for a Mesh that failed to load.
     std::vector<Vertex3D>      vertices;
     std::vector<uint32_t>      indices;   // always promoted to 32-bit for storage
-    bool                       valid       = false;
+    // PBR material parsed from the source asset (glTF). `material` holds
+    // raw RHITexture* pointers into `ownedTextures`, which owns those
+    // textures' lifetimes for as long as the Mesh is alive. For an asset
+    // with no material info the loader leaves Material at its defaults
+    // (white albedo, no maps) and the renderer's white-fallback path
+    // kicks in.
+    Material                                  material;
+    std::vector<std::unique_ptr<RHITexture>>  ownedTextures;
+    bool                                      valid       = false;
 };
 
 // Parse a Wavefront .obj file from disk and upload it as a static mesh.
@@ -109,6 +117,11 @@ struct SkinnedMesh {
     // All animation clips the file carried. Each is independent; the
     // caller picks one and sets a time via SampleSkinnedMeshAnim.
     std::vector<SkinnedMeshAnim>     animations;
+
+    // Material + owned textures parsed from the glTF, same shape as
+    // Mesh::material / Mesh::ownedTextures above.
+    Material                                  material;
+    std::vector<std::unique_ptr<RHITexture>>  ownedTextures;
 
     bool                             valid = false;
 };

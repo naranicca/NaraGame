@@ -67,19 +67,31 @@ struct FogParams {
     float endDistance   = 2000.0f;
 };
 
-// PBR material parameters for one mesh. `albedoFactor` tints whatever
-// the bound albedo texture samples to (white = pass-through). `metallic`
-// is 0 for plain dielectrics (paint, wood, plastic) and 1 for raw
-// metals (steel, gold, copper); intermediate values give the dirty-
-// metal look but aren't physically meaningful. `roughness` runs from 0
-// (mirror-smooth) to 1 (matte) and drives the GGX microfacet width.
-// The MVP material has no texture slots yet -- the shader takes its
-// metallic / roughness from these scalars; an albedoMap can ride along
-// in the existing DrawMesh `texture` parameter.
+// PBR material parameters for one mesh. Factors tint or scale whatever
+// the bound texture samples to (white / 1.0 = pass-through); textures
+// are optional and a null pointer means "use a 1x1 white fallback so the
+// factor stands alone". The split + texture combo matches glTF 2.0's
+// pbrMetallicRoughness, so a glTF material can drop straight in.
+//
+// `metallic` is 0 for plain dielectrics (paint, wood, plastic) and 1 for
+// raw metals; `roughness` runs 0 (mirror-smooth) to 1 (matte) and drives
+// the GGX microfacet width. `metallicRoughnessTex` packs roughness in G
+// and metallic in B (glTF spec); the factors multiply against the texel.
+// `emissiveTex` * `emissiveFactor` is added after the BRDF (treated as
+// unshadowed self-emission).
+//
+// `normalTex` is reserved for follow-up work -- it's parsed and held
+// for the asset but the shader does not yet sample it (needs tangent
+// vertex attribute work first).
 struct Material {
-    Color albedoFactor = Color::White();
-    float metallic     = 0.0f;
-    float roughness    = 0.5f;
+    Color       albedoFactor          = Color::White();
+    float       metallic              = 0.0f;
+    float       roughness             = 0.5f;
+    Color       emissiveFactor        = {0.0f, 0.0f, 0.0f, 1.0f};
+    RHITexture* baseColorTex          = nullptr;
+    RHITexture* metallicRoughnessTex  = nullptr;
+    RHITexture* emissiveTex           = nullptr;
+    RHITexture* normalTex             = nullptr;  // parsed, not yet sampled
 };
 
 // Immediate-mode mesh renderer for the 3D pipeline. Owns one main PSO
@@ -121,13 +133,14 @@ public:
     // Queue one mesh for both the shadow pass and the main pass. `vb` /
     // `ib` are buffers created via CreateBuffer with the right
     // BufferType; the mesh data must use the Vertex3D layout above.
-    // `model` is the world-from-local transform; `texture` is sampled
-    // as albedo, `material` drives the BRDF (metallic / roughness /
-    // tint). `texture` may be null -- a 2x2 white texture is used in
-    // its place so the shader always samples valid data.
+    // `model` is the world-from-local transform; `material` carries
+    // both the BRDF parameters (factors) and the bound textures
+    // (baseColor / metallic-roughness / emissive). Any null texture
+    // pointer falls back to a 1x1 white internally so the shader
+    // always samples valid data.
     void DrawMesh(RHIBuffer* vb, RHIBuffer* ib, uint32_t indexCount,
                   IndexFormat indexFormat,
-                  const Mat4& model, RHITexture* texture,
+                  const Mat4& model,
                   const Material& material = {});
 
     // Same as DrawMesh but the mesh data uses Vertex3DSkin (per-vertex
@@ -141,7 +154,6 @@ public:
                          IndexFormat indexFormat,
                          const Mat4& model,
                          const Mat4* jointMatrices, int jointCount,
-                         RHITexture* texture,
                          const Material& material = {});
 
     // Run the shadow pass + the main pass. The main pass binds the
@@ -173,7 +185,10 @@ private:
     // SkinCB carries up to kMaxJoints float4x4 matrices in cbuffer b2.
     // Bound only during skinned draws; the static path leaves it alone.
     std::unique_ptr<RHIBuffer>   m_skinUB;
-    // 2x2 white albedo used when DrawMesh receives a null texture.
+    // 2x2 white texture used as a fallback for any Material texture that
+    // a caller leaves null (baseColor, metallic-roughness, emissive).
+    // Keeps the shader on one code path: it always samples a texture and
+    // multiplies by the factor.
     std::unique_ptr<RHITexture>  m_whiteTex;
     // Depth-format render target written by the shadow pass and sampled
     // by the main pass as a depth lookup. 2048x2048 is enough for a
@@ -190,7 +205,6 @@ private:
         uint32_t    indexCount;
         IndexFormat indexFormat;
         Mat4        model;
-        RHITexture* texture;
         Material    material;
     };
     std::vector<QueuedMesh> m_queue;
@@ -206,7 +220,6 @@ private:
         uint32_t    indexCount;
         IndexFormat indexFormat;
         Mat4        model;
-        RHITexture* texture;
         Material    material;
         int         jointStart;
         int         jointCount;

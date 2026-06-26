@@ -1,5 +1,7 @@
 #include "NaraGame/assets/MeshLoader.h"
 
+#include "NaraGame/assets/Image.h"
+#include "NaraGame/assets/TextureLoader.h"
 #include "NaraGame/core/Log.h"
 #include "NaraGame/renderer/rhi/RHIDevice.h"
 #include "NaraGame/renderer/rhi/RHIResources.h"
@@ -209,6 +211,145 @@ std::vector<uint32_t> ReadIndexAccessor(const MiniJson::Value& accessor,
     return out;
 }
 
+// Read one float out of an array Value at the given index, falling back
+// when the element is missing or non-numeric. Used to unpack glTF's
+// fixed-length factor arrays (baseColorFactor / emissiveFactor).
+float ArrayFloatAt(const MiniJson::Value& arr, size_t i, float def) {
+    if (!arr.IsArray() || i >= arr.arrayValue.size()) return def;
+    const MiniJson::Value& v = arr.arrayValue[i];
+    if (v.type != MiniJson::Value::Type::Number) return def;
+    return float(v.numberValue);
+}
+
+// Resolve a glTF textures[idx] entry to an RHITexture. Walks
+// textures[idx].source -> images[j] and decodes the image from either
+// `images[j].uri` (external file next to the .gltf) or
+// `images[j].bufferView` (embedded in the .glb's BIN chunk). The created
+// texture lands in `outOwned` so the caller controls its lifetime; the
+// returned raw pointer is borrowed and tracks that owner.
+RHITexture* ResolveGltfTexture(const MiniJson::Value& root,
+                               const MiniJson::Value& bufferViews,
+                               const std::string& bin,
+                               const std::string& gltfPath,
+                               RHIDevice& device,
+                               int textureIdx,
+                               std::vector<std::unique_ptr<RHITexture>>& outOwned) {
+    if (textureIdx < 0) return nullptr;
+    const MiniJson::Value* textures = root.Find("textures");
+    const MiniJson::Value* images   = root.Find("images");
+    if (!textures || !textures->IsArray() ||
+        size_t(textureIdx) >= textures->arrayValue.size()) {
+        return nullptr;
+    }
+    const MiniJson::Value& tex = textures->arrayValue[size_t(textureIdx)];
+    const int sourceIdx = tex.GetInt("source", -1);
+    if (sourceIdx < 0 || !images || !images->IsArray() ||
+        size_t(sourceIdx) >= images->arrayValue.size()) {
+        return nullptr;
+    }
+    const MiniJson::Value& img = images->arrayValue[size_t(sourceIdx)];
+
+    Image decoded;
+    const int viewIdx = img.GetInt("bufferView", -1);
+    if (viewIdx >= 0) {
+        if (size_t(viewIdx) >= bufferViews.arrayValue.size()) {
+            NARAGAME_WARN("LoadGltf: image bufferView %d OOR", viewIdx);
+            return nullptr;
+        }
+        const MiniJson::Value& bv = bufferViews.arrayValue[size_t(viewIdx)];
+        const size_t byteOffset = size_t(bv.GetInt("byteOffset"));
+        const size_t byteLength = size_t(bv.GetInt("byteLength"));
+        if (byteOffset + byteLength > bin.size()) {
+            NARAGAME_WARN("LoadGltf: image bufferView slice past EOF");
+            return nullptr;
+        }
+        decoded = DecodePNG(
+            reinterpret_cast<const uint8_t*>(bin.data()) + byteOffset, byteLength);
+    } else {
+        const std::string& uri = img.GetString("uri");
+        if (uri.empty() || uri.rfind("data:", 0) == 0) {
+            NARAGAME_WARN("LoadGltf: image lacks bufferView and a usable URI");
+            return nullptr;
+        }
+        decoded = LoadImageFile(DirOf(gltfPath) + uri);
+    }
+    if (!decoded.Valid()) {
+        NARAGAME_WARN("LoadGltf: image decode failed (image %d)", sourceIdx);
+        return nullptr;
+    }
+    std::unique_ptr<RHITexture> rhi = CreateTexture(device, decoded,
+                                                    TextureFilter::Linear);
+    if (!rhi) return nullptr;
+    RHITexture* raw = rhi.get();
+    outOwned.push_back(std::move(rhi));
+    return raw;
+}
+
+// Parse a glTF material referenced by `prim.material` into our renderer's
+// Material struct. Defaults (white albedo, metallic=1, roughness=1) match
+// glTF's pbrMetallicRoughness defaults so an unspecified factor leaves
+// the bound texture alone. `outOwned` collects any textures we load so
+// the caller owns them for as long as it owns the mesh.
+Material LoadGltfMaterial(const MiniJson::Value& root,
+                          const MiniJson::Value& prim,
+                          const MiniJson::Value& bufferViews,
+                          const std::string& bin,
+                          const std::string& gltfPath,
+                          RHIDevice& device,
+                          std::vector<std::unique_ptr<RHITexture>>& outOwned) {
+    Material mat;
+    const int matIdx = prim.GetInt("material", -1);
+    const MiniJson::Value* materials = root.Find("materials");
+    if (matIdx < 0 || !materials || !materials->IsArray() ||
+        size_t(matIdx) >= materials->arrayValue.size()) {
+        return mat;
+    }
+    const MiniJson::Value& m = materials->arrayValue[size_t(matIdx)];
+
+    if (const MiniJson::Value* pbr = m.Find("pbrMetallicRoughness")) {
+        if (const MiniJson::Value* bcf = pbr->Find("baseColorFactor")) {
+            mat.albedoFactor = Color(ArrayFloatAt(*bcf, 0, 1.0f),
+                                     ArrayFloatAt(*bcf, 1, 1.0f),
+                                     ArrayFloatAt(*bcf, 2, 1.0f),
+                                     ArrayFloatAt(*bcf, 3, 1.0f));
+        }
+        // glTF's default factors are 1.0 (texture passes through); the
+        // engine's Material defaults are 0/0.5 (no-texture preset). When
+        // a material block exists we honour glTF semantics.
+        mat.metallic  = float(pbr->GetNumber("metallicFactor",  1.0));
+        mat.roughness = float(pbr->GetNumber("roughnessFactor", 1.0));
+        if (const MiniJson::Value* bt = pbr->Find("baseColorTexture")) {
+            mat.baseColorTex = ResolveGltfTexture(
+                root, bufferViews, bin, gltfPath, device,
+                bt->GetInt("index", -1), outOwned);
+        }
+        if (const MiniJson::Value* mrt = pbr->Find("metallicRoughnessTexture")) {
+            mat.metallicRoughnessTex = ResolveGltfTexture(
+                root, bufferViews, bin, gltfPath, device,
+                mrt->GetInt("index", -1), outOwned);
+        }
+    }
+    if (const MiniJson::Value* ef = m.Find("emissiveFactor")) {
+        mat.emissiveFactor = Color(ArrayFloatAt(*ef, 0, 0.0f),
+                                   ArrayFloatAt(*ef, 1, 0.0f),
+                                   ArrayFloatAt(*ef, 2, 0.0f),
+                                   1.0f);
+    }
+    if (const MiniJson::Value* et = m.Find("emissiveTexture")) {
+        mat.emissiveTex = ResolveGltfTexture(
+            root, bufferViews, bin, gltfPath, device,
+            et->GetInt("index", -1), outOwned);
+    }
+    if (const MiniJson::Value* nt = m.Find("normalTexture")) {
+        // Parsed + held so a future tangent-aware shader can pick it up;
+        // the current PSMain does not yet sample normalTex.
+        mat.normalTex = ResolveGltfTexture(
+            root, bufferViews, bin, gltfPath, device,
+            nt->GetInt("index", -1), outOwned);
+    }
+    return mat;
+}
+
 } // namespace
 
 Mesh LoadGltf(RHIDevice& device, const std::string& path) {
@@ -409,10 +550,13 @@ Mesh LoadGltf(RHIDevice& device, const std::string& path) {
     mesh.indexCount = uint32_t(indices.size());
     mesh.vertices   = std::move(verts);
     mesh.indices    = std::move(indices);
+    mesh.material   = LoadGltfMaterial(root, prim, *bufferViews, bin, path,
+                                       device, mesh.ownedTextures);
     mesh.valid      = (mesh.vertexBuffer && mesh.indexBuffer);
     if (mesh.valid)
-        NARAGAME_INFO("LoadGltf: '%s' loaded (%d verts, %u indices)",
-                      path.c_str(), vertexCount, mesh.indexCount);
+        NARAGAME_INFO("LoadGltf: '%s' loaded (%d verts, %u indices, %zu textures)",
+                      path.c_str(), vertexCount, mesh.indexCount,
+                      mesh.ownedTextures.size());
     return mesh;
 }
 
@@ -742,11 +886,15 @@ SkinnedMesh LoadGltfSkinned(RHIDevice& device, const std::string& path) {
     mesh.indexCount = uint32_t(indices.size());
     mesh.vertices   = std::move(verts);
     mesh.indices    = std::move(indices);
+    mesh.material   = LoadGltfMaterial(root, prim, *bufferViews, bin, path,
+                                       device, mesh.ownedTextures);
     mesh.valid      = (mesh.vertexBuffer && mesh.indexBuffer);
     if (mesh.valid)
-        NARAGAME_INFO("LoadGltfSkinned: '%s' loaded (%d verts, %u indices, %zu joints, %zu anims)",
+        NARAGAME_INFO("LoadGltfSkinned: '%s' loaded (%d verts, %u indices, "
+                      "%zu joints, %zu anims, %zu textures)",
                       path.c_str(), vertexCount, mesh.indexCount,
-                      mesh.joints.size(), mesh.animations.size());
+                      mesh.joints.size(), mesh.animations.size(),
+                      mesh.ownedTextures.size());
     return mesh;
 }
 
