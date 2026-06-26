@@ -207,6 +207,16 @@ private:
     // but the perturbed normal now picks up a smooth zenith/horizon/
     // ground gradient instead of the old two-colour hemi lerp.
     std::unique_ptr<RHITexture>  m_skyEnvTex;
+    // 256x768 prefiltered env atlas: six 256x128 strips stacked vertically,
+    // each strip the sky env convolved with a GGX lobe at roughness
+    // level/5 (so strip 0 is mirror-sharp, strip 5 fully diffuse-like).
+    // The pixel shader trilinearly samples two adjacent strips based on
+    // material roughness for a smooth roughness response.
+    std::unique_ptr<RHITexture>  m_prefilteredEnvTex;
+    // 64x64 BRDF LUT (R = scale, G = bias) from Karis' split-sum
+    // integration; sampled by (NdotV, roughness). Combined with the
+    // Fresnel F at NdotV: specular = envSpec * (F * lut.r + lut.g).
+    std::unique_ptr<RHITexture>  m_brdfLutTex;
     // Depth-format render target written by the shadow pass and sampled
     // by the main pass as a depth lookup. 2048x2048 is enough for a
     // single ortho fit covering the cube test scene; CSM is a later

@@ -121,7 +121,14 @@ Texture2D    normalTex   : register(t4);
 // Equirectangular sky env map used as the diffuse-IBL source. Renderer
 // always binds it (the bake lives inside Renderer3D); sample it with
 // the (perturbed) world normal turned into (u, v) by atan2/acos.
-Texture2D    skyEnvTex   : register(t5);
+Texture2D    skyEnvTex          : register(t5);
+// Prefiltered env atlas at t6: six 256x128 strips stacked vertically,
+// each pre-convolved with a GGX lobe at roughness = strip/5. Sampled
+// twice and lerped by frac(roughness * 5) for a smooth roughness
+// response.
+Texture2D    prefilteredEnvTex  : register(t6);
+// BRDF LUT at t7: R = scale, G = bias. Indexed by (NdotV, roughness).
+Texture2D    brdfLutTex         : register(t7);
 
 // Wrap a unit vector to equirectangular UVs. u = azimuth around +Y,
 // v = elevation from +Y (0 = straight up, 1 = straight down).
@@ -129,6 +136,16 @@ float2 DirToEquirect(float3 dir) {
     float u = atan2(dir.x, dir.z) / (2.0 * 3.14159265) + 0.5;
     float v = acos(clamp(dir.y, -1.0, 1.0)) / 3.14159265;
     return float2(u, v);
+}
+
+// Sample the prefiltered env atlas at the strip for `level` (0..5) and
+// remap the equirectangular v into the strip's vertical slice.
+float3 SamplePrefilteredStrip(float3 dir, int level) {
+    float2 uv = DirToEquirect(dir);
+    // Six 128-tall strips packed vertically -> each strip covers 1/6 of
+    // the atlas in v, offset by level/6.
+    uv.y = (float(level) + uv.y) * (1.0 / 6.0);
+    return prefilteredEnvTex.SampleLevel(sampLinear, uv, 0).rgb;
 }
 
 // 5x5 box PCF: 25 depth taps around the projected UV, averaged. Taps
@@ -244,18 +261,38 @@ float4 PSMain(VSOut input) : SV_TARGET {
     float  shadow = SampleShadow(input.lightSpacePos);
     float3 direct = BRDF(N, V, L, base.rgb, metallic, roughness) * shadow;
 
-    // Diffuse IBL: sample the baked sky in the direction of the (perturbed)
-    // normal. Not a proper cosine-weighted irradiance integral -- a single
-    // tap is the MVP -- but the smooth zenith / horizon / ground gradient
-    // gives surfaces the right ambient tint based on where they're looking.
-    // Energy split between diffuse and reflected light: kd = (1-F)*(1-metal),
-    // F via Schlick at NdotV (no BRDF LUT yet; specular IBL is a follow-up).
+    // Image-based lighting -- Karis split-sum approximation.
+    //
+    // Diffuse: sample the baked sky in the (perturbed) normal direction.
+    // A single tap, not a cosine-weighted irradiance integral, but the
+    // smooth zenith/horizon/ground gradient still gives the right ambient
+    // tint per surface point.
+    //
+    // Specular: bounce V off N to get the reflection direction, sample
+    // the prefiltered env atlas at the strip selected by material
+    // roughness (lerped between two adjacent strips for smoothness), and
+    // weight by the BRDF LUT-integrated Fresnel + geometry term:
+    //   specular = envSpec * (F * lut.r + lut.g)
     float3 envDiffuse = skyEnvTex.Sample(sampLinear, DirToEquirect(N)).rgb;
-    float3 F0    = lerp(float3(0.04, 0.04, 0.04), base.rgb, metallic);
-    float  NdV   = saturate(dot(N, V));
-    float3 Fibl  = F_Schlick(NdV, F0);
-    float3 kdIbl = (float3(1.0, 1.0, 1.0) - Fibl) * (1.0 - metallic);
-    float3 ambient = kdIbl * base.rgb * envDiffuse;
+    float3 F0     = lerp(float3(0.04, 0.04, 0.04), base.rgb, metallic);
+    float  NdV    = saturate(dot(N, V));
+    float3 Fibl   = F_Schlick(NdV, F0);
+    float3 kdIbl  = (float3(1.0, 1.0, 1.0) - Fibl) * (1.0 - metallic);
+    float3 diffuseIbl = kdIbl * base.rgb * envDiffuse;
+
+    float3 R       = reflect(-V, N);
+    float  mipPos  = saturate(roughness) * 5.0;  // 6 strips: 0..5
+    int    mipLo  = (int)floor(mipPos);
+    int    mipHi  = min(mipLo + 1, 5);
+    float  mipT   = mipPos - float(mipLo);
+    float3 envLo  = SamplePrefilteredStrip(R, mipLo);
+    float3 envHi  = SamplePrefilteredStrip(R, mipHi);
+    float3 envSpec = lerp(envLo, envHi, mipT);
+    float2 brdf   = brdfLutTex.Sample(sampLinear,
+                                       float2(NdV, roughness)).rg;
+    float3 specularIbl = envSpec * (Fibl * brdf.x + brdf.y);
+
+    float3 ambient = diffuseIbl + specularIbl;
 
     // Emissive is unshadowed self-emission added on top of the BRDF.
     float3 emissive = emissiveTex.Sample(sampLinear, input.uv).rgb
@@ -345,6 +382,117 @@ static_assert(kMaxJoints == 64, "Update HLSL jointMatrices[N] to match");
 
 void CopyMatrix(const Mat4& src, float dst[16]) {
     for (int i = 0; i < 16; ++i) dst[i] = src.data[i];
+}
+
+// --- IBL bake helpers ----------------------------------------------------
+//
+// All run once during Renderer3D::Init from a CPU-side pixel buffer; the
+// runtime never recomputes. Hammersley + GGX importance sampling matches
+// the Karis "Real Shading in UE4" split-sum approach: the prefiltered env
+// gets the GGX-weighted radiance integral, the BRDF LUT gets the geometry
+// + Fresnel integral.
+
+constexpr float kIblPi = 3.14159265358979323846f;
+
+// Van der Corput radical inverse: reverse the bits of i, treat as fraction.
+float RadicalInverseVdC(uint32_t bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10f;  // / 0x100000000
+}
+
+// 2D Hammersley sequence in [0, 1)^2 -- evenly distributed low-discrepancy
+// samples. Drives the GGX importance sampling.
+struct Vec2f { float x, y; };
+Vec2f Hammersley(uint32_t i, uint32_t n) {
+    return Vec2f{float(i) / float(n), RadicalInverseVdC(i)};
+}
+
+// GGX-weighted half-vector sample in the tangent frame whose +Z is `n`.
+// Lower roughness narrows the lobe; alpha = roughness^2 per glTF / Disney.
+Vec3 ImportanceSampleGGX(const Vec2f& xi, const Vec3& n, float roughness) {
+    const float a = roughness * roughness;
+    const float phi = 2.0f * kIblPi * xi.x;
+    const float cosTheta = std::sqrt((1.0f - xi.y) / (1.0f + (a * a - 1.0f) * xi.y));
+    const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+    // Tangent-space sample then rotate into the frame aligned with n.
+    const Vec3 H_t = {sinTheta * std::cos(phi),
+                     sinTheta * std::sin(phi),
+                     cosTheta};
+    const Vec3 up = (std::abs(n.z) < 0.999f) ? Vec3{0.0f, 0.0f, 1.0f}
+                                            : Vec3{1.0f, 0.0f, 0.0f};
+    const Vec3 T = {
+        up.y * n.z - up.z * n.y,
+        up.z * n.x - up.x * n.z,
+        up.x * n.y - up.y * n.x,
+    };
+    const float tlen = std::sqrt(T.x * T.x + T.y * T.y + T.z * T.z);
+    const Vec3 Tn = {T.x / tlen, T.y / tlen, T.z / tlen};
+    const Vec3 B = {
+        n.y * Tn.z - n.z * Tn.y,
+        n.z * Tn.x - n.x * Tn.z,
+        n.x * Tn.y - n.y * Tn.x,
+    };
+    return {Tn.x * H_t.x + B.x * H_t.y + n.x * H_t.z,
+            Tn.y * H_t.x + B.y * H_t.y + n.y * H_t.z,
+            Tn.z * H_t.x + B.z * H_t.y + n.z * H_t.z};
+}
+
+// IBL flavour of the Smith geometry term (k = a^2/2 vs (a+1)^2/8 in
+// direct lighting). Pairs with the BRDF LUT bake below.
+float GeometrySchlickGGX_IBL(float NdotV, float roughness) {
+    const float a = roughness;
+    const float k = (a * a) * 0.5f;
+    return NdotV / (NdotV * (1.0f - k) + k);
+}
+float GeometrySmith_IBL(float NdotV, float NdotL, float roughness) {
+    return GeometrySchlickGGX_IBL(NdotV, roughness) *
+           GeometrySchlickGGX_IBL(NdotL, roughness);
+}
+
+// Convert a world-space direction to equirectangular (u, v) in [0,1].
+// Mirrors the shader's DirToEquirect so the bake samples the same space
+// the runtime does.
+Vec2f DirToEquirectCpu(const Vec3& d) {
+    const float u = std::atan2(d.x, d.z) / (2.0f * kIblPi) + 0.5f;
+    const float dy = std::clamp(d.y, -1.0f, 1.0f);
+    const float v = std::acos(dy) / kIblPi;
+    return {u, v};
+}
+
+// Bilinear sample of the equirectangular sky pixel buffer.
+Vec3 SampleSkyBilinear(const std::vector<uint8_t>& skyPixels,
+                      int w, int h, const Vec3& dir) {
+    const Vec2f uv = DirToEquirectCpu(dir);
+    const float fx = uv.x * float(w);
+    const float fy = uv.y * float(h - 1);  // v=1 maps to row h-1
+    int x0 = int(std::floor(fx)) % w;
+    if (x0 < 0) x0 += w;
+    int x1 = (x0 + 1) % w;
+    int y0 = std::clamp(int(std::floor(fy)), 0, h - 1);
+    int y1 = std::clamp(y0 + 1, 0, h - 1);
+    const float tx = fx - std::floor(fx);
+    const float ty = fy - std::floor(fy);
+    auto get = [&](int x, int y) {
+        const size_t i = (size_t(y) * w + size_t(x)) * 4;
+        return Vec3{float(skyPixels[i + 0]) / 255.0f,
+                    float(skyPixels[i + 1]) / 255.0f,
+                    float(skyPixels[i + 2]) / 255.0f};
+    };
+    const Vec3 c00 = get(x0, y0), c10 = get(x1, y0);
+    const Vec3 c01 = get(x0, y1), c11 = get(x1, y1);
+    const Vec3 a{c00.x + (c10.x - c00.x) * tx,
+                c00.y + (c10.y - c00.y) * tx,
+                c00.z + (c10.z - c00.z) * tx};
+    const Vec3 b{c01.x + (c11.x - c01.x) * tx,
+                c01.y + (c11.y - c01.y) * tx,
+                c01.z + (c11.z - c01.z) * tx};
+    return {a.x + (b.x - a.x) * ty,
+            a.y + (b.y - a.y) * ty,
+            a.z + (b.z - a.z) * ty};
 }
 
 } // namespace
@@ -554,6 +702,134 @@ void Renderer3D::Init(RHIDevice& device) {
     sky.pixels = skyPixels.data();
     m_skyEnvTex = device.CreateTexture(sky);
 
+    // --- Specular IBL: prefiltered env atlas ----------------------------
+    //
+    // Six 256x128 strips stacked vertically, each pre-convolved with a
+    // GGX lobe at roughness = level/5. Importance-sampled with 32
+    // Hammersley draws per output pixel: enough to read smooth without
+    // adding seconds to startup. The runtime trilinearly blends two
+    // adjacent strips by frac(roughness * 5) so the metal reflection
+    // roughness response stays continuous.
+    constexpr int kPrefLevels = 6;
+    constexpr int kPrefW = kSkyW;
+    constexpr int kPrefH = kSkyH;
+    constexpr int kPrefSamples = 32;
+    const int prefTotalH = kPrefH * kPrefLevels;
+    std::vector<uint8_t> prefPixels(size_t(kPrefW) * size_t(prefTotalH) * 4);
+    for (int level = 0; level < kPrefLevels; ++level) {
+        const float roughness = float(level) / float(kPrefLevels - 1);
+        const int rowStart = level * kPrefH;
+        for (int y = 0; y < kPrefH; ++y) {
+            // Each output pixel represents a normal direction = reflection
+            // direction (split-sum approximation: V = N).
+            const float v = float(y) / float(kPrefH - 1);
+            const float elev = v * kIblPi;  // 0 = +Y, pi = -Y
+            const float sinE = std::sin(elev);
+            const float cosE = std::cos(elev);
+            for (int x = 0; x < kPrefW; ++x) {
+                const float u = float(x) / float(kPrefW);
+                const float az = (u - 0.5f) * 2.0f * kIblPi;
+                const Vec3 N = {sinE * std::sin(az), cosE, sinE * std::cos(az)};
+                Vec3 sum{0.0f, 0.0f, 0.0f};
+                float weight = 0.0f;
+                for (int s = 0; s < kPrefSamples; ++s) {
+                    const Vec2f xi = Hammersley(uint32_t(s),
+                                                uint32_t(kPrefSamples));
+                    const Vec3 H = ImportanceSampleGGX(xi, N, roughness);
+                    const float NdotH = N.x * H.x + N.y * H.y + N.z * H.z;
+                    // L = reflect(V, H) with V = N -> L = 2 NdotH H - N.
+                    const Vec3 L = {2.0f * NdotH * H.x - N.x,
+                                    2.0f * NdotH * H.y - N.y,
+                                    2.0f * NdotH * H.z - N.z};
+                    const float NdotL = std::max(0.0f,
+                                                 N.x * L.x + N.y * L.y + N.z * L.z);
+                    if (NdotL > 0.0f) {
+                        const Vec3 c = SampleSkyBilinear(skyPixels, kSkyW,
+                                                        kSkyH, L);
+                        sum.x += c.x * NdotL;
+                        sum.y += c.y * NdotL;
+                        sum.z += c.z * NdotL;
+                        weight += NdotL;
+                    }
+                }
+                if (weight > 0.0f) {
+                    sum.x /= weight; sum.y /= weight; sum.z /= weight;
+                }
+                const size_t i = (size_t(rowStart + y) * kPrefW + size_t(x)) * 4;
+                prefPixels[i + 0] = uint8_t(std::clamp(sum.x, 0.0f, 1.0f) * 255.0f);
+                prefPixels[i + 1] = uint8_t(std::clamp(sum.y, 0.0f, 1.0f) * 255.0f);
+                prefPixels[i + 2] = uint8_t(std::clamp(sum.z, 0.0f, 1.0f) * 255.0f);
+                prefPixels[i + 3] = 0xFF;
+            }
+        }
+    }
+    TextureDesc pref;
+    pref.width  = kPrefW;
+    pref.height = prefTotalH;
+    pref.format = TextureFormat::RGBA8;
+    pref.filter = TextureFilter::Linear;
+    pref.pixels = prefPixels.data();
+    m_prefilteredEnvTex = device.CreateTexture(pref);
+
+    // --- Specular IBL: BRDF LUT ----------------------------------------
+    //
+    // Karis split-sum geometry+Fresnel integral. 64x64 is plenty for the
+    // smooth surface this function has (most graphics pipelines ship a
+    // 256x256 baked offline). R = scale, G = bias; the runtime combines
+    // them as F * scale + bias for the specular reflectance.
+    constexpr int kLutW = 64;
+    constexpr int kLutH = 64;
+    constexpr int kLutSamples = 256;
+    std::vector<uint8_t> lutPixels(size_t(kLutW) * size_t(kLutH) * 4);
+    for (int y = 0; y < kLutH; ++y) {
+        // Map y to roughness in (1/N, 1]; clamp away from zero so the
+        // GGX denominator stays finite.
+        const float roughness = std::max(0.04f,
+            (float(y) + 0.5f) / float(kLutH));
+        for (int x = 0; x < kLutW; ++x) {
+            const float NdotV = std::max(0.001f,
+                (float(x) + 0.5f) / float(kLutW));
+            const Vec3 V = {std::sqrt(1.0f - NdotV * NdotV), 0.0f, NdotV};
+            float scale = 0.0f;
+            float bias  = 0.0f;
+            const Vec3 N = {0.0f, 0.0f, 1.0f};
+            for (int s = 0; s < kLutSamples; ++s) {
+                const Vec2f xi = Hammersley(uint32_t(s),
+                                            uint32_t(kLutSamples));
+                const Vec3 H = ImportanceSampleGGX(xi, N, roughness);
+                const float VdotH = std::max(0.0f,
+                    V.x * H.x + V.y * H.y + V.z * H.z);
+                const Vec3 L = {2.0f * VdotH * H.x - V.x,
+                                2.0f * VdotH * H.y - V.y,
+                                2.0f * VdotH * H.z - V.z};
+                const float NdotL = std::max(0.0f, L.z);
+                const float NdotH = std::max(0.0f, H.z);
+                if (NdotL > 0.0f) {
+                    const float G = GeometrySmith_IBL(NdotV, NdotL, roughness);
+                    const float G_vis = (G * VdotH) / std::max(1e-4f,
+                                                                NdotH * NdotV);
+                    const float Fc = std::pow(1.0f - VdotH, 5.0f);
+                    scale += (1.0f - Fc) * G_vis;
+                    bias  += Fc * G_vis;
+                }
+            }
+            scale /= float(kLutSamples);
+            bias  /= float(kLutSamples);
+            const size_t i = (size_t(y) * kLutW + size_t(x)) * 4;
+            lutPixels[i + 0] = uint8_t(std::clamp(scale, 0.0f, 1.0f) * 255.0f);
+            lutPixels[i + 1] = uint8_t(std::clamp(bias,  0.0f, 1.0f) * 255.0f);
+            lutPixels[i + 2] = 0;
+            lutPixels[i + 3] = 0xFF;
+        }
+    }
+    TextureDesc lut;
+    lut.width  = kLutW;
+    lut.height = kLutH;
+    lut.format = TextureFormat::RGBA8;
+    lut.filter = TextureFilter::Linear;
+    lut.pixels = lutPixels.data();
+    m_brdfLutTex = device.CreateTexture(lut);
+
     // Shadow map: square depth texture. The D3D11 backend wires up
     // both a DSV (so SetRenderTarget recognises it as depth-only) and
     // an SRV (so the main pass can sample it as a regular texture).
@@ -574,6 +850,8 @@ void Renderer3D::Shutdown() {
     m_skinQueue.clear();
     m_skinPool.clear();
     m_shadowMap.reset();
+    m_brdfLutTex.reset();
+    m_prefilteredEnvTex.reset();
     m_skyEnvTex.reset();
     m_flatNormalTex.reset();
     m_whiteTex.reset();
@@ -843,6 +1121,8 @@ void Renderer3D::RunMainPass() {
     // sky env at t5 is renderer-owned and stays bound for every draw.
     m_device->BindTexture(1, m_shadowMap.get());
     m_device->BindTexture(5, m_skyEnvTex.get());
+    m_device->BindTexture(6, m_prefilteredEnvTex.get());
+    m_device->BindTexture(7, m_brdfLutTex.get());
 
     auto packDraw = [](const QueuedMesh& q, DrawCB& out) {
         CopyMatrix(q.model, out.model);
@@ -890,6 +1170,8 @@ void Renderer3D::RunMainPass() {
         m_device->BindUniformBuffer(0, m_frameUB.get());
         m_device->BindTexture(1, m_shadowMap.get());
         m_device->BindTexture(5, m_skyEnvTex.get());
+        m_device->BindTexture(6, m_prefilteredEnvTex.get());
+        m_device->BindTexture(7, m_brdfLutTex.get());
         SkinCB skinCB{};
         for (const QueuedSkinned& q : m_skinQueue) {
             DrawCB dcb;
