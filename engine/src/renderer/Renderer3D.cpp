@@ -117,14 +117,34 @@ Texture2D    emissiveTex : register(t3);
 // normal is (0, 0, 1) and the perturbation is a no-op.
 Texture2D    normalTex   : register(t4);
 
+// 5x5 box PCF: 25 depth taps around the projected UV, averaged. Taps
+// are spaced two texels apart, giving a ~10-texel fringe in shadow-map
+// space (so with kShadowMapSize = 2048 and a shadow radius of 6 units,
+// roughly 6 cm of feathering in world space). Loops are static-bounded
+// so HLSL unrolls; per-pixel cost is one Sample per tap and stays in
+// the noise compared to the BRDF math.
 float SampleShadow(float4 lightSpacePos) {
     float3 lsp = lightSpacePos.xyz / lightSpacePos.w;
     float2 uv = float2(lsp.x * 0.5 + 0.5, 1.0 - (lsp.y * 0.5 + 0.5));
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
     if (lsp.z < 0.0 || lsp.z > 1.0) return 1.0;
-    float closest = shadowMap.Sample(sampLinear, uv).r;
-    const float bias = 0.0015;
-    return (lsp.z - bias > closest) ? 0.0 : 1.0;
+
+    const float bias       = 0.0015;
+    // Must match kShadowMapSize on the C++ side (2048). Hardcoded so the
+    // hot loop avoids a cbuffer read per tap. The 2x spacing widens the
+    // softness without doubling the tap count.
+    const float texelSize  = 1.0 / 2048.0;
+    const float tapSpacing = texelSize * 2.0;
+
+    float sum = 0.0;
+    [unroll] for (int y = -2; y <= 2; ++y) {
+        [unroll] for (int x = -2; x <= 2; ++x) {
+            float2 off = float2(x, y) * tapSpacing;
+            float  closest = shadowMap.Sample(sampLinear, uv + off).r;
+            sum += (lsp.z - bias > closest) ? 0.0 : 1.0;
+        }
+    }
+    return sum / 25.0;
 }
 
 // --- Cook-Torrance GGX -----------------------------------------------
