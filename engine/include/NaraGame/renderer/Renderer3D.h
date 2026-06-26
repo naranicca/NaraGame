@@ -201,6 +201,12 @@ private:
     // as tangent normal (0, 0, 1), so meshes without a normal map render
     // exactly as if normal mapping were off -- without a shader branch.
     std::unique_ptr<RHITexture>  m_flatNormalTex;
+    // 256x128 equirectangular sky map used as the diffuse-IBL source.
+    // Procedurally baked in Init() from the DirectionalLight's hemi
+    // ambient colours so the existing scene defaults still look right,
+    // but the perturbed normal now picks up a smooth zenith/horizon/
+    // ground gradient instead of the old two-colour hemi lerp.
+    std::unique_ptr<RHITexture>  m_skyEnvTex;
     // Depth-format render target written by the shadow pass and sampled
     // by the main pass as a depth lookup. 2048x2048 is enough for a
     // single ortho fit covering the cube test scene; CSM is a later

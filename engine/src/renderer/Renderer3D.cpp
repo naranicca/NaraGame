@@ -4,9 +4,11 @@
 #include "NaraGame/renderer/rhi/RHIDevice.h"
 #include "NaraGame/renderer/rhi/RHIResources.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 namespace NaraGame {
 
@@ -116,6 +118,18 @@ Texture2D    emissiveTex : register(t3);
 // side falls back to a 2x2 (128, 128, 255) texture so the decoded
 // normal is (0, 0, 1) and the perturbation is a no-op.
 Texture2D    normalTex   : register(t4);
+// Equirectangular sky env map used as the diffuse-IBL source. Renderer
+// always binds it (the bake lives inside Renderer3D); sample it with
+// the (perturbed) world normal turned into (u, v) by atan2/acos.
+Texture2D    skyEnvTex   : register(t5);
+
+// Wrap a unit vector to equirectangular UVs. u = azimuth around +Y,
+// v = elevation from +Y (0 = straight up, 1 = straight down).
+float2 DirToEquirect(float3 dir) {
+    float u = atan2(dir.x, dir.z) / (2.0 * 3.14159265) + 0.5;
+    float v = acos(clamp(dir.y, -1.0, 1.0)) / 3.14159265;
+    return float2(u, v);
+}
 
 // 5x5 box PCF: 25 depth taps around the projected UV, averaged. Taps
 // are spaced two texels apart, giving a ~10-texel fringe in shadow-map
@@ -230,13 +244,18 @@ float4 PSMain(VSOut input) : SV_TARGET {
     float  shadow = SampleShadow(input.lightSpacePos);
     float3 direct = BRDF(N, V, L, base.rgb, metallic, roughness) * shadow;
 
-    // Ambient: hemi for the diffuse half (dielectrics + metallic
-    // surfaces lose the diffuse share to (1 - metallic) just like the
-    // direct BRDF). Without proper IBL, metals get a faint ambient
-    // tinted by their albedo as a stand-in.
-    float  hemiK   = saturate(N.y * 0.5 + 0.5);
-    float3 hemi    = lerp(groundAmbient.rgb, skyAmbient.rgb, hemiK);
-    float3 ambient = hemi * base.rgb * (1.0 - metallic * 0.7);
+    // Diffuse IBL: sample the baked sky in the direction of the (perturbed)
+    // normal. Not a proper cosine-weighted irradiance integral -- a single
+    // tap is the MVP -- but the smooth zenith / horizon / ground gradient
+    // gives surfaces the right ambient tint based on where they're looking.
+    // Energy split between diffuse and reflected light: kd = (1-F)*(1-metal),
+    // F via Schlick at NdotV (no BRDF LUT yet; specular IBL is a follow-up).
+    float3 envDiffuse = skyEnvTex.Sample(sampLinear, DirToEquirect(N)).rgb;
+    float3 F0    = lerp(float3(0.04, 0.04, 0.04), base.rgb, metallic);
+    float  NdV   = saturate(dot(N, V));
+    float3 Fibl  = F_Schlick(NdV, F0);
+    float3 kdIbl = (float3(1.0, 1.0, 1.0) - Fibl) * (1.0 - metallic);
+    float3 ambient = kdIbl * base.rgb * envDiffuse;
 
     // Emissive is unshadowed self-emission added on top of the BRDF.
     float3 emissive = emissiveTex.Sample(sampLinear, input.uv).rgb
@@ -488,6 +507,53 @@ void Renderer3D::Init(RHIDevice& device) {
     nd.pixels = flatNormalPixels;
     m_flatNormalTex = device.CreateTexture(nd);
 
+    // Bake the diffuse-IBL sky env: a 256x128 equirectangular gradient
+    // running from a cool zenith at v=0 through a neutral horizon at
+    // v=0.5 to a dark warm earth at v=1. Sampled in the pixel shader by
+    // the (perturbed) world normal to give each surface point an ambient
+    // colour that follows where it's looking instead of the old two-
+    // colour hemi lerp. Colours match the look the cube test scene was
+    // already using so this drops in without retuning anything else.
+    constexpr int kSkyW = 256;
+    constexpr int kSkyH = 128;
+    const Vec3 cZenith   = {0.30f, 0.42f, 0.55f};  // cool blue overhead
+    const Vec3 cHorizUp  = {0.55f, 0.55f, 0.55f};  // neutral at horizon (above)
+    const Vec3 cHorizDn  = {0.50f, 0.42f, 0.35f};  // warm horizon (below)
+    const Vec3 cGround   = {0.16f, 0.13f, 0.10f};  // dark earth straight down
+    auto lerp3 = [](const Vec3& a, const Vec3& b, float t) {
+        return Vec3{a.x + (b.x - a.x) * t,
+                    a.y + (b.y - a.y) * t,
+                    a.z + (b.z - a.z) * t};
+    };
+    auto smooth = [](float t) { return t * t * (3.0f - 2.0f * t); };
+    std::vector<uint8_t> skyPixels(size_t(kSkyW) * size_t(kSkyH) * 4);
+    for (int y = 0; y < kSkyH; ++y) {
+        const float v = float(y) / float(kSkyH - 1);  // 0 = top, 1 = bottom
+        Vec3 col;
+        if (v < 0.5f) {
+            col = lerp3(cZenith, cHorizUp, smooth(v * 2.0f));
+        } else {
+            col = lerp3(cHorizDn, cGround, smooth((v - 0.5f) * 2.0f));
+        }
+        const uint8_t r = uint8_t(std::clamp(col.x, 0.0f, 1.0f) * 255.0f);
+        const uint8_t g = uint8_t(std::clamp(col.y, 0.0f, 1.0f) * 255.0f);
+        const uint8_t b = uint8_t(std::clamp(col.z, 0.0f, 1.0f) * 255.0f);
+        for (int x = 0; x < kSkyW; ++x) {
+            const size_t i = (size_t(y) * kSkyW + size_t(x)) * 4;
+            skyPixels[i + 0] = r;
+            skyPixels[i + 1] = g;
+            skyPixels[i + 2] = b;
+            skyPixels[i + 3] = 0xFF;
+        }
+    }
+    TextureDesc sky;
+    sky.width  = kSkyW;
+    sky.height = kSkyH;
+    sky.format = TextureFormat::RGBA8;
+    sky.filter = TextureFilter::Linear;
+    sky.pixels = skyPixels.data();
+    m_skyEnvTex = device.CreateTexture(sky);
+
     // Shadow map: square depth texture. The D3D11 backend wires up
     // both a DSV (so SetRenderTarget recognises it as depth-only) and
     // an SRV (so the main pass can sample it as a regular texture).
@@ -508,6 +574,7 @@ void Renderer3D::Shutdown() {
     m_skinQueue.clear();
     m_skinPool.clear();
     m_shadowMap.reset();
+    m_skyEnvTex.reset();
     m_flatNormalTex.reset();
     m_whiteTex.reset();
     m_skinUB.reset();
@@ -772,8 +839,10 @@ void Renderer3D::RunMainPass() {
     // Shadow map sits at t1 for the whole main pass; per-mesh material
     // textures land at t0 (baseColor), t2 (metallic-roughness), and t3
     // (emissive) below. Null pointers fall back to the 2x2 white texture
-    // so the shader's sample-then-multiply path is always valid.
+    // so the shader's sample-then-multiply path is always valid. The IBL
+    // sky env at t5 is renderer-owned and stays bound for every draw.
     m_device->BindTexture(1, m_shadowMap.get());
+    m_device->BindTexture(5, m_skyEnvTex.get());
 
     auto packDraw = [](const QueuedMesh& q, DrawCB& out) {
         CopyMatrix(q.model, out.model);
@@ -820,6 +889,7 @@ void Renderer3D::RunMainPass() {
         m_device->BindPipeline(m_pipelineMainSkin.get());
         m_device->BindUniformBuffer(0, m_frameUB.get());
         m_device->BindTexture(1, m_shadowMap.get());
+        m_device->BindTexture(5, m_skyEnvTex.get());
         SkinCB skinCB{};
         for (const QueuedSkinned& q : m_skinQueue) {
             DrawCB dcb;
