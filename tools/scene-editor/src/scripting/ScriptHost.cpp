@@ -3,6 +3,7 @@
 #include "../scene/AnimatorComponent.h"
 #include "../scene/Entity.h"
 #include "../scene/Scene.h"
+#include "../scene/ScriptComponent.h"
 #include "../scene/SpriteRendererComponent.h"
 #include "../scene/TransformComponent.h"
 
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #if defined(NARAGAME_SCENE_EDITOR_HAS_LUA) && NARAGAME_SCENE_EDITOR_HAS_LUA
 extern "C" {
@@ -178,6 +180,103 @@ static int LuaInputIsMouseReleased(lua_State* L) {
 }
 static int LuaInputMouseWheel(lua_State* L) {
     lua_pushnumber(L, ImGui::GetIO().MouseWheel);
+    return 1;
+}
+
+// Walks an entity's tree firing CallOnDestroy on every started
+// ScriptComponent we encounter -- recursing children before the
+// parent so scripts see the same teardown order Scene's destroy
+// path itself uses. Used by the Lua `scene.destroy_entity` path
+// so a runtime-spawned entity tree shuts down cleanly.
+static void FireScriptDestroyTree(ScriptHost* host, Scene* scene,
+                                  EntityId id) {
+    if (!host || !scene) return;
+    Entity* e = scene->Get(id);
+    if (!e) return;
+    for (EntityId childId : e->children) {
+        FireScriptDestroyTree(host, scene, childId);
+    }
+    if (auto* sc = e->GetComponent<ScriptComponent>()) {
+        if (sc->started) {
+            host->CallOnDestroy(e->name, sc->entryFunction);
+            sc->started = false;
+        }
+    }
+}
+
+// scene.create_entity / destroy_entity / find / entity_count /
+// all_entities. Lets scripts spawn + tear down entities at
+// runtime; every callback respects the bound Scene's invariants
+// (auto-added TransformComponent, parent / child wiring,
+// OnDestroy ordering).
+static int LuaSceneCreateEntity(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) return 0;
+    const char* name = luaL_optstring(L, 1, "Entity");
+    Scene* scene = host->BoundScene();
+    EntityId id = scene->CreateEntity(name);
+    Entity* e = scene->Get(id);
+    lua_pushstring(L, e ? e->name.c_str() : "");
+    return 1;
+}
+static int LuaSceneDestroyEntity(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    Scene* scene = host->BoundScene();
+    Entity* e = scene->FindByName(luaL_checkstring(L, 1));
+    if (!e) { lua_pushboolean(L, 0); return 1; }
+    const EntityId id = e->id;
+    FireScriptDestroyTree(host, scene, id);
+    scene->DestroyEntity(id);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+static int LuaSceneFind(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    Scene* scene = host ? host->BoundScene() : nullptr;
+    lua_pushboolean(L,
+        scene && scene->FindByName(luaL_checkstring(L, 1)) != nullptr);
+    return 1;
+}
+static int LuaSceneEntityCount(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    Scene* scene = host ? host->BoundScene() : nullptr;
+    int count = 0;
+    if (scene) {
+        // Walk the root list + recurse; mirrors what
+        // CollectAllEntities does in EditorApp without pulling
+        // that helper into the host.
+        std::vector<EntityId> stack(scene->Roots().begin(),
+                                    scene->Roots().end());
+        while (!stack.empty()) {
+            EntityId id = stack.back(); stack.pop_back();
+            Entity* e = scene->Get(id);
+            if (!e) continue;
+            ++count;
+            for (EntityId childId : e->children) stack.push_back(childId);
+        }
+    }
+    lua_pushinteger(L, count);
+    return 1;
+}
+static int LuaSceneAllEntities(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    Scene* scene = host ? host->BoundScene() : nullptr;
+    lua_newtable(L);
+    if (!scene) return 1;
+    int idx = 1;
+    std::vector<EntityId> stack(scene->Roots().begin(),
+                                scene->Roots().end());
+    while (!stack.empty()) {
+        EntityId id = stack.back(); stack.pop_back();
+        Entity* e = scene->Get(id);
+        if (!e) continue;
+        lua_pushstring(L, e->name.c_str());
+        lua_rawseti(L, -2, idx++);
+        for (EntityId childId : e->children) stack.push_back(childId);
+    }
     return 1;
 }
 
@@ -665,6 +764,18 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kTimeApi, 1);
     lua_setglobal(L, "time");
+    static const luaL_Reg kSceneApi[] = {
+        {"create_entity",  LuaSceneCreateEntity},
+        {"destroy_entity", LuaSceneDestroyEntity},
+        {"find",           LuaSceneFind},
+        {"entity_count",   LuaSceneEntityCount},
+        {"all_entities",   LuaSceneAllEntities},
+        {nullptr,          nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kSceneApi, 1);
+    lua_setglobal(L, "scene");
     if (luaL_dostring(L, kDefaultBootstrap) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
         AppendLine(std::string("[lua-error] bootstrap: ") +
