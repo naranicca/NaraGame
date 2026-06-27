@@ -784,6 +784,7 @@ private:
         m_controllerEditorActivate = true;
         m_graphSelectedState       = -1;
         m_graphDragState           = -1;
+        m_graphSelectedTransition  = -1;
         m_graphPendingFrom         = -1;
         m_graphContextNode         = -1;
     }
@@ -840,33 +841,54 @@ private:
                           panelMin.y + s.nodeY + kNodeH * 0.5f};
         };
 
+        // Distance from `p` to the line segment (a, b). Used by the
+        // transition hit-test below; cached here so the rendering
+        // loop can also flag the closest segment when the cursor
+        // hovers over an arrow.
+        auto SegDist = [](ImVec2 p, ImVec2 a, ImVec2 b) {
+            const float dxv = b.x - a.x;
+            const float dyv = b.y - a.y;
+            const float len2 = dxv * dxv + dyv * dyv;
+            if (len2 < 0.01f) {
+                const float ex = p.x - a.x, ey = p.y - a.y;
+                return std::sqrt(ex * ex + ey * ey);
+            }
+            float t = ((p.x - a.x) * dxv + (p.y - a.y) * dyv) / len2;
+            t = std::clamp(t, 0.0f, 1.0f);
+            const float px = a.x + t * dxv;
+            const float py = a.y + t * dyv;
+            const float ex = p.x - px, ey = p.y - py;
+            return std::sqrt(ex * ex + ey * ey);
+        };
+
         // Transitions first so node bodies overlay them.
-        for (const auto& tr : ctrl.transitions) {
+        for (int ti = 0; ti < int(ctrl.transitions.size()); ++ti) {
+            const auto& tr = ctrl.transitions[size_t(ti)];
             if (tr.fromIdx < 0 || tr.fromIdx >= int(ctrl.states.size())) continue;
             if (tr.toIdx   < 0 || tr.toIdx   >= int(ctrl.states.size())) continue;
             const ImVec2 srcC = NodeCentre(ctrl.states[size_t(tr.fromIdx)]);
             const ImVec2 dstC = NodeCentre(ctrl.states[size_t(tr.toIdx)]);
-            const float dx = dstC.x - srcC.x;
-            const float dy = dstC.y - srcC.y;
-            const float len = std::sqrt(dx * dx + dy * dy);
+            const float dxa = dstC.x - srcC.x;
+            const float dya = dstC.y - srcC.y;
+            const float len = std::sqrt(dxa * dxa + dya * dya);
             if (len < 1.0f) continue;
-            const float ux = dx / len;
-            const float uy = dy / len;
-            // Pull the arrow tip back by half the node size so it
-            // lands on the destination's edge instead of its centre.
+            const float ux = dxa / len;
+            const float uy = dya / len;
             const float pullBack = std::max(kNodeW, kNodeH) * 0.5f;
             const ImVec2 tip{dstC.x - ux * pullBack,
                              dstC.y - uy * pullBack};
-            dl->AddLine(srcC, tip,
-                        IM_COL32(190, 190, 200, 220), 1.5f);
-            const float ah = 10.0f;
-            const float aw = 5.0f;
+            const bool selected = (ti == m_graphSelectedTransition);
+            const ImU32 col = selected
+                ? IM_COL32(255, 220, 60, 255)
+                : IM_COL32(190, 190, 200, 220);
+            dl->AddLine(srcC, tip, col, selected ? 3.0f : 1.5f);
+            const float ah = selected ? 13.0f : 10.0f;
+            const float aw = selected ?  6.0f :  5.0f;
             const ImVec2 head1{tip.x - ux * ah - uy * aw,
                                tip.y - uy * ah + ux * aw};
             const ImVec2 head2{tip.x - ux * ah + uy * aw,
                                tip.y - uy * ah - ux * aw};
-            dl->AddTriangleFilled(tip, head1, head2,
-                                  IM_COL32(190, 190, 200, 220));
+            dl->AddTriangleFilled(tip, head1, head2, col);
         }
 
         auto HitNode = [&]() {
@@ -881,13 +903,33 @@ private:
             return -1;
         };
 
+        // Transition hit-test: closest valid edge within `kPick` px of
+        // the cursor. Skips degenerate edges + the trailing "tip
+        // pullback" segment naturally because we use the same
+        // pullback the renderer does.
+        auto HitTransition = [&]() {
+            constexpr float kPick = 6.0f;
+            int hit = -1;
+            float best = kPick;
+            for (int ti = 0; ti < int(ctrl.transitions.size()); ++ti) {
+                const auto& tr = ctrl.transitions[size_t(ti)];
+                if (tr.fromIdx < 0 || tr.fromIdx >= int(ctrl.states.size())) continue;
+                if (tr.toIdx   < 0 || tr.toIdx   >= int(ctrl.states.size())) continue;
+                const ImVec2 a = NodeCentre(ctrl.states[size_t(tr.fromIdx)]);
+                const ImVec2 b = NodeCentre(ctrl.states[size_t(tr.toIdx)]);
+                const float d = SegDist(mp, a, b);
+                if (d < best) { best = d; hit = ti; }
+            }
+            return hit;
+        };
+
         // Mouse-down node hit-test runs before the per-state body so
         // the drag state is set in time for the move logic below.
+        // Transition selection takes priority over a deselect-state
+        // click but yields to actual node hits.
         if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const int hit = HitNode();
             if (m_graphPendingFrom >= 0) {
-                // Pending transition: hit on a real (different) state
-                // commits the edge; any other click cancels.
                 if (hit >= 0 && hit != m_graphPendingFrom &&
                     m_graphPendingFrom < int(ctrl.states.size())) {
                     SceneEditor::AnimatorTransition tr;
@@ -898,9 +940,19 @@ private:
                     dirty = true;
                 }
                 m_graphPendingFrom = -1;
+            } else if (hit >= 0) {
+                m_graphSelectedState      = hit;
+                m_graphDragState          = hit;
+                m_graphSelectedTransition = -1;
             } else {
-                m_graphSelectedState = hit;
-                m_graphDragState     = hit;
+                const int trHit = HitTransition();
+                if (trHit >= 0) {
+                    m_graphSelectedTransition = trHit;
+                    m_graphSelectedState      = -1;
+                } else {
+                    m_graphSelectedState      = -1;
+                    m_graphSelectedTransition = -1;
+                }
             }
         }
         // Right-click opens a node context menu.
@@ -1018,9 +1070,133 @@ private:
         // Legend.
         const char* legend = (m_graphPendingFrom >= 0)
             ? "Click a state to add a transition from the highlighted node. Esc cancels."
-            : "Drag to reposition. Right-click a node for transitions / delete.";
+            : "Drag to reposition. Click an arrow to inspect, right-click a node for menus.";
         dl->AddText(ImVec2{panelMin.x + 8.0f, panelMax.y - 18.0f},
                     IM_COL32(140, 140, 150, 255), legend);
+
+        // Inline inspector for the selected transition. Sits in the
+        // parent layout right below the graph child region so it's
+        // always visible alongside the highlighted arrow.
+        if (m_graphSelectedTransition >= 0 &&
+            m_graphSelectedTransition < int(ctrl.transitions.size())) {
+            auto& tr = ctrl.transitions[size_t(m_graphSelectedTransition)];
+            ImGui::PushID(50000 + m_graphSelectedTransition);
+            ImGui::Text("Selected transition #%d:",
+                        m_graphSelectedTransition);
+            ImGui::SameLine();
+
+            // From combo.
+            const char* fromLabel = (tr.fromIdx < 0)
+                ? "Any"
+                : (tr.fromIdx < int(ctrl.states.size())
+                    ? ctrl.states[size_t(tr.fromIdx)].name.c_str()
+                    : "(invalid)");
+            ImGui::SetNextItemWidth(110.0f);
+            if (ImGui::BeginCombo("##from", fromLabel)) {
+                if (ImGui::Selectable("Any", tr.fromIdx < 0)) {
+                    tr.fromIdx = -1;
+                    dirty = true;
+                }
+                for (int s = 0; s < int(ctrl.states.size()); ++s) {
+                    const bool sel = (tr.fromIdx == s);
+                    if (ImGui::Selectable(ctrl.states[size_t(s)].name.c_str(),
+                                          sel)) {
+                        tr.fromIdx = s;
+                        dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted("->");
+            ImGui::SameLine();
+            const char* toLabel =
+                (tr.toIdx >= 0 && tr.toIdx < int(ctrl.states.size()))
+                ? ctrl.states[size_t(tr.toIdx)].name.c_str()
+                : "(invalid)";
+            ImGui::SetNextItemWidth(110.0f);
+            if (ImGui::BeginCombo("##to", toLabel)) {
+                for (int s = 0; s < int(ctrl.states.size()); ++s) {
+                    const bool sel = (tr.toIdx == s);
+                    if (ImGui::Selectable(ctrl.states[size_t(s)].name.c_str(),
+                                          sel)) {
+                        tr.toIdx = s;
+                        dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted("when");
+            ImGui::SameLine();
+            const char* paramLabel = tr.param.empty() ? "(none)"
+                                                     : tr.param.c_str();
+            ImGui::SetNextItemWidth(120.0f);
+            if (ImGui::BeginCombo("##param", paramLabel)) {
+                if (ImGui::Selectable("(none)", tr.param.empty())) {
+                    tr.param.clear();
+                    dirty = true;
+                }
+                for (const auto& p : ctrl.parameters) {
+                    const bool sel = (p.name == tr.param);
+                    if (ImGui::Selectable(p.name.c_str(), sel)) {
+                        tr.param = p.name;
+                        dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            // Op / value: same per-type rules the Transitions list
+            // uses. Look up the parameter declaration so the right
+            // ladder + widget shows up.
+            const SceneEditor::AnimatorParameter* decl = nullptr;
+            for (const auto& pr : ctrl.parameters) {
+                if (pr.name == tr.param) { decl = &pr; break; }
+            }
+            using PT = SceneEditor::AnimatorParameter::Type;
+            using OP = SceneEditor::AnimatorTransition::Op;
+            const char* opNamesAll[] = { "==", "!=", "<", "<=", ">", ">=" };
+            const bool numericParam =
+                decl && (decl->type == PT::Float ||
+                         decl->type == PT::Int);
+            const int opCount = numericParam ? 6 : 2;
+            int opIdx = int(tr.op);
+            if (opIdx < 0 || opIdx >= opCount) opIdx = 0;
+            ImGui::SetNextItemWidth(60.0f);
+            if (ImGui::Combo("##gop", &opIdx, opNamesAll, opCount)) {
+                tr.op = static_cast<OP>(opIdx);
+                dirty = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110.0f);
+            if (decl && decl->type == PT::Float) {
+                if (ImGui::DragFloat("##gval", &tr.valueFloat, 0.05f))
+                    dirty = true;
+            } else if (decl && decl->type == PT::Int) {
+                if (ImGui::DragInt("##gval", &tr.valueInt)) dirty = true;
+            } else if (decl && decl->type == PT::Trigger) {
+                if (tr.valueBool != true) { tr.valueBool = true; dirty = true; }
+                bool draft = true;
+                ImGui::BeginDisabled();
+                ImGui::Checkbox("##gval", &draft);
+                ImGui::EndDisabled();
+            } else {
+                bool draft = tr.valueBool;
+                if (ImGui::Checkbox("##gval", &draft)) {
+                    tr.valueBool = draft;
+                    dirty = true;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Delete")) {
+                ctrl.transitions.erase(ctrl.transitions.begin() +
+                                       m_graphSelectedTransition);
+                m_graphSelectedTransition = -1;
+                dirty = true;
+            }
+            ImGui::PopID();
+        }
         return dirty;
     }
 
@@ -5325,8 +5501,9 @@ private:
     bool                m_controllerEditorActivate = false;
     SceneEditor::AssetGuid m_controllerEditorAsset;
     // Graph view selection + drag state. -1 = no selection / no drag.
-    int                 m_graphSelectedState = -1;
-    int                 m_graphDragState     = -1;
+    int                 m_graphSelectedState      = -1;
+    int                 m_graphDragState          = -1;
+    int                 m_graphSelectedTransition = -1;
     // Interactive transition authoring. m_graphPendingFrom holds the
     // source state index while we wait for the user to click a
     // target; m_graphContextNode caches whichever node fired the
