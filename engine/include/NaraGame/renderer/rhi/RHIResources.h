@@ -40,6 +40,11 @@ struct TextureDesc {
     // device can draw into it via SetRenderTarget(). pixels is ignored on
     // RT textures; they start at undefined contents until first drawn into.
     bool renderTarget = false;
+    // When true the texture has 6 array layers laid out as cube faces
+    // (+X, -X, +Y, -Y, +Z, -Z in that order) and the SRV is a TextureCube.
+    // `pixels` is treated as 6 sequential face buffers, each
+    // (width * height * bytesPerPixel) long. width must equal height.
+    bool isCube = false;
 };
 
 class RHITexture {

@@ -132,10 +132,10 @@ Texture2D    emissiveTex : register(t3);
 // side falls back to a 2x2 (128, 128, 255) texture so the decoded
 // normal is (0, 0, 1) and the perturbation is a no-op.
 Texture2D    normalTex   : register(t4);
-// Equirectangular sky env map used as the diffuse-IBL source. Renderer
-// always binds it (the bake lives inside Renderer3D); sample it with
-// the (perturbed) world normal turned into (u, v) by atan2/acos.
-Texture2D    skyEnvTex          : register(t5);
+// Cubemap sky env map used as the diffuse-IBL source. Sampled directly
+// by the (perturbed) world normal -- no atan2/acos -- since cube sampling
+// is hardware accelerated.
+TextureCube  skyEnvTex          : register(t5);
 // Prefiltered env atlas at t6: six 256x128 strips stacked vertically,
 // each pre-convolved with a GGX lobe at roughness = strip/5. Sampled
 // twice and lerped by frac(roughness * 5) for a smooth roughness
@@ -301,7 +301,7 @@ float4 PSMain(VSOut input) : SV_TARGET {
     // roughness (lerped between two adjacent strips for smoothness), and
     // weight by the BRDF LUT-integrated Fresnel + geometry term:
     //   specular = envSpec * (F * lut.r + lut.g)
-    float3 envDiffuse = skyEnvTex.Sample(sampLinear, DirToEquirect(N)).rgb;
+    float3 envDiffuse = skyEnvTex.Sample(sampLinear, N).rgb;
     float3 F0     = lerp(float3(0.04, 0.04, 0.04), base.rgb, metallic);
     float  NdV    = saturate(dot(N, V));
     float3 Fibl   = F_Schlick(NdV, F0);
@@ -820,36 +820,57 @@ void Renderer3D::Init(RHIDevice& device) {
 void Renderer3D::BakeIblFromSource(const float* srcPixels, int srcW, int srcH) {
     if (!m_device || !srcPixels || srcW <= 0 || srcH <= 0) return;
 
-    // Output sky env tex: 256x128 RGBA16F. We keep the bake output
-    // resolution fixed regardless of source HDR size so the shader's
-    // SamplePrefilteredStrip math (strip = level/6) stays unchanged.
-    constexpr int kSkyW = 256;
-    constexpr int kSkyH = 128;
-    std::vector<uint16_t> skyHalf(size_t(kSkyW) * size_t(kSkyH) * 4);
-    for (int y = 0; y < kSkyH; ++y) {
-        const float v = float(y) / float(kSkyH - 1);
-        const float elev = v * kIblPi;
-        const float sinE = std::sin(elev);
-        const float cosE = std::cos(elev);
-        for (int x = 0; x < kSkyW; ++x) {
-            const float u = float(x) / float(kSkyW);
-            const float az = (u - 0.5f) * 2.0f * kIblPi;
-            const Vec3 dir = {sinE * std::sin(az), cosE, sinE * std::cos(az)};
-            const Vec3 col = SampleSkyBilinearFloat(srcPixels, srcW, srcH, dir);
-            const size_t i = (size_t(y) * kSkyW + size_t(x)) * 4;
-            skyHalf[i + 0] = FloatToHalf(col.x);
-            skyHalf[i + 1] = FloatToHalf(col.y);
-            skyHalf[i + 2] = FloatToHalf(col.z);
-            skyHalf[i + 3] = FloatToHalf(1.0f);
+    // Sky env tex: 128x128 RGBA16F cubemap (6 faces, +X -X +Y -Y +Z -Z).
+    // Bake the equirect source into each cube face by mapping every
+    // (face, x, y) -> world direction (D3D's left-handed cube convention)
+    // and bilinear-sampling the source. Cube sampling is hardware-
+    // accelerated, so the shader drops the atan2/acos that the equirect
+    // path needs.
+    constexpr int kCubeFace = 128;
+    const size_t faceFloats = size_t(kCubeFace) * size_t(kCubeFace) * 4;
+    std::vector<uint16_t> cubeHalf(faceFloats * 6);
+    for (int face = 0; face < 6; ++face) {
+        for (int y = 0; y < kCubeFace; ++y) {
+            const float t = (2.0f * (float(y) + 0.5f) / float(kCubeFace)) - 1.0f;
+            for (int x = 0; x < kCubeFace; ++x) {
+                const float s = (2.0f * (float(x) + 0.5f) / float(kCubeFace)) - 1.0f;
+                Vec3 d;
+                switch (face) {
+                    case 0: d = { 1.0f,  -t, -s }; break;  // +X
+                    case 1: d = {-1.0f,  -t,  s }; break;  // -X
+                    case 2: d = {   s, 1.0f,   t }; break;  // +Y
+                    case 3: d = {   s,-1.0f,  -t }; break;  // -Y
+                    case 4: d = {   s,   -t, 1.0f}; break;  // +Z
+                    default:d = {  -s,   -t,-1.0f}; break;  // -Z
+                }
+                const float dl = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+                d.x /= dl; d.y /= dl; d.z /= dl;
+                const Vec3 col = SampleSkyBilinearFloat(srcPixels, srcW,
+                                                        srcH, d);
+                const size_t i = size_t(face) * faceFloats
+                               + (size_t(y) * kCubeFace + size_t(x)) * 4;
+                cubeHalf[i + 0] = FloatToHalf(col.x);
+                cubeHalf[i + 1] = FloatToHalf(col.y);
+                cubeHalf[i + 2] = FloatToHalf(col.z);
+                cubeHalf[i + 3] = FloatToHalf(1.0f);
+            }
         }
     }
     TextureDesc sky;
-    sky.width  = kSkyW;
-    sky.height = kSkyH;
+    sky.width  = kCubeFace;
+    sky.height = kCubeFace;
     sky.format = TextureFormat::RGBA16F;
     sky.filter = TextureFilter::Linear;
-    sky.pixels = skyHalf.data();
+    sky.isCube = true;
+    sky.pixels = cubeHalf.data();
     m_skyEnvTex = m_device->CreateTexture(sky);
+
+    // Prefiltered atlas stays as a 2D equirect texture for now: the
+    // existing strip-by-roughness UV math doesn't translate to a cube
+    // without a TextureCubeArray binding, and the bake output below
+    // already matches that shader path. Promoting it is a follow-up.
+    constexpr int kSkyW = 256;
+    constexpr int kSkyH = 128;
 
     // Prefiltered atlas: six 256x128 strips, GGX-convolved at the
     // corresponding roughness level. 32 importance samples / pixel.

@@ -72,12 +72,14 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
 
     const bool isDepth = (desc.format == TextureFormat::Depth24);
     const bool isHDR   = (desc.format == TextureFormat::RGBA16F);
+    const bool isCube  = desc.isCube;
 
     D3D11_TEXTURE2D_DESC td{};
     td.Width = desc.width;
     td.Height = desc.height;
     td.MipLevels = 1;
-    td.ArraySize = 1;
+    td.ArraySize = isCube ? 6u : 1u;
+    td.MiscFlags = isCube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0u;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     // Depth textures hold the raw typeless format on the resource so we
@@ -96,16 +98,33 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
         if (desc.renderTarget) td.BindFlags |= D3D11_BIND_RENDER_TARGET;
     }
 
+    // Cubemap upload: 6 contiguous face buffers in desc.pixels, laid out
+    // +X, -X, +Y, -Y, +Z, -Z. Each face is desc.width * desc.height
+    // pixels at (isHDR ? 8 : 4) bytes per pixel.
+    const uint32_t bytesPerPixel = isHDR ? 8u : 4u;
+    const uint32_t pitch         = desc.width * bytesPerPixel;
+    const uint32_t faceBytes     = pitch * desc.height;
+
     D3D11_SUBRESOURCE_DATA init{};
-    init.pSysMem = desc.pixels;
-    // RGBA8 = 4 bytes/pixel, RGBA16F = 8 bytes/pixel (4 half-floats).
-    init.SysMemPitch = desc.width * (isHDR ? 8u : 4u);
+    init.pSysMem     = desc.pixels;
+    init.SysMemPitch = pitch;
+
+    D3D11_SUBRESOURCE_DATA cubeInit[6]{};
+    if (isCube) {
+        for (uint32_t f = 0; f < 6; ++f) {
+            cubeInit[f].pSysMem =
+                static_cast<const uint8_t*>(desc.pixels) + size_t(f) * faceBytes;
+            cubeInit[f].SysMemPitch = pitch;
+        }
+    }
 
     // Render targets and depth textures start undefined and get filled by
     // GPU writes; CPU pixels are accepted for RGBA8 and RGBA16F sources
     // (the latter expects pre-converted half-float data).
-    const D3D11_SUBRESOURCE_DATA* initPtr =
-        (desc.pixels && !desc.renderTarget && !isDepth) ? &init : nullptr;
+    const D3D11_SUBRESOURCE_DATA* initPtr = nullptr;
+    if (desc.pixels && !desc.renderTarget && !isDepth) {
+        initPtr = isCube ? cubeInit : &init;
+    }
 
     HRESULT hr =
         device->CreateTexture2D(&td, initPtr, m_texture.GetAddressOf());
@@ -137,9 +156,25 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
         return;
     }
 
-    hr = device->CreateShaderResourceView(m_texture.Get(), nullptr, m_srv.GetAddressOf());
-    if (FAILED(hr))
-        NARAGAME_ERROR("CreateShaderResourceView failed (0x%08lX)", static_cast<unsigned long>(hr));
+    if (isCube) {
+        // Cubemap SRV so the shader can declare `TextureCube` and sample
+        // by 3D direction. Mip levels = 1 to match the texture, matching
+        // the single-level upload above.
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = td.Format;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+        sd.TextureCube.MipLevels = 1;
+        sd.TextureCube.MostDetailedMip = 0;
+        hr = device->CreateShaderResourceView(m_texture.Get(), &sd,
+                                              m_srv.GetAddressOf());
+        if (FAILED(hr))
+            NARAGAME_ERROR("CreateShaderResourceView(cube) failed (0x%08lX)",
+                           static_cast<unsigned long>(hr));
+    } else {
+        hr = device->CreateShaderResourceView(m_texture.Get(), nullptr, m_srv.GetAddressOf());
+        if (FAILED(hr))
+            NARAGAME_ERROR("CreateShaderResourceView failed (0x%08lX)", static_cast<unsigned long>(hr));
+    }
 
     if (desc.renderTarget) {
         hr = device->CreateRenderTargetView(m_texture.Get(), nullptr, m_rtv.GetAddressOf());
