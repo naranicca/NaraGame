@@ -24,6 +24,12 @@ public:
     Entity*       Get(EntityId id);
     const Entity* Get(EntityId id) const;
 
+    // Linear scan over every entity, returning the first one whose
+    // `name` matches `name`. Used by the Lua bridge so scripts can
+    // address entities by their authoring name. Returns nullptr
+    // when no match exists.
+    Entity*       FindByName(const std::string& name);
+
     // Top-level entities (parent == 0). Stable insertion order.
     const std::vector<EntityId>& Roots() const { return m_roots; }
 

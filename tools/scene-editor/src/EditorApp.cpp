@@ -199,6 +199,12 @@ public:
         // by the engine for XAudio2 / D3D11 init paths.
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
+        // Bind the live scene so the Lua `animator` API can resolve
+        // entities by name. The pointer stays valid for the
+        // app's lifetime -- scene swaps reuse the same Scene
+        // instance + just rebuild its contents.
+        m_scriptHost.BindScene(&m_scene);
+
         HWND hwnd = static_cast<HWND>(GetWindow().NativeHandle());
         auto* dev = static_cast<ID3D11Device*>(GetDevice().GetNativeDevice());
         auto* ctx = static_cast<ID3D11DeviceContext*>(GetDevice().GetNativeContext());

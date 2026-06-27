@@ -47,6 +47,15 @@ const Entity* Scene::Get(EntityId id) const {
     return (it == m_entities.end()) ? nullptr : it->second.get();
 }
 
+Entity* Scene::FindByName(const std::string& name) {
+    for (auto& kv : m_entities) {
+        if (kv.second && kv.second->name == name) {
+            return kv.second.get();
+        }
+    }
+    return nullptr;
+}
+
 void Scene::DestroyEntity(EntityId id) {
     Entity* e = Get(id);
     if (!e) return;

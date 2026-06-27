@@ -7,6 +7,8 @@
 
 namespace SceneEditor {
 
+class Scene;
+
 // Editor-side scripting host. M6c2 wires up a real Lua 5.4
 // interpreter when third_party/lua is vendored; when the sources
 // aren't in place yet the host falls back to the M6c1 stub that
@@ -67,12 +69,21 @@ public:
     // bounded.
     void AppendLine(const std::string& line);
 
+    // Lets the host's Lua API resolve entity references. EditorApp
+    // binds its `m_scene` once at startup; subsequent scene swaps
+    // mutate the contents in place, so the pointer stays valid.
+    void   BindScene(Scene* scene) { m_scene = scene; }
+    Scene* BoundScene() const      { return m_scene; }
+
 private:
     std::vector<std::string> m_outputLog;
     // Opaque lua_State* when NARAGAME_SCENE_EDITOR_HAS_LUA is
     // defined; nullptr otherwise. The header avoids including
     // <lua.h> so callers don't pay for it.
     void* m_lua = nullptr;
+    // Set by EditorApp at startup so the Lua `animator` API can
+    // look up entities by name.
+    Scene* m_scene = nullptr;
 };
 
 } // namespace SceneEditor
