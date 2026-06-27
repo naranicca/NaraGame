@@ -1,6 +1,7 @@
 #include "ScriptHost.h"
 
 #include "../scene/AnimatorComponent.h"
+#include "../scene/Component.h"
 #include "../scene/Entity.h"
 #include "../scene/Scene.h"
 #include "../scene/ScriptComponent.h"
@@ -272,6 +273,68 @@ static int LuaSceneEntityCount(lua_State* L) {
     lua_pushinteger(L, count);
     return 1;
 }
+// scene.add_component / has_component / remove_component. Each
+// callback resolves the entity by name through BoundScene and
+// returns `false` (silent no-op) when the lookup fails so scripts
+// can probe for the right entity without raising errors.
+static int LuaSceneAddComponent(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    const char* entityName = luaL_checkstring(L, 1);
+    const char* typeName   = luaL_checkstring(L, 2);
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) { lua_pushboolean(L, 0); return 1; }
+    auto& reg = ComponentRegistry::Get();
+    auto comp = reg.Create(typeName);
+    if (!comp) { lua_pushboolean(L, 0); return 1; }
+    e->components.push_back(std::move(comp));
+    lua_pushboolean(L, 1);
+    return 1;
+}
+static int LuaSceneHasComponent(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    const char* entityName = luaL_checkstring(L, 1);
+    const char* typeName   = luaL_checkstring(L, 2);
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) { lua_pushboolean(L, 0); return 1; }
+    for (const auto& c : e->components) {
+        if (c && std::strcmp(c->TypeName(), typeName) == 0) {
+            lua_pushboolean(L, 1);
+            return 1;
+        }
+    }
+    lua_pushboolean(L, 0);
+    return 1;
+}
+static int LuaSceneRemoveComponent(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    const char* entityName = luaL_checkstring(L, 1);
+    const char* typeName   = luaL_checkstring(L, 2);
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) { lua_pushboolean(L, 0); return 1; }
+    // Erase the first matching component. Multiple components of
+    // the same type are unusual but allowed in the data model;
+    // a subsequent remove call clears the next slot.
+    for (size_t i = 0; i < e->components.size(); ++i) {
+        const auto& c = e->components[i];
+        if (c && std::strcmp(c->TypeName(), typeName) == 0) {
+            e->components.erase(e->components.begin() + i);
+            lua_pushboolean(L, 1);
+            return 1;
+        }
+    }
+    lua_pushboolean(L, 0);
+    return 1;
+}
+
 static int LuaSceneAllEntities(lua_State* L) {
     ScriptHost* host = HostFromUpvalue(L);
     Scene* scene = host ? host->BoundScene() : nullptr;
@@ -813,12 +876,15 @@ ScriptHost::ScriptHost() {
     luaL_setfuncs(L, kTimeApi, 1);
     lua_setglobal(L, "time");
     static const luaL_Reg kSceneApi[] = {
-        {"create_entity",  LuaSceneCreateEntity},
-        {"destroy_entity", LuaSceneDestroyEntity},
-        {"find",           LuaSceneFind},
-        {"entity_count",   LuaSceneEntityCount},
-        {"all_entities",   LuaSceneAllEntities},
-        {nullptr,          nullptr},
+        {"create_entity",     LuaSceneCreateEntity},
+        {"destroy_entity",    LuaSceneDestroyEntity},
+        {"find",              LuaSceneFind},
+        {"entity_count",      LuaSceneEntityCount},
+        {"all_entities",      LuaSceneAllEntities},
+        {"add_component",     LuaSceneAddComponent},
+        {"has_component",     LuaSceneHasComponent},
+        {"remove_component",  LuaSceneRemoveComponent},
+        {nullptr,             nullptr},
     };
     lua_newtable(L);
     lua_pushlightuserdata(L, this);
