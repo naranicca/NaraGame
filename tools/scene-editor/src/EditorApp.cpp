@@ -1293,9 +1293,15 @@ private:
             m_scene.MarkDirty();
             UpdateWindowTitle();
         }
-        if (ImGui::Checkbox("Enabled", &e->enabled)) {
-            m_scene.MarkDirty();
-            UpdateWindowTitle();
+        if (ImGui::IsItemActivated()) UndoSnapshot();
+        {
+            bool draft = e->enabled;
+            if (ImGui::Checkbox("Enabled", &draft)) {
+                UndoSnapshot();
+                e->enabled = draft;
+                m_scene.MarkDirty();
+                UpdateWindowTitle();
+            }
         }
         ImGui::TextDisabled("id %llu", e->id);
         ImGui::Separator();
@@ -1320,6 +1326,7 @@ private:
                 if (ImGui::MenuItem(type.c_str())) {
                     if (auto comp = SceneEditor::ComponentRegistry::Get()
                                         .Create(type)) {
+                        UndoSnapshot();
                         e->components.push_back(std::move(comp));
                         m_scene.MarkDirty();
                         UpdateWindowTitle();
@@ -1365,6 +1372,7 @@ private:
         }
         if (ImGui::BeginCombo("Tileset", current.c_str())) {
             if (ImGui::Selectable("(none)", !tm.tileset.IsValid())) {
+                UndoSnapshot();
                 tm.tileset = SceneEditor::AssetGuid{};
                 changed = true;
             }
@@ -1372,13 +1380,13 @@ private:
                 if (a.typeName != "Texture") continue;
                 const bool sel = (a.guid == tm.tileset);
                 if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    UndoSnapshot();
                     tm.tileset = a.guid;
                     changed = true;
                 }
             }
             ImGui::EndCombo();
         }
-        // Drop a texture from the Project panel directly onto the combo.
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* p =
                     ImGui::AcceptDragDropPayload("ASSET_GUID")) {
@@ -1387,6 +1395,7 @@ private:
                     std::memcpy(&guid, p->Data, sizeof(guid));
                     if (const auto* e = m_assetDb.FindByGuid(guid)) {
                         if (e->typeName == "Texture") {
+                            UndoSnapshot();
                             tm.tileset = guid;
                             changed = true;
                         }
@@ -1401,6 +1410,7 @@ private:
             tm.cellPixelH = std::max(1, sz[1]);
             changed = true;
         }
+        if (ImGui::IsItemActivated()) UndoSnapshot();
         ImGui::TextDisabled("Painted cells: %zu", tm.cells.size());
         if (changed) {
             m_scene.MarkDirty();
@@ -1510,18 +1520,25 @@ private:
         float pos[3]   = { t.position.x, t.position.y, t.position.z };
         float scale[3] = { t.scale.x,    t.scale.y,    t.scale.z };
         bool changed = false;
+        // IsItemActivated fires on the frame a Drag widget gains focus,
+        // BEFORE the first delta is applied -- the right place to
+        // snapshot for undo. The same pattern is repeated for every
+        // drag widget in the inspector.
         if (ImGui::DragFloat3("Position", pos, 0.05f)) {
             t.position = { pos[0], pos[1], pos[2] };
             changed = true;
         }
+        if (ImGui::IsItemActivated()) UndoSnapshot();
         if (ImGui::DragFloat("Rotation Z", &t.rotation, 0.5f,
                              -3600.0f, 3600.0f, "%.2f deg")) {
             changed = true;
         }
+        if (ImGui::IsItemActivated()) UndoSnapshot();
         if (ImGui::DragFloat3("Scale", scale, 0.01f, -1000.0f, 1000.0f)) {
             t.scale = { scale[0], scale[1], scale[2] };
             changed = true;
         }
+        if (ImGui::IsItemActivated()) UndoSnapshot();
         if (changed) {
             m_scene.MarkDirty();
             UpdateWindowTitle();
@@ -1544,6 +1561,7 @@ private:
         }
         if (ImGui::BeginCombo("Sprite", current.c_str())) {
             if (ImGui::Selectable("(none)", !s.sprite.IsValid())) {
+                UndoSnapshot();
                 s.sprite = SceneEditor::AssetGuid{};
                 changed = true;
             }
@@ -1551,6 +1569,7 @@ private:
                 if (a.typeName != "Texture") continue;
                 const bool sel = (a.guid == s.sprite);
                 if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    UndoSnapshot();
                     s.sprite = a.guid;
                     changed = true;
                 }
@@ -1567,6 +1586,7 @@ private:
                     std::memcpy(&guid, p->Data, sizeof(guid));
                     if (const auto* e = m_assetDb.FindByGuid(guid)) {
                         if (e->typeName == "Texture") {
+                            UndoSnapshot();
                             s.sprite = guid;
                             changed = true;
                         }
@@ -1602,12 +1622,14 @@ private:
                         }
                         if (ImGui::Selectable("(whole texture)",
                                               s.subSprite.empty())) {
+                            UndoSnapshot();
                             s.subSprite.clear();
                             changed = true;
                         }
                         for (const auto& sub : subs) {
                             const bool sel = (sub.name == s.subSprite);
                             if (ImGui::Selectable(sub.name.c_str(), sel)) {
+                                UndoSnapshot();
                                 s.subSprite = sub.name;
                                 changed = true;
                             }
@@ -1622,11 +1644,29 @@ private:
             s.color = { col[0], col[1], col[2], col[3] };
             changed = true;
         }
-        changed |= ImGui::Checkbox("Flip X", &s.flipX);
-        changed |= ImGui::Checkbox("Flip Y", &s.flipY);
+        if (ImGui::IsItemActivated()) UndoSnapshot();
+        // Checkbox edits its target on the same frame it returns true,
+        // so route through a local draft and snapshot before commit.
+        {
+            bool draft = s.flipX;
+            if (ImGui::Checkbox("Flip X", &draft)) {
+                UndoSnapshot();
+                s.flipX = draft;
+                changed = true;
+            }
+        }
+        {
+            bool draft = s.flipY;
+            if (ImGui::Checkbox("Flip Y", &draft)) {
+                UndoSnapshot();
+                s.flipY = draft;
+                changed = true;
+            }
+        }
         const char* modes[] = { "Simple", "Sliced", "Tiled" };
         int idx = int(s.drawMode);
         if (ImGui::Combo("Draw Mode", &idx, modes, 3)) {
+            UndoSnapshot();
             s.drawMode = static_cast<SceneEditor::SpriteDrawMode>(idx);
             changed = true;
         }
@@ -1636,6 +1676,7 @@ private:
                 s.size = { sz[0], sz[1] };
                 changed = true;
             }
+            if (ImGui::IsItemActivated()) UndoSnapshot();
         }
         // Sorting layer dropdown -- if the entity is on a layer that no
         // longer exists in the project (renamed / deleted via the
@@ -1656,6 +1697,7 @@ private:
             for (const std::string& l : layers) {
                 const bool sel = (l == s.sortingLayer);
                 if (ImGui::Selectable(l.c_str(), sel)) {
+                    UndoSnapshot();
                     s.sortingLayer = l;
                     changed = true;
                 }
@@ -1666,7 +1708,9 @@ private:
                            -1000, 1000)) {
             changed = true;
         }
+        if (ImGui::IsItemActivated()) UndoSnapshot();
         if (ImGui::SmallButton("Remove##sprite")) {
+            UndoSnapshot();
             // Lazy remove: find and erase by raw pointer comparison.
             for (auto it = entity.components.begin();
                  it != entity.components.end(); ++it) {
