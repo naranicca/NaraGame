@@ -48,6 +48,7 @@ add_executable(scene-editor
     src/scene/AnimatorComponent.cpp
     src/scene/Component.cpp
     src/scene/Scene.cpp
+    src/scene/ScriptComponent.cpp
     src/scene/SpriteRendererComponent.cpp
     src/scene/TilemapComponent.cpp
     src/scene/TransformComponent.cpp

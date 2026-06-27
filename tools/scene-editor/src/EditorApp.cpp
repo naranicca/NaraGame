@@ -17,6 +17,7 @@
 #include "scene/Component.h"
 #include "scene/Entity.h"
 #include "scene/Scene.h"
+#include "scene/ScriptComponent.h"
 #include "scene/SpriteRendererComponent.h"
 #include "scene/TilemapComponent.h"
 #include "scene/TransformComponent.h"
@@ -4503,9 +4504,74 @@ private:
             DrawTilemapEditor(entity, *tm);
         } else if (auto* an = dynamic_cast<SceneEditor::AnimatorComponent*>(comp)) {
             DrawAnimatorEditor(entity, *an);
+        } else if (auto* sc = dynamic_cast<SceneEditor::ScriptComponent*>(comp)) {
+            DrawScriptEditor(entity, *sc);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
         }
+    }
+
+    // ScriptComponent inspector. Combo over every Script asset in
+    // the project + an InputText for a per-entity entry function
+    // override. Dropping a `.lua` asset on the combo assigns it
+    // without opening the dropdown, mirroring the M5c35 pattern
+    // the Controller Editor's animation combo uses.
+    void DrawScriptEditor(SceneEditor::Entity& entity,
+                          SceneEditor::ScriptComponent& sc) {
+        bool changed = false;
+        std::string current = "(none)";
+        if (sc.script.IsValid()) {
+            if (const auto* e = m_assetDb.FindByGuid(sc.script)) {
+                current = e->relPath;
+            } else {
+                current = sc.script.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Script", current.c_str())) {
+            if (ImGui::Selectable("(none)", !sc.script.IsValid())) {
+                UndoSnapshot();
+                sc.script = SceneEditor::AssetGuid{};
+                changed = true;
+            }
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "Script") continue;
+                const bool sel = (a.guid == sc.script);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    UndoSnapshot();
+                    sc.script = a.guid;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p =
+                    ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                if (p->DataSize == sizeof(SceneEditor::AssetGuid)) {
+                    SceneEditor::AssetGuid guid;
+                    std::memcpy(&guid, p->Data, sizeof(guid));
+                    if (const auto* a = m_assetDb.FindByGuid(guid)) {
+                        if (a->typeName == "Script") {
+                            UndoSnapshot();
+                            sc.script = guid;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+        char fnBuf[128];
+        std::snprintf(fnBuf, sizeof(fnBuf), "%s",
+                      sc.entryFunction.c_str());
+        if (ImGui::InputTextWithHint(
+                "Entry function", "OnAnimationEvent (default)",
+                fnBuf, sizeof(fnBuf))) {
+            UndoSnapshot();
+            sc.entryFunction = fnBuf;
+            changed = true;
+        }
+        if (changed) (void)entity;  // M6c5 will wire dispatch routing
     }
 
     void DrawAnimatorEditor(SceneEditor::Entity& entity,

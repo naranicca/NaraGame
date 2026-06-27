@@ -1,6 +1,7 @@
 #include "Component.h"
 
 #include "AnimatorComponent.h"
+#include "ScriptComponent.h"
 #include "SpriteRendererComponent.h"
 #include "TilemapComponent.h"
 #include "TransformComponent.h"
@@ -44,6 +45,8 @@ void RegisterBuiltinComponents() {
                [] { return std::make_unique<TilemapComponent>(); });
     r.Register(AnimatorComponent::StaticTypeName(),
                [] { return std::make_unique<AnimatorComponent>(); });
+    r.Register(ScriptComponent::StaticTypeName(),
+               [] { return std::make_unique<ScriptComponent>(); });
 }
 
 } // namespace SceneEditor
