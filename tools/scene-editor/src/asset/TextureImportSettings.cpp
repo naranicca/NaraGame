@@ -108,6 +108,19 @@ void TextureImportSettings::FromJson(const Value& obj) {
     filterMode          = ParseFilter(obj.GetString("filterMode"), Filter::Linear);
     wrapMode            = ParseWrap(obj.GetString("wrapMode"), Wrap::Clamp);
     alphaIsTransparency = obj.GetBool("alphaIsTransparency", true);
+    borderLeft = borderRight = borderTop = borderBottom = 0;
+    if (const Value* b = obj.Find("border")) {
+        if (b->IsArray() && b->arrayValue.size() >= 4) {
+            auto pick = [&](size_t i) {
+                const Value& v = b->arrayValue[i];
+                return v.IsNumber() ? int(v.numberValue) : 0;
+            };
+            borderLeft   = pick(0);
+            borderRight  = pick(1);
+            borderTop    = pick(2);
+            borderBottom = pick(3);
+        }
+    }
     spriteMode          = ParseSpriteMode(obj.GetString("spriteMode"),
                                           SpriteMode::Single);
     spriteSheet = SpriteSheet{};
@@ -124,6 +137,12 @@ Value TextureImportSettings::ToJson() const {
     o.Add("filterMode",          Value::MakeString(ToString(filterMode)));
     o.Add("wrapMode",            Value::MakeString(ToString(wrapMode)));
     o.Add("alphaIsTransparency", Value::MakeBool(alphaIsTransparency));
+    Value border = Value::MakeArray();
+    border.Push(Value::MakeNumber(borderLeft));
+    border.Push(Value::MakeNumber(borderRight));
+    border.Push(Value::MakeNumber(borderTop));
+    border.Push(Value::MakeNumber(borderBottom));
+    o.Add("border", std::move(border));
     o.Add("spriteMode",          Value::MakeString(ToString(spriteMode)));
     if (spriteMode == SpriteMode::Multiple || !spriteSheet.sprites.empty()) {
         o.Add("spriteSheet", spriteSheet.ToJson());

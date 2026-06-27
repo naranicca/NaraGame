@@ -558,6 +558,26 @@ private:
                         s.x, s.y, s.w, s.h, sel ? "  *" : "");
             ImGui::PopStyleColor();
             if (ImGui::IsItemClicked()) m_spriteEditorSel = int(i);
+
+            // Pivot + 9-slice border for the selected sub-sprite. We
+            // only show them on the active row so the list stays
+            // scannable when sliced into a lot of cells.
+            if (sel) {
+                float pv[2] = { s.pivot.x, s.pivot.y };
+                if (ImGui::DragFloat2("  pivot", pv, 0.01f, 0.0f, 1.0f)) {
+                    s.pivot = { pv[0], pv[1] };
+                    dirty = true;
+                }
+                int border[4] = { s.borderLeft, s.borderRight,
+                                  s.borderTop,  s.borderBottom };
+                if (ImGui::DragInt4("  border", border, 0.2f, 0, 4096)) {
+                    s.borderLeft   = border[0];
+                    s.borderRight  = border[1];
+                    s.borderTop    = border[2];
+                    s.borderBottom = border[3];
+                    dirty = true;
+                }
+            }
             ImGui::PopID();
         }
         ImGui::EndChild();
@@ -936,15 +956,17 @@ private:
 
     void DrawTextureImportEditor(SceneEditor::AssetEntry& entry) {
         // Decode the entry's existing importSettings, edit through the
-        // struct form, then write back on any change. Auto-save +
-        // texture-evict so the viewport reflects the new settings in
-        // the very next frame.
+        // struct form, then write back on any change. We track the
+        // dirty flag explicitly (instead of memcmp) because the
+        // spriteSheet vector has separate heap allocations per copy
+        // and memcmp would trip every frame on any sliced texture.
         SceneEditor::TextureImportSettings imp;
         imp.FromJson(entry.importSettings);
-        const auto before = imp;
+        const auto prevFilter = imp.filterMode;
+        bool changed = false;
 
-        ImGui::DragFloat("Pixels Per Unit", &imp.pixelsPerUnit, 0.5f,
-                         1.0f, 4096.0f, "%.2f");
+        changed |= ImGui::DragFloat("Pixels Per Unit", &imp.pixelsPerUnit,
+                                    0.5f, 1.0f, 4096.0f, "%.2f");
         const char* pivotNames[] = { "Center", "TopLeft", "TopRight",
                                      "BottomLeft", "BottomRight",
                                      "Custom" };
@@ -952,12 +974,14 @@ private:
         if (ImGui::Combo("Pivot", &pivotIdx, pivotNames, 6)) {
             imp.pivotMode = static_cast<
                 SceneEditor::TextureImportSettings::PivotMode>(pivotIdx);
+            changed = true;
         }
         if (imp.pivotMode ==
             SceneEditor::TextureImportSettings::PivotMode::Custom) {
             float cp[2] = { imp.customPivot.x, imp.customPivot.y };
             if (ImGui::DragFloat2("Custom Pivot", cp, 0.01f, 0.0f, 1.0f)) {
                 imp.customPivot = { cp[0], cp[1] };
+                changed = true;
             }
         }
         const char* filterNames[] = { "Linear", "Point" };
@@ -965,24 +989,41 @@ private:
         if (ImGui::Combo("Filter", &filterIdx, filterNames, 2)) {
             imp.filterMode = static_cast<
                 SceneEditor::TextureImportSettings::Filter>(filterIdx);
+            changed = true;
         }
         const char* wrapNames[] = { "Clamp", "Repeat", "Mirror" };
         int wrapIdx = int(imp.wrapMode);
         if (ImGui::Combo("Wrap", &wrapIdx, wrapNames, 3)) {
             imp.wrapMode = static_cast<
                 SceneEditor::TextureImportSettings::Wrap>(wrapIdx);
+            changed = true;
         }
-        ImGui::Checkbox("Alpha is Transparency", &imp.alphaIsTransparency);
+        if (ImGui::Checkbox("Alpha is Transparency",
+                            &imp.alphaIsTransparency)) {
+            changed = true;
+        }
+        // 9-slice border (pixels). Edits here feed the Sliced draw mode
+        // on SpriteRenderers that point at this texture without a
+        // sub-sprite -- per-sub-sprite borders are edited in the Sprite
+        // Editor instead.
+        int border[4] = { imp.borderLeft, imp.borderRight,
+                          imp.borderTop,  imp.borderBottom };
+        if (ImGui::DragInt4("Border (L,R,T,B)", border, 0.2f, 0, 4096)) {
+            imp.borderLeft   = border[0];
+            imp.borderRight  = border[1];
+            imp.borderTop    = border[2];
+            imp.borderBottom = border[3];
+            changed = true;
+        }
 
-        const bool changed = std::memcmp(&imp, &before, sizeof(imp)) != 0;
         if (changed) {
             entry.importSettings = imp.ToJson();
             m_assetDb.SaveMeta(entry.guid);
             // FilterMode is sampler state baked into the texture object;
             // evict so the next GetTexture picks up the new setting.
-            // PPU + pivot are read live by DrawSpriteEntity each frame,
-            // no eviction needed.
-            if (imp.filterMode != before.filterMode) {
+            // PPU + pivot + border are read live by DrawSpriteEntity
+            // each frame, no eviction needed.
+            if (imp.filterMode != prevFilter) {
                 m_assetDb.EvictTexture(entry.guid);
             }
         }
@@ -1666,6 +1707,52 @@ private:
                     e.name.c_str());
     }
 
+    // Resolved sprite info: source rect (px) inside the texture, 9-slice
+    // border (px), pivot. Sub-sprite reference takes precedence over
+    // whole-texture defaults so multi-sprite sheets with mixed borders
+    // / pivots work the way you'd expect.
+    struct ResolvedSprite {
+        int srcX = 0, srcY = 0, srcW = 0, srcH = 0;
+        int borderL = 0, borderR = 0, borderT = 0, borderB = 0;
+        NaraGame::Vec2 pivot{0.5f, 0.5f};
+    };
+
+    ResolvedSprite Resolve(const SceneEditor::SpriteRendererComponent& spr,
+                           const NaraGame::RHITexture* tex,
+                           const SceneEditor::TextureImportSettings& imp) const {
+        ResolvedSprite r;
+        r.srcW    = int(tex->Width());
+        r.srcH    = int(tex->Height());
+        r.borderL = imp.borderLeft;
+        r.borderR = imp.borderRight;
+        r.borderT = imp.borderTop;
+        r.borderB = imp.borderBottom;
+        r.pivot   = imp.ResolvedPivot();
+        if (!spr.subSprite.empty()) {
+            for (const SceneEditor::SubSprite& s : imp.spriteSheet.sprites) {
+                if (s.name == spr.subSprite) {
+                    r.srcX = s.x; r.srcY = s.y;
+                    r.srcW = s.w; r.srcH = s.h;
+                    r.borderL = s.borderLeft;
+                    r.borderR = s.borderRight;
+                    r.borderT = s.borderTop;
+                    r.borderB = s.borderBottom;
+                    r.pivot   = s.pivot;
+                    break;
+                }
+            }
+        }
+        return r;
+    }
+
+    static ImU32 ColorToImU32(const NaraGame::Color& c) {
+        return IM_COL32(
+            uint8_t(std::clamp(c.r, 0.0f, 1.0f) * 255.0f),
+            uint8_t(std::clamp(c.g, 0.0f, 1.0f) * 255.0f),
+            uint8_t(std::clamp(c.b, 0.0f, 1.0f) * 255.0f),
+            uint8_t(std::clamp(c.a, 0.0f, 1.0f) * 255.0f));
+    }
+
     void DrawSpriteEntity(ImDrawList* dl,
                           const SceneEditor::Entity& e,
                           const SceneEditor::SpriteRendererComponent& spr,
@@ -1679,41 +1766,26 @@ private:
             DrawMarkerEntity(dl, e, c, selected);
             return;
         }
-        // Resolve the asset's import settings (pixels-per-unit + pivot)
-        // so the quad reflects whatever the user picked in the asset
-        // inspector. Defaults are 100 px/u + centred pivot, matching
-        // the previous hard-coded values.
         SceneEditor::TextureImportSettings imp;
         if (const auto* entry = m_assetDb.FindByGuid(spr.sprite)) {
             imp.FromJson(entry->importSettings);
         }
+        const ResolvedSprite rs = Resolve(spr, tex, imp);
 
-        // Resolve the optional sub-sprite reference. An empty subSprite
-        // means "use the whole texture" -- the existing behaviour. A
-        // non-empty name that isn't in the sheet falls through to whole-
-        // texture too, so a stale reference still draws something.
-        float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
-        float regionPxW = float(tex->Width());
-        float regionPxH = float(tex->Height());
-        NaraGame::Vec2 pivot = imp.ResolvedPivot();
-        if (!spr.subSprite.empty()) {
-            for (const SceneEditor::SubSprite& s : imp.spriteSheet.sprites) {
-                if (s.name == spr.subSprite) {
-                    u0 = float(s.x) / float(tex->Width());
-                    v0 = float(s.y) / float(tex->Height());
-                    u1 = float(s.x + s.w) / float(tex->Width());
-                    v1 = float(s.y + s.h) / float(tex->Height());
-                    regionPxW = float(s.w);
-                    regionPxH = float(s.h);
-                    // SubSprite ships its own pivot; use it instead of
-                    // the texture-level setting.
-                    pivot = s.pivot;
-                    break;
-                }
-            }
+        // Sliced takes a separate draw path -- nine sub-quads with their
+        // own UV ranges. Simple keeps the original single AddImage call.
+        if (spr.drawMode == SceneEditor::SpriteDrawMode::Sliced) {
+            DrawSlicedSpriteEntity(dl, e, spr, tex, imp, rs, c, selected);
+            return;
         }
-        const float wWorld = regionPxW / imp.pixelsPerUnit;
-        const float hWorld = regionPxH / imp.pixelsPerUnit;
+
+        float u0 = float(rs.srcX) / float(tex->Width());
+        float v0 = float(rs.srcY) / float(tex->Height());
+        float u1 = float(rs.srcX + rs.srcW) / float(tex->Width());
+        float v1 = float(rs.srcY + rs.srcH) / float(tex->Height());
+        const float wWorld = float(rs.srcW) / imp.pixelsPerUnit;
+        const float hWorld = float(rs.srcH) / imp.pixelsPerUnit;
+        const NaraGame::Vec2 pivot = rs.pivot;
         // World-space rect anchored on the entity's transform. The pivot
         // chooses which texel sits on the transform position: (0.5,0.5)
         // centres it, (0,0) puts the bottom-left of the sprite there,
@@ -1736,11 +1808,7 @@ private:
         if (spr.flipY) std::swap(v0, v1);
         const ImVec2 uv0{u0, v0};
         const ImVec2 uv1{u1, v1};
-        const ImU32 tint = IM_COL32(
-            uint8_t(std::clamp(spr.color.r, 0.0f, 1.0f) * 255.0f),
-            uint8_t(std::clamp(spr.color.g, 0.0f, 1.0f) * 255.0f),
-            uint8_t(std::clamp(spr.color.b, 0.0f, 1.0f) * 255.0f),
-            uint8_t(std::clamp(spr.color.a, 0.0f, 1.0f) * 255.0f));
+        const ImU32 tint = ColorToImU32(spr.color);
         const ImTextureID texId =
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                 tex->GetNativeView()));
@@ -1751,6 +1819,90 @@ private:
             dl->AddRect(a, b, IM_COL32(255, 220, 60, 255), 0.0f, 0, 2.0f);
         }
         const float ts = ImGui::GetFontSize();
+        dl->AddText(ImVec2{a.x, b.y + 2.0f},
+                    IM_COL32(220, 220, 220, 255),
+                    e.name.c_str());
+    }
+
+    void DrawSlicedSpriteEntity(ImDrawList* dl,
+                                const SceneEditor::Entity& e,
+                                const SceneEditor::SpriteRendererComponent& spr,
+                                const NaraGame::RHITexture* tex,
+                                const SceneEditor::TextureImportSettings& imp,
+                                const ResolvedSprite& rs,
+                                const ImVec2& c, bool selected) {
+        // Total destination size = SpriteRenderer.size (world units).
+        // Clamp to the border sum so degenerate (size < border) doesn't
+        // collapse the centre into a flipped quad.
+        const float ppu = imp.pixelsPerUnit;
+        const float bLw = float(rs.borderL) / ppu;
+        const float bRw = float(rs.borderR) / ppu;
+        const float bTw = float(rs.borderT) / ppu;
+        const float bBw = float(rs.borderB) / ppu;
+        const float totW = std::max(spr.size.x, bLw + bRw);
+        const float totH = std::max(spr.size.y, bTw + bBw);
+
+        // World rect anchored on the entity via pivot.
+        const float worldLeft   = -rs.pivot.x        * totW;
+        const float worldRight  = (1.0f - rs.pivot.x) * totW;
+        const float worldBottom = -rs.pivot.y        * totH;
+        const float worldTop    = (1.0f - rs.pivot.y) * totH;
+
+        // 4 X positions (world) and 4 Y positions (world, Y-up).
+        const float xs[4] = { worldLeft,
+                              worldLeft  + bLw,
+                              worldRight - bRw,
+                              worldRight };
+        const float ys[4] = { worldBottom,
+                              worldBottom + bBw,
+                              worldTop    - bTw,
+                              worldTop };
+
+        const float texW = float(tex->Width());
+        const float texH = float(tex->Height());
+        // 4 U / V positions in source pixel space, normalised.
+        const float us[4] = {
+            float(rs.srcX)                       / texW,
+            float(rs.srcX + rs.borderL)          / texW,
+            float(rs.srcX + rs.srcW - rs.borderR)/ texW,
+            float(rs.srcX + rs.srcW)             / texW,
+        };
+        const float vs[4] = {
+            float(rs.srcY)                       / texH,
+            float(rs.srcY + rs.borderT)          / texH,
+            float(rs.srcY + rs.srcH - rs.borderB)/ texH,
+            float(rs.srcY + rs.srcH)             / texH,
+        };
+
+        const ImU32 tint = ColorToImU32(spr.color);
+        const ImTextureID texId =
+            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                tex->GetNativeView()));
+
+        // Walk the 9 tiles. Column i (0=L, 1=C, 2=R) maps to source
+        // column i. World row j (0=bottom, 1=mid, 2=top) maps to source
+        // row (2-j) because the texture's Y=0 is the top edge.
+        const float zoom = m_viewCam.zoom;
+        for (int j = 0; j < 3; ++j) {
+            for (int i = 0; i < 3; ++i) {
+                if (xs[i + 1] <= xs[i] || ys[j + 1] <= ys[j]) continue;
+                const ImVec2 pMin{c.x + xs[i]     * zoom,
+                                  c.y - ys[j + 1] * zoom};   // top-left
+                const ImVec2 pMax{c.x + xs[i + 1] * zoom,
+                                  c.y - ys[j]     * zoom};   // bottom-right
+                const int srcRow = 2 - j;
+                const ImVec2 uvMin{us[i],     vs[srcRow]};
+                const ImVec2 uvMax{us[i + 1], vs[srcRow + 1]};
+                dl->AddImage(texId, pMin, pMax, uvMin, uvMax, tint);
+            }
+        }
+
+        // Selection outline + label.
+        const ImVec2 a{c.x + worldLeft  * zoom, c.y - worldTop    * zoom};
+        const ImVec2 b{c.x + worldRight * zoom, c.y - worldBottom * zoom};
+        if (selected) {
+            dl->AddRect(a, b, IM_COL32(255, 220, 60, 255), 0.0f, 0, 2.0f);
+        }
         dl->AddText(ImVec2{a.x, b.y + 2.0f},
                     IM_COL32(220, 220, 220, 255),
                     e.name.c_str());

@@ -35,6 +35,14 @@ struct TextureImportSettings {
 
     bool alphaIsTransparency = true;
 
+    // 9-slice borders (pixels) used by SpriteRenderer's Sliced /
+    // Tiled draw modes. Applies to the whole-texture path; sub-sprite
+    // references read SubSprite::borderLeft/Right/Top/Bottom instead.
+    int borderLeft   = 0;
+    int borderRight  = 0;
+    int borderTop    = 0;
+    int borderBottom = 0;
+
     // Sprite Editor (M3) populates this. Single keeps the whole texture
     // as one sprite (current behaviour); Multiple slices it into
     // sub-rectangles stored in `spriteSheet.sprites`.
