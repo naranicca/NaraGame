@@ -2290,6 +2290,8 @@ private:
         m_animEditorSelEvent   = -1;
         m_animEditorEventFilter[0] = '\0';
         m_animEditorAutoSort   = false;
+        m_animEditorFrameFilter[0] = '\0';
+        m_animEditorApplyDuration = 0.1f;
     }
 
     // Animation Editor window. Top: texture + loop. Middle: frame
@@ -2371,11 +2373,19 @@ private:
         ImGui::Separator();
         // Frame list.
         ImGui::Text("Frames (%zu)", an->frames.size());
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint(
+            "##framefilter", "Filter frames by sprite...",
+            m_animEditorFrameFilter, sizeof(m_animEditorFrameFilter));
         int  removeAt = -1;
         int  moveUp   = -1;
         int  moveDown = -1;
         for (size_t i = 0; i < an->frames.size(); ++i) {
             SceneEditor::AnimationFrame& fr = an->frames[i];
+            if (!ParamNameMatchesFilter(
+                    fr.sprite, m_animEditorFrameFilter)) {
+                continue;
+            }
             ImGui::PushID(int(i));
             ImGui::Text("%2zu", i);
             ImGui::SameLine();
@@ -2427,6 +2437,31 @@ private:
             nf.sprite = subNames.empty() ? std::string{} : subNames.front();
             nf.duration = 0.1f;
             an->frames.push_back(std::move(nf));
+            dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reverse") && an->frames.size() > 1) {
+            // Flips the entire frame sequence -- handy for
+            // authoring "play backward" variants of an existing
+            // animation. Operates on the full vector regardless
+            // of the current filter so the result matches what
+            // playback would do.
+            std::reverse(an->frames.begin(), an->frames.end());
+            dirty = true;
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80.0f);
+        ImGui::DragFloat("##applydur", &m_animEditorApplyDuration,
+                         0.01f, 0.01f, 60.0f, "%.3fs");
+        ImGui::SameLine();
+        if (ImGui::Button("Apply to all") && !an->frames.empty()) {
+            // Bulk-set every frame's duration. Useful when the
+            // user wants a uniform tempo across a sprite-sheet
+            // animation -- the per-row DragFloats stay editable
+            // for the rare frame that needs to differ.
+            for (auto& fr : an->frames) {
+                fr.duration = m_animEditorApplyDuration;
+            }
             dirty = true;
         }
 
@@ -6589,6 +6624,12 @@ private:
     // order without the user clicking the M5c25 "Sort by time"
     // button.
     bool                m_animEditorAutoSort  = false;
+    // Sprite-name substring filter for the Frames list. Empty
+    // buffer shows every row; reordering frames stays a manual
+    // step because the row order IS the animation playback order.
+    char                m_animEditorFrameFilter[64] = "";
+    // "Apply to all" duration value used by the bulk-edit button.
+    float               m_animEditorApplyDuration   = 0.1f;
     // Parameter filters used by the controller editor + the per-
     // entity Animator inspector. Both treat an empty buffer as
     // "show every parameter" and otherwise match the parameter name
