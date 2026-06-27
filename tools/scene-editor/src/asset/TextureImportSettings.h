@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SpriteSheet.h"
+
 #include <NaraGame/assets/MiniJson.h>
 #include <NaraGame/math/Vec2.h>
 #include <NaraGame/renderer/rhi/RHITypes.h>
@@ -33,6 +35,13 @@ struct TextureImportSettings {
 
     bool alphaIsTransparency = true;
 
+    // Sprite Editor (M3) populates this. Single keeps the whole texture
+    // as one sprite (current behaviour); Multiple slices it into
+    // sub-rectangles stored in `spriteSheet.sprites`.
+    enum class SpriteMode { Single, Multiple };
+    SpriteMode  spriteMode = SpriteMode::Single;
+    SpriteSheet spriteSheet;
+
     // Decode the named pivot anchor into a (0..1) coordinate pair.
     NaraGame::Vec2 ResolvedPivot() const;
 
@@ -51,5 +60,6 @@ struct TextureImportSettings {
 const char* ToString(TextureImportSettings::PivotMode m);
 const char* ToString(TextureImportSettings::Filter f);
 const char* ToString(TextureImportSettings::Wrap w);
+const char* ToString(TextureImportSettings::SpriteMode m);
 
 } // namespace SceneEditor

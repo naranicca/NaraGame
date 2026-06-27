@@ -6,6 +6,7 @@
 // panels on top of the project shell.
 
 #include "asset/AssetDatabase.h"
+#include "asset/SpriteSheet.h"
 #include "asset/TextureImportSettings.h"
 #include "project/Project.h"
 #include "scene/Component.h"
@@ -267,6 +268,7 @@ public:
         DrawProjectPanel();
         DrawNewProjectModal();
         DrawSortingLayersModal();
+        DrawSpriteEditorWindow();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
 
         ImGui::Render();
@@ -419,6 +421,182 @@ private:
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
+    }
+
+    // --- Sprite Editor --------------------------------------------------
+    //
+    // Floating editor opened by double-clicking a Texture in the Project
+    // panel. Slices the texture into a regular grid (by cell size or by
+    // count) and stores the resulting sub-sprite rects on the texture's
+    // .meta file. The texture preview + grid overlay use the same ImGui
+    // DrawList path the Viewport relies on.
+
+    void OpenSpriteEditor(const SceneEditor::AssetGuid& guid) {
+        m_spriteEditorAsset    = guid;
+        m_spriteEditorOpen     = true;
+        m_spriteEditorActivate = true;
+    }
+
+    void DrawSpriteEditorWindow() {
+        if (!m_spriteEditorOpen) return;
+        if (m_spriteEditorActivate) {
+            ImGui::SetNextWindowSize(ImVec2(840, 620), ImGuiCond_Appearing);
+            ImGui::SetNextWindowFocus();
+            m_spriteEditorActivate = false;
+        }
+        if (!ImGui::Begin("Sprite Editor", &m_spriteEditorOpen)) {
+            ImGui::End();
+            return;
+        }
+        SceneEditor::AssetEntry* entry =
+            m_assetDb.FindByGuidMutable(m_spriteEditorAsset);
+        if (!entry || entry->typeName != "Texture") {
+            ImGui::TextDisabled("Double-click a Texture asset in the "
+                                "Project panel to edit it.");
+            ImGui::End();
+            return;
+        }
+        NaraGame::RHITexture* tex =
+            m_assetDb.GetTexture(GetDevice(), entry->guid);
+        if (!tex) {
+            ImGui::TextDisabled("Could not load '%s'.",
+                                entry->relPath.c_str());
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("%s   %ux%u",
+                    entry->relPath.c_str(), tex->Width(), tex->Height());
+
+        SceneEditor::TextureImportSettings imp;
+        imp.FromJson(entry->importSettings);
+
+        bool dirty = false;
+
+        // Slice mode chooser + parameter inputs.
+        const char* sliceTabs[] = { "By Cell Size", "By Cell Count" };
+        ImGui::Combo("##slicemode", &m_spriteEditorMode, sliceTabs, 2);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(slice mode)");
+
+        if (m_spriteEditorMode == 0) {
+            ImGui::DragInt("Cell Width",  &m_spriteEditorCellW, 1.0f,
+                           1, int(tex->Width()));
+            ImGui::DragInt("Cell Height", &m_spriteEditorCellH, 1.0f,
+                           1, int(tex->Height()));
+            if (ImGui::Button("Slice")) {
+                imp.spriteMode = SceneEditor::TextureImportSettings::SpriteMode::Multiple;
+                imp.spriteSheet.sprites = SceneEditor::SliceByCellSize(
+                    int(tex->Width()), int(tex->Height()),
+                    m_spriteEditorCellW, m_spriteEditorCellH,
+                    FileStem(entry->relPath));
+                dirty = true;
+            }
+        } else {
+            ImGui::DragInt("Columns", &m_spriteEditorCols, 1.0f, 1, 64);
+            ImGui::DragInt("Rows",    &m_spriteEditorRows, 1.0f, 1, 64);
+            if (ImGui::Button("Slice")) {
+                imp.spriteMode = SceneEditor::TextureImportSettings::SpriteMode::Multiple;
+                imp.spriteSheet.sprites = SceneEditor::SliceByCellCount(
+                    int(tex->Width()), int(tex->Height()),
+                    m_spriteEditorCols, m_spriteEditorRows,
+                    FileStem(entry->relPath));
+                dirty = true;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset to Single")) {
+            imp.spriteMode = SceneEditor::TextureImportSettings::SpriteMode::Single;
+            imp.spriteSheet.sprites.clear();
+            dirty = true;
+        }
+        ImGui::Separator();
+
+        // Texture preview area: scale-to-fit while keeping aspect.
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const float previewMaxW = avail.x * 0.62f;
+        const float previewMaxH = avail.y;
+        const float texW = float(tex->Width());
+        const float texH = float(tex->Height());
+        float scale = std::min(previewMaxW / texW, previewMaxH / texH);
+        if (scale <= 0.0f) scale = 1.0f;
+        const ImVec2 imgSize{texW * scale, texH * scale};
+
+        ImGui::BeginChild("##preview", ImVec2(previewMaxW, previewMaxH),
+                          true);
+        const ImVec2 imgMin = ImGui::GetCursorScreenPos();
+        const ImTextureID texId =
+            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                tex->GetNativeView()));
+        ImGui::Image(texId, imgSize);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        DrawSpritePreviewOverlay(dl, imgMin, scale, imp);
+        ImGui::EndChild();
+        ImGui::SameLine();
+
+        // Sub-sprite list on the right.
+        ImGui::BeginChild("##sublist", ImVec2(0, previewMaxH), true);
+        ImGui::Text("Sub-sprites: %zu", imp.spriteSheet.sprites.size());
+        ImGui::Separator();
+        for (size_t i = 0; i < imp.spriteSheet.sprites.size(); ++i) {
+            SceneEditor::SubSprite& s = imp.spriteSheet.sprites[i];
+            ImGui::PushID(int(i));
+            const bool sel = (m_spriteEditorSel == int(i));
+            char nameBuf[128];
+            std::snprintf(nameBuf, sizeof(nameBuf), "%s", s.name.c_str());
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::InputText("##name", nameBuf, sizeof(nameBuf))) {
+                s.name = nameBuf;
+                dirty = true;
+            }
+            if (ImGui::IsItemActive() || ImGui::IsItemClicked()) {
+                m_spriteEditorSel = int(i);
+            }
+            const ImU32 rectCol = sel ? IM_COL32(255, 220, 80, 255)
+                                      : IM_COL32(170, 170, 170, 255);
+            ImGui::PushStyleColor(ImGuiCol_Text, rectCol);
+            ImGui::Text("  rect (%d, %d, %d, %d)%s",
+                        s.x, s.y, s.w, s.h, sel ? "  *" : "");
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemClicked()) m_spriteEditorSel = int(i);
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        if (dirty) {
+            entry->importSettings = imp.ToJson();
+            m_assetDb.SaveMeta(entry->guid);
+        }
+
+        ImGui::End();
+    }
+
+    void DrawSpritePreviewOverlay(
+        ImDrawList* dl, const ImVec2& imgMin, float scale,
+        const SceneEditor::TextureImportSettings& imp) const {
+        // Each sub-sprite rect drawn over the image at the same scale.
+        // Selected sub-sprite gets a bright outline + filled tint.
+        for (size_t i = 0; i < imp.spriteSheet.sprites.size(); ++i) {
+            const auto& s = imp.spriteSheet.sprites[i];
+            const ImVec2 a{imgMin.x + s.x * scale, imgMin.y + s.y * scale};
+            const ImVec2 b{imgMin.x + (s.x + s.w) * scale,
+                           imgMin.y + (s.y + s.h) * scale};
+            const bool sel = (int(i) == m_spriteEditorSel);
+            const ImU32 col = sel ? IM_COL32(255, 230, 80, 255)
+                                  : IM_COL32(255, 255, 255, 180);
+            if (sel) {
+                dl->AddRectFilled(a, b, IM_COL32(255, 230, 80, 50), 0.0f);
+            }
+            dl->AddRect(a, b, col, 0.0f, 0, sel ? 2.0f : 1.0f);
+        }
+    }
+
+    static std::string FileStem(const std::string& relPath) {
+        std::string stem = relPath;
+        const size_t slash = stem.find_last_of('/');
+        if (slash != std::string::npos) stem = stem.substr(slash + 1);
+        const size_t dot = stem.rfind('.');
+        if (dot != std::string::npos) stem.resize(dot);
+        return stem;
     }
 
     void DrawSortingLayersModal() {
@@ -1576,6 +1754,13 @@ private:
             m_selectedAsset = e->guid;
             m_selection     = SceneEditor::kInvalidEntityId;
         }
+        // Double-click a Texture row to open the Sprite Editor with
+        // that asset as the active edit target.
+        if (e && e->typeName == "Texture" &&
+            ImGui::IsItemHovered() &&
+            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            OpenSpriteEditor(e->guid);
+        }
         if (e && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             // The 16-byte GUID is the entire payload. Editor drop sites
             // use the type tag to pick what to do with it.
@@ -1657,6 +1842,19 @@ private:
 
     // Modal trigger flags.
     bool                m_openLayersModal = false;
+    // Sprite Editor state. m_spriteEditorOpen drives the window's
+    // visibility; activating it via OpenSpriteEditor pre-focuses the
+    // window so a stale floating instance doesn't get lost behind a
+    // dock when the user double-clicks an asset.
+    bool                m_spriteEditorOpen     = false;
+    bool                m_spriteEditorActivate = false;
+    SceneEditor::AssetGuid m_spriteEditorAsset;
+    int                 m_spriteEditorMode  = 0;    // 0=by size, 1=by count
+    int                 m_spriteEditorCellW = 32;
+    int                 m_spriteEditorCellH = 32;
+    int                 m_spriteEditorCols  = 4;
+    int                 m_spriteEditorRows  = 4;
+    int                 m_spriteEditorSel   = -1;
     // New Project modal state.
     bool                m_openNewProjectModal = false;
     std::array<char, 256> m_newProjectName{};

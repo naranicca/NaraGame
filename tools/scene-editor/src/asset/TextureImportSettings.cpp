@@ -30,6 +30,14 @@ const char* ToString(TextureImportSettings::Wrap w) {
     return "Clamp";
 }
 
+const char* ToString(TextureImportSettings::SpriteMode m) {
+    switch (m) {
+        case TextureImportSettings::SpriteMode::Single:   return "Single";
+        case TextureImportSettings::SpriteMode::Multiple: return "Multiple";
+    }
+    return "Single";
+}
+
 namespace {
 
 TextureImportSettings::PivotMode ParsePivot(const std::string& s,
@@ -53,6 +61,13 @@ TextureImportSettings::Wrap ParseWrap(const std::string& s,
     if (s == "Clamp")  return TextureImportSettings::Wrap::Clamp;
     if (s == "Repeat") return TextureImportSettings::Wrap::Repeat;
     if (s == "Mirror") return TextureImportSettings::Wrap::Mirror;
+    return def;
+}
+
+TextureImportSettings::SpriteMode ParseSpriteMode(
+    const std::string& s, TextureImportSettings::SpriteMode def) {
+    if (s == "Single")   return TextureImportSettings::SpriteMode::Single;
+    if (s == "Multiple") return TextureImportSettings::SpriteMode::Multiple;
     return def;
 }
 
@@ -93,6 +108,12 @@ void TextureImportSettings::FromJson(const Value& obj) {
     filterMode          = ParseFilter(obj.GetString("filterMode"), Filter::Linear);
     wrapMode            = ParseWrap(obj.GetString("wrapMode"), Wrap::Clamp);
     alphaIsTransparency = obj.GetBool("alphaIsTransparency", true);
+    spriteMode          = ParseSpriteMode(obj.GetString("spriteMode"),
+                                          SpriteMode::Single);
+    spriteSheet = SpriteSheet{};
+    if (const Value* sheet = obj.Find("spriteSheet")) {
+        if (sheet->IsObject()) spriteSheet.FromJson(*sheet);
+    }
 }
 
 Value TextureImportSettings::ToJson() const {
@@ -103,6 +124,10 @@ Value TextureImportSettings::ToJson() const {
     o.Add("filterMode",          Value::MakeString(ToString(filterMode)));
     o.Add("wrapMode",            Value::MakeString(ToString(wrapMode)));
     o.Add("alphaIsTransparency", Value::MakeBool(alphaIsTransparency));
+    o.Add("spriteMode",          Value::MakeString(ToString(spriteMode)));
+    if (spriteMode == SpriteMode::Multiple || !spriteSheet.sprites.empty()) {
+        o.Add("spriteSheet", spriteSheet.ToJson());
+    }
     return o;
 }
 
