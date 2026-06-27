@@ -1043,6 +1043,30 @@ private:
         m_graphSelectedTransition  = -1;
         m_graphPendingFrom         = -1;
         m_graphContextNode         = -1;
+        m_controllerEditorParamFilter[0] = '\0';
+    }
+
+    // Case-insensitive substring match used by the parameter
+    // filters. Returns true for an empty filter so callers can
+    // unconditionally skip rows that don't match.
+    static bool ParamNameMatchesFilter(const std::string& name,
+                                       const char* filter) {
+        if (!filter || filter[0] == '\0') return true;
+        auto toLower = [](char ch) {
+            return char(ch >= 'A' && ch <= 'Z' ? ch + 32 : ch);
+        };
+        const size_t fLen = std::strlen(filter);
+        if (name.size() < fLen) return false;
+        for (size_t i = 0; i + fLen <= name.size(); ++i) {
+            bool match = true;
+            for (size_t j = 0; j < fLen; ++j) {
+                if (toLower(name[i + j]) != toLower(filter[j])) {
+                    match = false; break;
+                }
+            }
+            if (match) return true;
+        }
+        return false;
     }
 
     // 2D state-machine view. Returns true when a node moved or the
@@ -1666,9 +1690,18 @@ private:
         // -----------------------------------------------------------
         ImGui::Separator();
         ImGui::Text("Parameters (%zu)", ctrl->parameters.size());
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint(
+            "##ctrlparamfilter", "Filter parameters...",
+            m_controllerEditorParamFilter,
+            sizeof(m_controllerEditorParamFilter));
         int removeParamAt = -1;
         for (int i = 0; i < int(ctrl->parameters.size()); ++i) {
             SceneEditor::AnimatorParameter& p = ctrl->parameters[size_t(i)];
+            if (!ParamNameMatchesFilter(
+                    p.name, m_controllerEditorParamFilter)) {
+                continue;
+            }
             ImGui::PushID(10000 + i);
             char nameBuf[64];
             std::snprintf(nameBuf, sizeof(nameBuf), "%s", p.name.c_str());
@@ -3776,8 +3809,17 @@ private:
                 // known position.
                 if (!ctrl->parameters.empty()) {
                     ImGui::Text("Parameters");
+                    ImGui::SetNextItemWidth(-1.0f);
+                    ImGui::InputTextWithHint(
+                        "##animparamfilter", "Filter parameters...",
+                        m_animInspectorParamFilter,
+                        sizeof(m_animInspectorParamFilter));
                     using PT = SceneEditor::AnimatorParameter::Type;
                     for (const auto& p : ctrl->parameters) {
+                        if (!ParamNameMatchesFilter(
+                                p.name, m_animInspectorParamFilter)) {
+                            continue;
+                        }
                         if (p.type == PT::Float) {
                             float v = p.defaultFloat;
                             auto it = an.paramFloats.find(p.name);
@@ -6154,6 +6196,12 @@ private:
     // The scrubber marker and the matching row jump to its time when
     // clicked; -1 = no event selected.
     int                 m_animEditorSelEvent  = -1;
+    // Parameter filters used by the controller editor + the per-
+    // entity Animator inspector. Both treat an empty buffer as
+    // "show every parameter" and otherwise match the parameter name
+    // against the buffer case-insensitively as a substring.
+    char                m_controllerEditorParamFilter[64] = "";
+    char                m_animInspectorParamFilter[64]    = "";
     // Animator Controller Editor follows the same pattern.
     bool                m_controllerEditorOpen     = false;
     bool                m_controllerEditorActivate = false;
