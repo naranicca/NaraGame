@@ -3,6 +3,7 @@
 #include "../scene/AnimatorComponent.h"
 #include "../scene/Entity.h"
 #include "../scene/Scene.h"
+#include "../scene/TransformComponent.h"
 
 #include <cstdio>
 #include <string>
@@ -53,6 +54,85 @@ static AnimatorComponent* FindAnimator(ScriptHost* host,
     Entity* e = host->BoundScene()->FindByName(entityName);
     if (!e) return nullptr;
     return e->GetComponent<AnimatorComponent>();
+}
+
+// Same pattern for TransformComponent. Every entity carries one
+// by convention, so a missing return value here usually means a
+// stale entity name in the script.
+static TransformComponent* FindTransform(ScriptHost* host,
+                                         const char* entityName) {
+    if (!host || !host->BoundScene() || !entityName) return nullptr;
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) return nullptr;
+    return e->GetComponent<TransformComponent>();
+}
+
+// transform.set_position / get_position / set_rotation /
+// get_rotation / set_scale / get_scale / translate. Mirrors the
+// animator API shape: setters return nothing; vector getters
+// return component values in stack order; missing entities +
+// missing TransformComponents are silent no-ops.
+static int LuaTransformSetPosition(lua_State* L) {
+    auto* t = FindTransform(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!t) return 0;
+    t->position = NaraGame::Vec3{
+        float(luaL_checknumber(L, 2)),
+        float(luaL_checknumber(L, 3)),
+        float(luaL_checknumber(L, 4))};
+    return 0;
+}
+static int LuaTransformGetPosition(lua_State* L) {
+    auto* t = FindTransform(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!t) {
+        lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0);
+        return 3;
+    }
+    lua_pushnumber(L, t->position.x);
+    lua_pushnumber(L, t->position.y);
+    lua_pushnumber(L, t->position.z);
+    return 3;
+}
+static int LuaTransformSetRotation(lua_State* L) {
+    auto* t = FindTransform(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!t) return 0;
+    t->rotation = float(luaL_checknumber(L, 2));
+    return 0;
+}
+static int LuaTransformGetRotation(lua_State* L) {
+    auto* t = FindTransform(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    lua_pushnumber(L, t ? t->rotation : 0.0f);
+    return 1;
+}
+static int LuaTransformSetScale(lua_State* L) {
+    auto* t = FindTransform(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!t) return 0;
+    t->scale = NaraGame::Vec3{
+        float(luaL_checknumber(L, 2)),
+        float(luaL_checknumber(L, 3)),
+        float(luaL_checknumber(L, 4))};
+    return 0;
+}
+static int LuaTransformGetScale(lua_State* L) {
+    auto* t = FindTransform(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!t) {
+        lua_pushnumber(L, 1); lua_pushnumber(L, 1); lua_pushnumber(L, 1);
+        return 3;
+    }
+    lua_pushnumber(L, t->scale.x);
+    lua_pushnumber(L, t->scale.y);
+    lua_pushnumber(L, t->scale.z);
+    return 3;
+}
+// transform.translate(entity, dx, dy, dz) -- convenience for the
+// common "advance by (dx, dy, dz) this frame" pattern so user
+// scripts don't have to round-trip the full position triple.
+static int LuaTransformTranslate(lua_State* L) {
+    auto* t = FindTransform(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!t) return 0;
+    t->position.x += float(luaL_checknumber(L, 2));
+    t->position.y += float(luaL_checknumber(L, 3));
+    t->position.z += float(luaL_checknumber(L, 4));
+    return 0;
 }
 
 // animator.set_bool / get_bool / set_float / get_float / set_int /
@@ -256,6 +336,20 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kAnimatorApi, 1);
     lua_setglobal(L, "animator");
+    static const luaL_Reg kTransformApi[] = {
+        {"set_position", LuaTransformSetPosition},
+        {"get_position", LuaTransformGetPosition},
+        {"set_rotation", LuaTransformSetRotation},
+        {"get_rotation", LuaTransformGetRotation},
+        {"set_scale",    LuaTransformSetScale},
+        {"get_scale",    LuaTransformGetScale},
+        {"translate",    LuaTransformTranslate},
+        {nullptr,        nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kTransformApi, 1);
+    lua_setglobal(L, "transform");
     if (luaL_dostring(L, kDefaultBootstrap) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
         AppendLine(std::string("[lua-error] bootstrap: ") +
