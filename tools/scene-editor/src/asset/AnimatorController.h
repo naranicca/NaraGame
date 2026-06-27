@@ -37,7 +37,7 @@ struct AnimatorParameter {
     // equality-only -- their transitions skip the < / > rungs of the
     // op ladder because the comparisons don't have a meaningful
     // ordering anyway.
-    enum class Type { Bool, Float, Int, Trigger, Vec2, Color };
+    enum class Type { Bool, Float, Int, Trigger, Vec2, Color, String };
     std::string     name;
     Type            type         = Type::Bool;
     bool            defaultBool  = false;
@@ -45,6 +45,7 @@ struct AnimatorParameter {
     int             defaultInt   = 0;
     NaraGame::Vec2  defaultVec2{0.0f, 0.0f};
     NaraGame::Color defaultColor{0.0f, 0.0f, 0.0f, 0.0f};
+    std::string     defaultString;
 };
 
 // Edge in the state machine. fromIdx == -1 means "any state" (i.e.
@@ -61,6 +62,7 @@ struct AnimatorTransition {
     int             valueInt   = 0;
     NaraGame::Vec2  valueVec2{0.0f, 0.0f};
     NaraGame::Color valueColor{0.0f, 0.0f, 0.0f, 0.0f};
+    std::string     valueString;
     // When `hasExitTime` is true, the transition only fires after the
     // source animation has played past `exitTime` of its total
     // duration (0..1 normalised). Pairs naturally with an empty

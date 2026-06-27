@@ -61,6 +61,7 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
                 else if (ts == "Trigger") par.type = AnimatorParameter::Type::Trigger;
                 else if (ts == "Vec2")    par.type = AnimatorParameter::Type::Vec2;
                 else if (ts == "Color")   par.type = AnimatorParameter::Type::Color;
+                else if (ts == "String")  par.type = AnimatorParameter::Type::String;
                 else                      par.type = AnimatorParameter::Type::Bool;
                 par.defaultBool  = p.GetBool ("defaultBool",
                                               p.GetBool("defaultValue", false));
@@ -84,6 +85,7 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
                         par.defaultColor = { pick(0), pick(1), pick(2), pick(3) };
                     }
                 }
+                par.defaultString = p.GetString("defaultString");
                 parameters.push_back(std::move(par));
             }
         }
@@ -128,6 +130,7 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
                         tr.valueColor = { pick(0), pick(1), pick(2), pick(3) };
                     }
                 }
+                tr.valueString = t.GetString("valueString");
                 tr.hasExitTime = t.GetBool ("hasExitTime", false);
                 tr.exitTime    = float(t.GetNumber("exitTime", 0.0));
                 tr.duration    = float(t.GetNumber("duration", 0.0));
@@ -162,6 +165,7 @@ Value AnimatorControllerAsset::ToJson() const {
         else if (p.type == AnimatorParameter::Type::Trigger) tname = "Trigger";
         else if (p.type == AnimatorParameter::Type::Vec2)    tname = "Vec2";
         else if (p.type == AnimatorParameter::Type::Color)   tname = "Color";
+        else if (p.type == AnimatorParameter::Type::String)  tname = "String";
         o.Add("type",         Value::MakeString(tname));
         o.Add("defaultBool",  Value::MakeBool(p.defaultBool));
         o.Add("defaultFloat", Value::MakeNumber(p.defaultFloat));
@@ -176,6 +180,7 @@ Value AnimatorControllerAsset::ToJson() const {
         pc.Push(Value::MakeNumber(p.defaultColor.b));
         pc.Push(Value::MakeNumber(p.defaultColor.a));
         o.Add("defaultColor", std::move(pc));
+        o.Add("defaultString", Value::MakeString(p.defaultString));
         parr.Push(std::move(o));
     }
     root.Add("parameters", std::move(parr));
@@ -208,6 +213,7 @@ Value AnimatorControllerAsset::ToJson() const {
         tc.Push(Value::MakeNumber(t.valueColor.b));
         tc.Push(Value::MakeNumber(t.valueColor.a));
         o.Add("valueColor", std::move(tc));
+        o.Add("valueString", Value::MakeString(t.valueString));
         o.Add("hasExitTime", Value::MakeBool(t.hasExitTime));
         o.Add("exitTime",    Value::MakeNumber(t.exitTime));
         o.Add("duration",    Value::MakeNumber(t.duration));

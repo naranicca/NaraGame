@@ -52,6 +52,7 @@ public:
     std::unordered_map<std::string, int>            paramInts;
     std::unordered_map<std::string, NaraGame::Vec2> paramVec2;
     std::unordered_map<std::string, NaraGame::Color> paramColors;
+    std::unordered_map<std::string, std::string>    paramStrings;
 
     static const char* StaticTypeName() { return "Animator"; }
     const char* TypeName() const override { return StaticTypeName(); }

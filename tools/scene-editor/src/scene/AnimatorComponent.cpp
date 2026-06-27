@@ -37,6 +37,10 @@ void AnimatorComponent::Serialize(Value& out) const {
         pc.Add(kv.first, std::move(arr));
     }
     out.Add("paramColors", std::move(pc));
+    Value ps = Value::MakeObject();
+    for (const auto& kv : paramStrings)
+        ps.Add(kv.first, Value::MakeString(kv.second));
+    out.Add("paramStrings", std::move(ps));
 }
 
 void AnimatorComponent::Deserialize(const Value& obj) {
@@ -112,6 +116,16 @@ void AnimatorComponent::Deserialize(const Value& obj) {
                 };
                 paramColors[pc->objectKeys[i]] = {
                     pick(0), pick(1), pick(2), pick(3) };
+            }
+        }
+    }
+    paramStrings.clear();
+    if (const Value* ps = obj.Find("paramStrings")) {
+        if (ps->IsObject()) {
+            for (size_t i = 0; i < ps->objectKeys.size(); ++i) {
+                const Value& v = ps->objectValues[i];
+                paramStrings[ps->objectKeys[i]] =
+                    v.IsString() ? v.stringValue : std::string{};
             }
         }
     }

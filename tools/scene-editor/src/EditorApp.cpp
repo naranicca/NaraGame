@@ -571,6 +571,10 @@ private:
                     if (an.paramColors.find(p.name) == an.paramColors.end()) {
                         an.paramColors[p.name] = p.defaultColor;
                     }
+                } else if (p.type == PT::String) {
+                    if (an.paramStrings.find(p.name) == an.paramStrings.end()) {
+                        an.paramStrings[p.name] = p.defaultString;
+                    }
                 } else {
                     if (an.paramBools.find(p.name) == an.paramBools.end()) {
                         an.paramBools[p.name] = p.defaultBool;
@@ -683,6 +687,12 @@ private:
                                  v.g == tr.valueColor.g &&
                                  v.b == tr.valueColor.b &&
                                  v.a == tr.valueColor.a);
+                fire = (tr.op == OP::NotEqual) ? !eq : eq;
+            } else if (decl->type == PT::String) {
+                auto it = an.paramStrings.find(tr.param);
+                const std::string& v = (it != an.paramStrings.end())
+                    ? it->second : decl->defaultString;
+                const bool eq = (v == tr.valueString);
                 fire = (tr.op == OP::NotEqual) ? !eq : eq;
             } else {
                 // Bool + Trigger share the paramBools map. Bool only
@@ -1444,6 +1454,14 @@ private:
                     tr.valueColor = { col[0], col[1], col[2], col[3] };
                     dirty = true;
                 }
+            } else if (decl && decl->type == PT::String) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf), "%s",
+                              tr.valueString.c_str());
+                if (ImGui::InputText("##gval", buf, sizeof(buf))) {
+                    tr.valueString = buf;
+                    dirty = true;
+                }
             } else {
                 bool draft = tr.valueBool;
                 if (ImGui::Checkbox("##gval", &draft)) {
@@ -1661,10 +1679,10 @@ private:
             }
             ImGui::SameLine();
             const char* typeNames[] = { "Bool", "Float", "Int", "Trigger",
-                                        "Vec2", "Color" };
+                                        "Vec2", "Color", "String" };
             int typeIdx = int(p.type);
             ImGui::SetNextItemWidth(90.0f);
-            if (ImGui::Combo("##ptype", &typeIdx, typeNames, 6)) {
+            if (ImGui::Combo("##ptype", &typeIdx, typeNames, 7)) {
                 p.type = static_cast<SceneEditor::AnimatorParameter::Type>(typeIdx);
                 dirty = true;
             }
@@ -1696,6 +1714,16 @@ private:
                                        ImGuiColorEditFlags_NoInputs |
                                        ImGuiColorEditFlags_AlphaPreviewHalf)) {
                     p.defaultColor = { col[0], col[1], col[2], col[3] };
+                    dirty = true;
+                }
+            } else if (p.type == PT::String) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf), "%s",
+                              p.defaultString.c_str());
+                ImGui::SetNextItemWidth(150.0f);
+                if (ImGui::InputTextWithHint("##pdef", "default",
+                                              buf, sizeof(buf))) {
+                    p.defaultString = buf;
                     dirty = true;
                 }
             } else {
@@ -1844,6 +1872,14 @@ private:
                                        ImGuiColorEditFlags_NoInputs |
                                        ImGuiColorEditFlags_AlphaPreviewHalf)) {
                     tr.valueColor = { col[0], col[1], col[2], col[3] };
+                    dirty = true;
+                }
+            } else if (decl && decl->type == PT::String) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf), "%s",
+                              tr.valueString.c_str());
+                if (ImGui::InputText("##val", buf, sizeof(buf))) {
+                    tr.valueString = buf;
                     dirty = true;
                 }
             } else {
@@ -3796,6 +3832,19 @@ private:
                                 UndoSnapshot();
                                 an.paramColors[p.name] = {
                                     col[0], col[1], col[2], col[3] };
+                                changed = true;
+                            }
+                        } else if (p.type == PT::String) {
+                            std::string cur = p.defaultString;
+                            auto it = an.paramStrings.find(p.name);
+                            if (it != an.paramStrings.end()) cur = it->second;
+                            char buf[256];
+                            std::snprintf(buf, sizeof(buf), "%s",
+                                          cur.c_str());
+                            if (ImGui::InputText(p.name.c_str(),
+                                                  buf, sizeof(buf))) {
+                                UndoSnapshot();
+                                an.paramStrings[p.name] = buf;
                                 changed = true;
                             }
                         } else {
