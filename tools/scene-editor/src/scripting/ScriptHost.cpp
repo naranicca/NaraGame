@@ -273,6 +273,65 @@ static int LuaSceneEntityCount(lua_State* L) {
     lua_pushinteger(L, count);
     return 1;
 }
+// scene.parent_of / children_of / set_parent. Lets scripts walk
+// the entity hierarchy + reparent at runtime. parent_of returns
+// the parent's name string (empty string when the entity is a
+// root or missing); children_of returns a 1-indexed table of
+// child names. set_parent wraps Scene::Reparent + understands an
+// empty parent argument as "make this entity a root".
+static int LuaSceneParentOf(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushstring(L, ""); return 1;
+    }
+    Scene* scene = host->BoundScene();
+    Entity* e = scene->FindByName(luaL_checkstring(L, 1));
+    if (!e || e->parent == kInvalidEntityId) {
+        lua_pushstring(L, ""); return 1;
+    }
+    Entity* p = scene->Get(e->parent);
+    lua_pushstring(L, p ? p->name.c_str() : "");
+    return 1;
+}
+static int LuaSceneChildrenOf(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    lua_newtable(L);
+    if (!host || !host->BoundScene()) return 1;
+    Scene* scene = host->BoundScene();
+    Entity* e = scene->FindByName(luaL_checkstring(L, 1));
+    if (!e) return 1;
+    int idx = 1;
+    for (EntityId childId : e->children) {
+        Entity* c = scene->Get(childId);
+        if (!c) continue;
+        lua_pushstring(L, c->name.c_str());
+        lua_rawseti(L, -2, idx++);
+    }
+    return 1;
+}
+static int LuaSceneSetParent(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    Scene* scene = host->BoundScene();
+    Entity* e = scene->FindByName(luaL_checkstring(L, 1));
+    if (!e) { lua_pushboolean(L, 0); return 1; }
+    const char* parentName = luaL_optstring(L, 2, nullptr);
+    EntityId newParent = kInvalidEntityId;
+    if (parentName && parentName[0] != '\0') {
+        // Missing parent name is a typo, not a "make me root"
+        // signal -- callers that want a root should pass "" or
+        // nil explicitly. Distinguish by returning false here.
+        Entity* p = scene->FindByName(parentName);
+        if (!p) { lua_pushboolean(L, 0); return 1; }
+        newParent = p->id;
+    }
+    scene->Reparent(e->id, newParent);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 // scene.set_enabled / is_enabled. Flipping enabled triggers the
 // M6c17 OnEnable / OnDisable edge detection on the next
 // TickScripts pass, so a script that toggles its own host
@@ -913,6 +972,9 @@ ScriptHost::ScriptHost() {
         {"remove_component",  LuaSceneRemoveComponent},
         {"set_enabled",       LuaSceneSetEnabled},
         {"is_enabled",        LuaSceneIsEnabled},
+        {"parent_of",         LuaSceneParentOf},
+        {"children_of",       LuaSceneChildrenOf},
+        {"set_parent",        LuaSceneSetParent},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
