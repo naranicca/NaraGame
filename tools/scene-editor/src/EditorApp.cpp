@@ -275,6 +275,7 @@ public:
         DrawSortingLayersModal();
         DrawSpriteEditorWindow();
         DrawTilesetEditorWindow();
+        DrawAutotileEditorWindow();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
 
         ImGui::Render();
@@ -553,6 +554,200 @@ private:
         m_spriteEditorAsset    = guid;
         m_spriteEditorOpen     = true;
         m_spriteEditorActivate = true;
+    }
+
+    void OpenAutotileEditor(const SceneEditor::AssetGuid& guid) {
+        m_autotileEditorAsset    = guid;
+        m_autotileEditorOpen     = true;
+        m_autotileEditorActivate = true;
+        m_autotileEditorSlot     = 0;
+    }
+
+    // Autotile Editor window. Left half shows the source texture with a
+    // grid overlay -- clicking a cell writes its tile index into the
+    // currently active mask slot. Right half lists the 16 mask slots
+    // with their neighbour pattern + current tile thumbnail; clicking
+    // a row makes it the active slot.
+    void DrawAutotileEditorWindow() {
+        if (!m_autotileEditorOpen) return;
+        if (m_autotileEditorActivate) {
+            ImGui::SetNextWindowSize(ImVec2(820, 600), ImGuiCond_Appearing);
+            ImGui::SetNextWindowFocus();
+            m_autotileEditorActivate = false;
+        }
+        if (!ImGui::Begin("Autotile Editor", &m_autotileEditorOpen)) {
+            ImGui::End();
+            return;
+        }
+        const SceneEditor::AssetEntry* entry =
+            m_assetDb.FindByGuid(m_autotileEditorAsset);
+        if (!entry || entry->typeName != "Autotile") {
+            ImGui::TextDisabled("Double-click a .autotile in the "
+                                "Project panel to edit it.");
+            ImGui::End();
+            return;
+        }
+        SceneEditor::AutotileAsset* at =
+            m_assetDb.GetAutotile(m_autotileEditorAsset);
+        if (!at) {
+            ImGui::TextDisabled("Could not load '%s'.",
+                                entry->relPath.c_str());
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("%s", entry->relPath.c_str());
+
+        bool dirty = false;
+
+        // Texture combo.
+        std::string current = "(none)";
+        if (at->texture.IsValid()) {
+            if (const auto* te = m_assetDb.FindByGuid(at->texture)) {
+                current = te->relPath;
+            } else {
+                current = at->texture.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Texture", current.c_str())) {
+            if (ImGui::Selectable("(none)", !at->texture.IsValid())) {
+                at->texture = SceneEditor::AssetGuid{};
+                dirty = true;
+            }
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "Texture") continue;
+                const bool sel = (a.guid == at->texture);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    at->texture = a.guid;
+                    dirty = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        int sz[2] = { at->cellPixelW, at->cellPixelH };
+        if (ImGui::DragInt2("Cell Pixels (W,H)", sz, 0.2f, 1, 4096)) {
+            at->cellPixelW = std::max(1, sz[0]);
+            at->cellPixelH = std::max(1, sz[1]);
+            dirty = true;
+        }
+        ImGui::Separator();
+        if (!at->texture.IsValid()) {
+            ImGui::TextDisabled("Pick a Texture above to start editing.");
+            if (dirty) m_assetDb.SaveAutotile(m_autotileEditorAsset);
+            ImGui::End();
+            return;
+        }
+        NaraGame::RHITexture* tex =
+            m_assetDb.GetTexture(GetDevice(), at->texture);
+        if (!tex || tex->Width() == 0 || tex->Height() == 0) {
+            ImGui::TextDisabled("Texture preview unavailable.");
+            if (dirty) m_assetDb.SaveAutotile(m_autotileEditorAsset);
+            ImGui::End();
+            return;
+        }
+        const int texCols = int(tex->Width())  / at->cellPixelW;
+        const int texRows = int(tex->Height()) / at->cellPixelH;
+        if (texCols <= 0 || texRows <= 0) {
+            ImGui::TextDisabled("Cell size larger than texture.");
+            if (dirty) m_assetDb.SaveAutotile(m_autotileEditorAsset);
+            ImGui::End();
+            return;
+        }
+        ImGui::TextDisabled("Click a tile in the preview to assign it "
+                            "to mask slot %d. Bits: N=1, E=2, S=4, W=8.",
+                            m_autotileEditorSlot);
+
+        // Left: texture preview with grid.
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const float leftW  = avail.x * 0.55f;
+        const float fitH   = avail.y;
+        const float texW   = float(tex->Width());
+        const float texH   = float(tex->Height());
+        float scale = std::min(leftW / texW, fitH / texH);
+        if (scale <= 0.0f) scale = 1.0f;
+        const ImVec2 imgSize{texW * scale, texH * scale};
+        const ImVec2 imgMin = ImGui::GetCursorScreenPos();
+        const ImTextureID texId =
+            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                tex->GetNativeView()));
+        ImGui::Image(texId, imgSize);
+        ImGui::SetCursorScreenPos(imgMin);
+        ImGui::InvisibleButton("##autotile_hit", imgSize,
+                               ImGuiButtonFlags_MouseButtonLeft);
+        const bool clicked = ImGui::IsItemClicked();
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImU32 grid = IM_COL32(255, 255, 255, 50);
+        const float cellPxScreenW = float(at->cellPixelW) * scale;
+        const float cellPxScreenH = float(at->cellPixelH) * scale;
+        for (int r = 0; r <= texRows; ++r) {
+            const float y = imgMin.y + r * cellPxScreenH;
+            dl->AddLine(ImVec2{imgMin.x,             y},
+                        ImVec2{imgMin.x + imgSize.x, y}, grid, 1.0f);
+        }
+        for (int cc = 0; cc <= texCols; ++cc) {
+            const float x = imgMin.x + cc * cellPxScreenW;
+            dl->AddLine(ImVec2{x, imgMin.y},
+                        ImVec2{x, imgMin.y + imgSize.y}, grid, 1.0f);
+        }
+        // Highlight the cell currently assigned to the active slot.
+        if (m_autotileEditorSlot >= 0 && m_autotileEditorSlot < 16) {
+            const int idx = at->mask[size_t(m_autotileEditorSlot)];
+            if (idx >= 0 && idx < texCols * texRows) {
+                const int col = idx % texCols;
+                const int row = idx / texCols;
+                const ImVec2 a{imgMin.x +  col      * cellPxScreenW,
+                               imgMin.y +  row      * cellPxScreenH};
+                const ImVec2 b{imgMin.x + (col + 1) * cellPxScreenW,
+                               imgMin.y + (row + 1) * cellPxScreenH};
+                dl->AddRect(a, b, IM_COL32(255, 220, 60, 255),
+                            0.0f, 0, 2.0f);
+            }
+        }
+        if (clicked) {
+            const ImVec2 mp = ImGui::GetMousePos();
+            const int px = int((mp.x - imgMin.x) / scale);
+            const int py = int((mp.y - imgMin.y) / scale);
+            const int col = px / at->cellPixelW;
+            const int row = py / at->cellPixelH;
+            if (col >= 0 && col < texCols && row >= 0 && row < texRows) {
+                const int idx = row * texCols + col;
+                if (at->mask[size_t(m_autotileEditorSlot)] != idx) {
+                    at->mask[size_t(m_autotileEditorSlot)] = idx;
+                    at->RebuildTileSet();
+                    dirty = true;
+                }
+                // Advance to the next slot so the user can rip through
+                // the 16-entry table without grabbing the slot list.
+                m_autotileEditorSlot =
+                    (m_autotileEditorSlot + 1) & 15;
+            }
+        }
+
+        // Right: 16-slot mask table.
+        ImGui::SameLine();
+        ImGui::BeginChild("##autotile_slots", ImVec2(0, fitH), true);
+        ImGui::Text("Mask slots");
+        ImGui::Separator();
+        for (int m = 0; m < 16; ++m) {
+            ImGui::PushID(m);
+            char neigh[8];
+            std::snprintf(neigh, sizeof(neigh), "%c%c%c%c",
+                          (m & 1) ? 'N' : '.',
+                          (m & 2) ? 'E' : '.',
+                          (m & 4) ? 'S' : '.',
+                          (m & 8) ? 'W' : '.');
+            const int  tile = at->mask[size_t(m)];
+            const bool sel  = (m_autotileEditorSlot == m);
+            char label[64];
+            std::snprintf(label, sizeof(label),
+                          "%2d  %s  -> tile %d", m, neigh, tile);
+            if (ImGui::Selectable(label, sel)) m_autotileEditorSlot = m;
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        if (dirty) m_assetDb.SaveAutotile(m_autotileEditorAsset);
+        ImGui::End();
     }
 
     void OpenTilesetEditor(const SceneEditor::AssetGuid& guid) {
@@ -3667,6 +3862,11 @@ private:
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             OpenTilesetEditor(e->guid);
         }
+        if (e && e->typeName == "Autotile" &&
+            ImGui::IsItemHovered() &&
+            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            OpenAutotileEditor(e->guid);
+        }
         if (e && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             // The 16-byte GUID is the entire payload. Editor drop sites
             // use the type tag to pick what to do with it.
@@ -3767,6 +3967,14 @@ private:
     bool                m_tilesetEditorOpen     = false;
     bool                m_tilesetEditorActivate = false;
     SceneEditor::AssetGuid m_tilesetEditorAsset;
+    // Autotile Editor mirrors the Sprite / Tileset pattern. The active
+    // slot is the 0..15 mask index the user has selected for editing;
+    // clicking a tile in the preview writes that index into the
+    // autotile's mask[activeSlot].
+    bool                m_autotileEditorOpen     = false;
+    bool                m_autotileEditorActivate = false;
+    SceneEditor::AssetGuid m_autotileEditorAsset;
+    int                 m_autotileEditorSlot = 0;
     int                 m_spriteEditorMode  = 0;    // 0=by size, 1=by count
     int                 m_spriteEditorCellW = 32;
     int                 m_spriteEditorCellH = 32;
