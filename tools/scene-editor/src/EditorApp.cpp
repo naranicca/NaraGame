@@ -1044,6 +1044,17 @@ private:
         m_graphPendingFrom         = -1;
         m_graphContextNode         = -1;
         m_controllerEditorParamFilter[0] = '\0';
+        m_controllerEditorParamTypeFilter = 0;
+    }
+
+    // True when the Combo's "All" entry (idx 0) is picked or when
+    // the parameter's type matches the selected entry. The combo's
+    // entry order tracks the AnimatorParameter::Type ordinal, so a
+    // filterIdx of N >= 1 maps to type ordinal N - 1.
+    static bool ParamTypeMatchesFilter(
+        SceneEditor::AnimatorParameter::Type t, int filterIdx) {
+        if (filterIdx <= 0) return true;
+        return int(t) == filterIdx - 1;
     }
 
     // Case-insensitive substring match used by the parameter
@@ -1690,14 +1701,28 @@ private:
         // -----------------------------------------------------------
         ImGui::Separator();
         ImGui::Text("Parameters (%zu)", ctrl->parameters.size());
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputTextWithHint(
-            "##ctrlparamfilter", "Filter parameters...",
-            m_controllerEditorParamFilter,
-            sizeof(m_controllerEditorParamFilter));
+        {
+            const char* typeFilterNames[] = {
+                "All", "Bool", "Float", "Int", "Trigger",
+                "Vec2", "Color", "String" };
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::Combo("##ctrlparamtype",
+                         &m_controllerEditorParamTypeFilter,
+                         typeFilterNames, 8);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputTextWithHint(
+                "##ctrlparamfilter", "Filter parameters...",
+                m_controllerEditorParamFilter,
+                sizeof(m_controllerEditorParamFilter));
+        }
         int removeParamAt = -1;
         for (int i = 0; i < int(ctrl->parameters.size()); ++i) {
             SceneEditor::AnimatorParameter& p = ctrl->parameters[size_t(i)];
+            if (!ParamTypeMatchesFilter(
+                    p.type, m_controllerEditorParamTypeFilter)) {
+                continue;
+            }
             if (!ParamNameMatchesFilter(
                     p.name, m_controllerEditorParamFilter)) {
                 continue;
@@ -3809,13 +3834,27 @@ private:
                 // known position.
                 if (!ctrl->parameters.empty()) {
                     ImGui::Text("Parameters");
-                    ImGui::SetNextItemWidth(-1.0f);
-                    ImGui::InputTextWithHint(
-                        "##animparamfilter", "Filter parameters...",
-                        m_animInspectorParamFilter,
-                        sizeof(m_animInspectorParamFilter));
+                    {
+                        const char* typeFilterNames[] = {
+                            "All", "Bool", "Float", "Int", "Trigger",
+                            "Vec2", "Color", "String" };
+                        ImGui::SetNextItemWidth(90.0f);
+                        ImGui::Combo("##animparamtype",
+                                     &m_animInspectorParamTypeFilter,
+                                     typeFilterNames, 8);
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(-1.0f);
+                        ImGui::InputTextWithHint(
+                            "##animparamfilter", "Filter parameters...",
+                            m_animInspectorParamFilter,
+                            sizeof(m_animInspectorParamFilter));
+                    }
                     using PT = SceneEditor::AnimatorParameter::Type;
                     for (const auto& p : ctrl->parameters) {
+                        if (!ParamTypeMatchesFilter(
+                                p.type, m_animInspectorParamTypeFilter)) {
+                            continue;
+                        }
                         if (!ParamNameMatchesFilter(
                                 p.name, m_animInspectorParamFilter)) {
                             continue;
@@ -6199,9 +6238,13 @@ private:
     // Parameter filters used by the controller editor + the per-
     // entity Animator inspector. Both treat an empty buffer as
     // "show every parameter" and otherwise match the parameter name
-    // against the buffer case-insensitively as a substring.
+    // against the buffer case-insensitively as a substring. The
+    // companion type-filter ints take 0 = "All" and 1..7 = the
+    // matching AnimatorParameter::Type ordinal + 1.
     char                m_controllerEditorParamFilter[64] = "";
     char                m_animInspectorParamFilter[64]    = "";
+    int                 m_controllerEditorParamTypeFilter = 0;
+    int                 m_animInspectorParamTypeFilter    = 0;
     // Animator Controller Editor follows the same pattern.
     bool                m_controllerEditorOpen     = false;
     bool                m_controllerEditorActivate = false;
