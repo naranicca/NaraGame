@@ -4,6 +4,8 @@
 #include "Component.h"
 
 #include <NaraGame/assets/MiniJson.h>
+#include <NaraGame/math/Vec2.h>
+#include <NaraGame/renderer/rhi/RHITypes.h>
 
 #include <string>
 #include <unordered_map>
@@ -45,9 +47,11 @@ public:
     // the editor's inspector picks the right widget per parameter.
     AssetGuid controller;
     int       currentState = -1;   // -1 = "not initialised yet"
-    std::unordered_map<std::string, bool>  paramBools;
-    std::unordered_map<std::string, float> paramFloats;
-    std::unordered_map<std::string, int>   paramInts;
+    std::unordered_map<std::string, bool>           paramBools;
+    std::unordered_map<std::string, float>          paramFloats;
+    std::unordered_map<std::string, int>            paramInts;
+    std::unordered_map<std::string, NaraGame::Vec2> paramVec2;
+    std::unordered_map<std::string, NaraGame::Color> paramColors;
 
     static const char* StaticTypeName() { return "Animator"; }
     const char* TypeName() const override { return StaticTypeName(); }

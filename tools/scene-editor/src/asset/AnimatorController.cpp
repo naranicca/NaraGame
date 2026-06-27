@@ -59,11 +59,31 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
                 if      (ts == "Float")   par.type = AnimatorParameter::Type::Float;
                 else if (ts == "Int")     par.type = AnimatorParameter::Type::Int;
                 else if (ts == "Trigger") par.type = AnimatorParameter::Type::Trigger;
+                else if (ts == "Vec2")    par.type = AnimatorParameter::Type::Vec2;
+                else if (ts == "Color")   par.type = AnimatorParameter::Type::Color;
                 else                      par.type = AnimatorParameter::Type::Bool;
                 par.defaultBool  = p.GetBool ("defaultBool",
                                               p.GetBool("defaultValue", false));
                 par.defaultFloat = float(p.GetNumber("defaultFloat", 0.0));
                 par.defaultInt   = p.GetInt ("defaultInt", 0);
+                if (const Value* v = p.Find("defaultVec2")) {
+                    if (v->IsArray() && v->arrayValue.size() >= 2) {
+                        auto pick = [&](size_t i) {
+                            const Value& vv = v->arrayValue[i];
+                            return vv.IsNumber() ? float(vv.numberValue) : 0.0f;
+                        };
+                        par.defaultVec2 = { pick(0), pick(1) };
+                    }
+                }
+                if (const Value* c = p.Find("defaultColor")) {
+                    if (c->IsArray() && c->arrayValue.size() >= 4) {
+                        auto pick = [&](size_t i) {
+                            const Value& vv = c->arrayValue[i];
+                            return vv.IsNumber() ? float(vv.numberValue) : 0.0f;
+                        };
+                        par.defaultColor = { pick(0), pick(1), pick(2), pick(3) };
+                    }
+                }
                 parameters.push_back(std::move(par));
             }
         }
@@ -90,6 +110,24 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
                                             t.GetBool("expected", true));
                 tr.valueFloat  = float(t.GetNumber("valueFloat", 0.0));
                 tr.valueInt    = t.GetInt ("valueInt", 0);
+                if (const Value* v = t.Find("valueVec2")) {
+                    if (v->IsArray() && v->arrayValue.size() >= 2) {
+                        auto pick = [&](size_t i) {
+                            const Value& vv = v->arrayValue[i];
+                            return vv.IsNumber() ? float(vv.numberValue) : 0.0f;
+                        };
+                        tr.valueVec2 = { pick(0), pick(1) };
+                    }
+                }
+                if (const Value* c = t.Find("valueColor")) {
+                    if (c->IsArray() && c->arrayValue.size() >= 4) {
+                        auto pick = [&](size_t i) {
+                            const Value& vv = c->arrayValue[i];
+                            return vv.IsNumber() ? float(vv.numberValue) : 0.0f;
+                        };
+                        tr.valueColor = { pick(0), pick(1), pick(2), pick(3) };
+                    }
+                }
                 tr.hasExitTime = t.GetBool ("hasExitTime", false);
                 tr.exitTime    = float(t.GetNumber("exitTime", 0.0));
                 tr.duration    = float(t.GetNumber("duration", 0.0));
@@ -122,10 +160,22 @@ Value AnimatorControllerAsset::ToJson() const {
         if      (p.type == AnimatorParameter::Type::Float)   tname = "Float";
         else if (p.type == AnimatorParameter::Type::Int)     tname = "Int";
         else if (p.type == AnimatorParameter::Type::Trigger) tname = "Trigger";
+        else if (p.type == AnimatorParameter::Type::Vec2)    tname = "Vec2";
+        else if (p.type == AnimatorParameter::Type::Color)   tname = "Color";
         o.Add("type",         Value::MakeString(tname));
         o.Add("defaultBool",  Value::MakeBool(p.defaultBool));
         o.Add("defaultFloat", Value::MakeNumber(p.defaultFloat));
         o.Add("defaultInt",   Value::MakeNumber(p.defaultInt));
+        Value pv = Value::MakeArray();
+        pv.Push(Value::MakeNumber(p.defaultVec2.x));
+        pv.Push(Value::MakeNumber(p.defaultVec2.y));
+        o.Add("defaultVec2", std::move(pv));
+        Value pc = Value::MakeArray();
+        pc.Push(Value::MakeNumber(p.defaultColor.r));
+        pc.Push(Value::MakeNumber(p.defaultColor.g));
+        pc.Push(Value::MakeNumber(p.defaultColor.b));
+        pc.Push(Value::MakeNumber(p.defaultColor.a));
+        o.Add("defaultColor", std::move(pc));
         parr.Push(std::move(o));
     }
     root.Add("parameters", std::move(parr));
@@ -148,6 +198,16 @@ Value AnimatorControllerAsset::ToJson() const {
         o.Add("valueBool",   Value::MakeBool(t.valueBool));
         o.Add("valueFloat",  Value::MakeNumber(t.valueFloat));
         o.Add("valueInt",    Value::MakeNumber(t.valueInt));
+        Value tv = Value::MakeArray();
+        tv.Push(Value::MakeNumber(t.valueVec2.x));
+        tv.Push(Value::MakeNumber(t.valueVec2.y));
+        o.Add("valueVec2", std::move(tv));
+        Value tc = Value::MakeArray();
+        tc.Push(Value::MakeNumber(t.valueColor.r));
+        tc.Push(Value::MakeNumber(t.valueColor.g));
+        tc.Push(Value::MakeNumber(t.valueColor.b));
+        tc.Push(Value::MakeNumber(t.valueColor.a));
+        o.Add("valueColor", std::move(tc));
         o.Add("hasExitTime", Value::MakeBool(t.hasExitTime));
         o.Add("exitTime",    Value::MakeNumber(t.exitTime));
         o.Add("duration",    Value::MakeNumber(t.duration));

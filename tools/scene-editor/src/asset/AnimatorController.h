@@ -3,6 +3,8 @@
 #include "AssetGuid.h"
 
 #include <NaraGame/assets/MiniJson.h>
+#include <NaraGame/math/Vec2.h>
+#include <NaraGame/renderer/rhi/RHITypes.h>
 
 #include <string>
 #include <vector>
@@ -31,13 +33,18 @@ struct AnimatorParameter {
     // one-shot bool: the runtime auto-resets the live value to false
     // the instant a transition fires that reads it. Live trigger
     // state still lives in AnimatorComponent::paramBools to keep the
-    // storage path consistent.
-    enum class Type { Bool, Float, Int, Trigger };
-    std::string name;
-    Type        type         = Type::Bool;
-    bool        defaultBool  = false;
-    float       defaultFloat = 0.0f;
-    int         defaultInt   = 0;
+    // storage path consistent. Vec2 / Color are component-wise
+    // equality-only -- their transitions skip the < / > rungs of the
+    // op ladder because the comparisons don't have a meaningful
+    // ordering anyway.
+    enum class Type { Bool, Float, Int, Trigger, Vec2, Color };
+    std::string     name;
+    Type            type         = Type::Bool;
+    bool            defaultBool  = false;
+    float           defaultFloat = 0.0f;
+    int             defaultInt   = 0;
+    NaraGame::Vec2  defaultVec2{0.0f, 0.0f};
+    NaraGame::Color defaultColor{0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 // Edge in the state machine. fromIdx == -1 means "any state" (i.e.
@@ -45,13 +52,15 @@ struct AnimatorParameter {
 // are). Transitions are checked in declaration order each frame.
 struct AnimatorTransition {
     enum class Op { Equals, NotEqual, Less, LessEqual, Greater, GreaterEqual };
-    int         fromIdx    = -1;
-    int         toIdx      =  0;
-    std::string param;
-    Op          op         = Op::Equals;
-    bool        valueBool  = true;
-    float       valueFloat = 0.0f;
-    int         valueInt   = 0;
+    int             fromIdx    = -1;
+    int             toIdx      =  0;
+    std::string     param;
+    Op              op         = Op::Equals;
+    bool            valueBool  = true;
+    float           valueFloat = 0.0f;
+    int             valueInt   = 0;
+    NaraGame::Vec2  valueVec2{0.0f, 0.0f};
+    NaraGame::Color valueColor{0.0f, 0.0f, 0.0f, 0.0f};
     // When `hasExitTime` is true, the transition only fires after the
     // source animation has played past `exitTime` of its total
     // duration (0..1 normalised). Pairs naturally with an empty

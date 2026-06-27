@@ -19,6 +19,24 @@ void AnimatorComponent::Serialize(Value& out) const {
     Value pi = Value::MakeObject();
     for (const auto& kv : paramInts)   pi.Add(kv.first, Value::MakeNumber(kv.second));
     out.Add("paramInts", std::move(pi));
+    Value pv = Value::MakeObject();
+    for (const auto& kv : paramVec2) {
+        Value arr = Value::MakeArray();
+        arr.Push(Value::MakeNumber(kv.second.x));
+        arr.Push(Value::MakeNumber(kv.second.y));
+        pv.Add(kv.first, std::move(arr));
+    }
+    out.Add("paramVec2", std::move(pv));
+    Value pc = Value::MakeObject();
+    for (const auto& kv : paramColors) {
+        Value arr = Value::MakeArray();
+        arr.Push(Value::MakeNumber(kv.second.r));
+        arr.Push(Value::MakeNumber(kv.second.g));
+        arr.Push(Value::MakeNumber(kv.second.b));
+        arr.Push(Value::MakeNumber(kv.second.a));
+        pc.Add(kv.first, std::move(arr));
+    }
+    out.Add("paramColors", std::move(pc));
 }
 
 void AnimatorComponent::Deserialize(const Value& obj) {
@@ -65,6 +83,35 @@ void AnimatorComponent::Deserialize(const Value& obj) {
                 const Value& v = pi->objectValues[i];
                 paramInts[pi->objectKeys[i]] =
                     v.IsNumber() ? int(v.numberValue) : 0;
+            }
+        }
+    }
+    paramVec2.clear();
+    if (const Value* pv = obj.Find("paramVec2")) {
+        if (pv->IsObject()) {
+            for (size_t i = 0; i < pv->objectKeys.size(); ++i) {
+                const Value& v = pv->objectValues[i];
+                if (!v.IsArray() || v.arrayValue.size() < 2) continue;
+                auto pick = [&](size_t k) {
+                    const Value& vv = v.arrayValue[k];
+                    return vv.IsNumber() ? float(vv.numberValue) : 0.0f;
+                };
+                paramVec2[pv->objectKeys[i]] = { pick(0), pick(1) };
+            }
+        }
+    }
+    paramColors.clear();
+    if (const Value* pc = obj.Find("paramColors")) {
+        if (pc->IsObject()) {
+            for (size_t i = 0; i < pc->objectKeys.size(); ++i) {
+                const Value& v = pc->objectValues[i];
+                if (!v.IsArray() || v.arrayValue.size() < 4) continue;
+                auto pick = [&](size_t k) {
+                    const Value& vv = v.arrayValue[k];
+                    return vv.IsNumber() ? float(vv.numberValue) : 0.0f;
+                };
+                paramColors[pc->objectKeys[i]] = {
+                    pick(0), pick(1), pick(2), pick(3) };
             }
         }
     }

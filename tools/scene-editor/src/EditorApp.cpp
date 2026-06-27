@@ -563,6 +563,14 @@ private:
                     if (an.paramBools.find(p.name) == an.paramBools.end()) {
                         an.paramBools[p.name] = false;
                     }
+                } else if (p.type == PT::Vec2) {
+                    if (an.paramVec2.find(p.name) == an.paramVec2.end()) {
+                        an.paramVec2[p.name] = p.defaultVec2;
+                    }
+                } else if (p.type == PT::Color) {
+                    if (an.paramColors.find(p.name) == an.paramColors.end()) {
+                        an.paramColors[p.name] = p.defaultColor;
+                    }
                 } else {
                     if (an.paramBools.find(p.name) == an.paramBools.end()) {
                         an.paramBools[p.name] = p.defaultBool;
@@ -660,6 +668,22 @@ private:
                 const int v = (it != an.paramInts.end())
                             ? it->second : decl->defaultInt;
                 fire = cmp(v, tr.valueInt);
+            } else if (decl->type == PT::Vec2) {
+                auto it = an.paramVec2.find(tr.param);
+                const NaraGame::Vec2 v = (it != an.paramVec2.end())
+                    ? it->second : decl->defaultVec2;
+                const bool eq = (v.x == tr.valueVec2.x &&
+                                 v.y == tr.valueVec2.y);
+                fire = (tr.op == OP::NotEqual) ? !eq : eq;
+            } else if (decl->type == PT::Color) {
+                auto it = an.paramColors.find(tr.param);
+                const NaraGame::Color v = (it != an.paramColors.end())
+                    ? it->second : decl->defaultColor;
+                const bool eq = (v.r == tr.valueColor.r &&
+                                 v.g == tr.valueColor.g &&
+                                 v.b == tr.valueColor.b &&
+                                 v.a == tr.valueColor.a);
+                fire = (tr.op == OP::NotEqual) ? !eq : eq;
             } else {
                 // Bool + Trigger share the paramBools map. Bool only
                 // supports == / != meaningfully; the other ops
@@ -1403,6 +1427,23 @@ private:
                 ImGui::BeginDisabled();
                 ImGui::Checkbox("##gval", &draft);
                 ImGui::EndDisabled();
+            } else if (decl && decl->type == PT::Vec2) {
+                float v2[2] = { tr.valueVec2.x, tr.valueVec2.y };
+                if (ImGui::DragFloat2("##gval", v2, 0.05f,
+                                       0.0f, 0.0f, "%.2f")) {
+                    tr.valueVec2 = { v2[0], v2[1] };
+                    dirty = true;
+                }
+            } else if (decl && decl->type == PT::Color) {
+                float col[4] = { tr.valueColor.r, tr.valueColor.g,
+                                 tr.valueColor.b, tr.valueColor.a };
+                if (ImGui::ColorEdit4("##gval", col,
+                                       ImGuiColorEditFlags_NoLabel |
+                                       ImGuiColorEditFlags_NoInputs |
+                                       ImGuiColorEditFlags_AlphaPreviewHalf)) {
+                    tr.valueColor = { col[0], col[1], col[2], col[3] };
+                    dirty = true;
+                }
             } else {
                 bool draft = tr.valueBool;
                 if (ImGui::Checkbox("##gval", &draft)) {
@@ -1619,24 +1660,44 @@ private:
                 dirty = true;
             }
             ImGui::SameLine();
-            const char* typeNames[] = { "Bool", "Float", "Int", "Trigger" };
+            const char* typeNames[] = { "Bool", "Float", "Int", "Trigger",
+                                        "Vec2", "Color" };
             int typeIdx = int(p.type);
             ImGui::SetNextItemWidth(90.0f);
-            if (ImGui::Combo("##ptype", &typeIdx, typeNames, 4)) {
+            if (ImGui::Combo("##ptype", &typeIdx, typeNames, 6)) {
                 p.type = static_cast<SceneEditor::AnimatorParameter::Type>(typeIdx);
                 dirty = true;
             }
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(120.0f);
             using PT = SceneEditor::AnimatorParameter::Type;
             if (p.type == PT::Float) {
+                ImGui::SetNextItemWidth(120.0f);
                 if (ImGui::DragFloat("##pdef", &p.defaultFloat, 0.05f,
                                      0.0f, 0.0f, "def %.2f")) dirty = true;
             } else if (p.type == PT::Int) {
+                ImGui::SetNextItemWidth(120.0f);
                 if (ImGui::DragInt("##pdef", &p.defaultInt, 0.2f,
                                     0, 0, "def %d")) dirty = true;
             } else if (p.type == PT::Trigger) {
                 ImGui::TextDisabled("(auto-reset)");
+            } else if (p.type == PT::Vec2) {
+                float v2[2] = { p.defaultVec2.x, p.defaultVec2.y };
+                ImGui::SetNextItemWidth(120.0f);
+                if (ImGui::DragFloat2("##pdef", v2, 0.05f,
+                                       0.0f, 0.0f, "%.2f")) {
+                    p.defaultVec2 = { v2[0], v2[1] };
+                    dirty = true;
+                }
+            } else if (p.type == PT::Color) {
+                float col[4] = { p.defaultColor.r, p.defaultColor.g,
+                                 p.defaultColor.b, p.defaultColor.a };
+                if (ImGui::ColorEdit4("##pdef", col,
+                                       ImGuiColorEditFlags_NoLabel |
+                                       ImGuiColorEditFlags_NoInputs |
+                                       ImGuiColorEditFlags_AlphaPreviewHalf)) {
+                    p.defaultColor = { col[0], col[1], col[2], col[3] };
+                    dirty = true;
+                }
             } else {
                 bool draft = p.defaultBool;
                 if (ImGui::Checkbox("default", &draft)) {
@@ -1763,13 +1824,28 @@ private:
             } else if (decl && decl->type == PT::Int) {
                 if (ImGui::DragInt("##val", &tr.valueInt)) dirty = true;
             } else if (decl && decl->type == PT::Trigger) {
-                // Force expected = true for triggers; show a disabled
-                // checkbox so the rule is visible.
                 if (tr.valueBool != true) { tr.valueBool = true; dirty = true; }
                 bool draft = true;
                 ImGui::BeginDisabled();
                 ImGui::Checkbox("##val", &draft);
                 ImGui::EndDisabled();
+            } else if (decl && decl->type == PT::Vec2) {
+                float v2[2] = { tr.valueVec2.x, tr.valueVec2.y };
+                if (ImGui::DragFloat2("##val", v2, 0.05f,
+                                       0.0f, 0.0f, "%.2f")) {
+                    tr.valueVec2 = { v2[0], v2[1] };
+                    dirty = true;
+                }
+            } else if (decl && decl->type == PT::Color) {
+                float col[4] = { tr.valueColor.r, tr.valueColor.g,
+                                 tr.valueColor.b, tr.valueColor.a };
+                if (ImGui::ColorEdit4("##val", col,
+                                       ImGuiColorEditFlags_NoLabel |
+                                       ImGuiColorEditFlags_NoInputs |
+                                       ImGuiColorEditFlags_AlphaPreviewHalf)) {
+                    tr.valueColor = { col[0], col[1], col[2], col[3] };
+                    dirty = true;
+                }
             } else {
                 bool draft = tr.valueBool;
                 if (ImGui::Checkbox("##val", &draft)) {
@@ -3699,6 +3775,27 @@ private:
                             if (ImGui::Button(label)) {
                                 UndoSnapshot();
                                 an.paramBools[p.name] = true;
+                                changed = true;
+                            }
+                        } else if (p.type == PT::Vec2) {
+                            NaraGame::Vec2 vv = p.defaultVec2;
+                            auto it = an.paramVec2.find(p.name);
+                            if (it != an.paramVec2.end()) vv = it->second;
+                            float v2[2] = { vv.x, vv.y };
+                            if (ImGui::DragFloat2(p.name.c_str(), v2, 0.05f)) {
+                                UndoSnapshot();
+                                an.paramVec2[p.name] = { v2[0], v2[1] };
+                                changed = true;
+                            }
+                        } else if (p.type == PT::Color) {
+                            NaraGame::Color cc = p.defaultColor;
+                            auto it = an.paramColors.find(p.name);
+                            if (it != an.paramColors.end()) cc = it->second;
+                            float col[4] = { cc.r, cc.g, cc.b, cc.a };
+                            if (ImGui::ColorEdit4(p.name.c_str(), col)) {
+                                UndoSnapshot();
+                                an.paramColors[p.name] = {
+                                    col[0], col[1], col[2], col[3] };
                                 changed = true;
                             }
                         } else {
