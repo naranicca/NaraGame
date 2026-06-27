@@ -1607,9 +1607,24 @@ private:
         int removeStateAt = -1;
         int moveStateUp   = -1;
         int moveStateDown = -1;
+        int stateInsertAt = -1;
         for (int i = 0; i < int(ctrl->states.size()); ++i) {
             SceneEditor::AnimatorState& st = ctrl->states[size_t(i)];
             ImGui::PushID(i);
+            if (ImGui::SmallButton("...##strow")) {
+                ImGui::OpenPopup("strowctx");
+            }
+            if (ImGui::BeginPopup("strowctx")) {
+                if (ImGui::MenuItem("Copy")) {
+                    m_clipboardStates = { st };
+                }
+                ImGui::BeginDisabled(m_clipboardStates.empty());
+                if (ImGui::MenuItem("Paste above")) stateInsertAt = i;
+                if (ImGui::MenuItem("Paste below")) stateInsertAt = i + 1;
+                ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
             ImGui::Text("%2d", i);
             ImGui::SameLine();
             char nameBuf[64];
@@ -1690,6 +1705,32 @@ private:
                 if (t.fromIdx > removeStateAt) t.fromIdx--;
                 if (t.toIdx   > removeStateAt) t.toIdx--;
             }
+            dirty = true;
+        }
+        if (stateInsertAt >= 0 && !m_clipboardStates.empty()) {
+            // Inserting in the middle shifts every dependent index
+            // that lands at or after the insertion point by the
+            // paste count. Transitions + defaultState + graph
+            // selection all need the bump in lockstep so the
+            // controller stays internally consistent.
+            const int count = int(m_clipboardStates.size());
+            for (auto& t : ctrl->transitions) {
+                if (t.fromIdx >= stateInsertAt) t.fromIdx += count;
+                if (t.toIdx   >= stateInsertAt) t.toIdx   += count;
+            }
+            if (ctrl->defaultState >= stateInsertAt) {
+                ctrl->defaultState += count;
+            }
+            auto bumpPtr = [&](int& v) {
+                if (v >= stateInsertAt) v += count;
+            };
+            bumpPtr(m_graphSelectedState);
+            bumpPtr(m_graphDragState);
+            bumpPtr(m_graphPendingFrom);
+            bumpPtr(m_graphContextNode);
+            ctrl->states.insert(ctrl->states.begin() + stateInsertAt,
+                                m_clipboardStates.begin(),
+                                m_clipboardStates.end());
             dirty = true;
         }
         if (ImGui::Button("+ State")) {
@@ -1813,6 +1854,7 @@ private:
                 sizeof(m_controllerEditorParamFilter));
         }
         int removeParamAt = -1;
+        int paramInsertAt = -1;
         for (int i = 0; i < int(ctrl->parameters.size()); ++i) {
             SceneEditor::AnimatorParameter& p = ctrl->parameters[size_t(i)];
             if (!ParamTypeMatchesFilter(
@@ -1824,6 +1866,20 @@ private:
                 continue;
             }
             ImGui::PushID(10000 + i);
+            if (ImGui::SmallButton("...##prow")) {
+                ImGui::OpenPopup("prowctx");
+            }
+            if (ImGui::BeginPopup("prowctx")) {
+                if (ImGui::MenuItem("Copy")) {
+                    m_clipboardParameters = { p };
+                }
+                ImGui::BeginDisabled(m_clipboardParameters.empty());
+                if (ImGui::MenuItem("Paste above")) paramInsertAt = i;
+                if (ImGui::MenuItem("Paste below")) paramInsertAt = i + 1;
+                ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
             char nameBuf[64];
             std::snprintf(nameBuf, sizeof(nameBuf), "%s", p.name.c_str());
             ImGui::SetNextItemWidth(160.0f);
@@ -1893,6 +1949,13 @@ private:
         }
         if (removeParamAt >= 0) {
             ctrl->parameters.erase(ctrl->parameters.begin() + removeParamAt);
+            dirty = true;
+        }
+        if (paramInsertAt >= 0 && !m_clipboardParameters.empty()) {
+            ctrl->parameters.insert(
+                ctrl->parameters.begin() + paramInsertAt,
+                m_clipboardParameters.begin(),
+                m_clipboardParameters.end());
             dirty = true;
         }
         if (ImGui::Button("+ Param")) {
@@ -2087,10 +2150,25 @@ private:
         int removeTrAt = -1;
         int moveTrUp   = -1;
         int moveTrDown = -1;
+        int trInsertAt = -1;
         for (int i = 0; i < int(ctrl->transitions.size()); ++i) {
             SceneEditor::AnimatorTransition& tr = ctrl->transitions[size_t(i)];
             if (!transitionPassesFilter(tr)) continue;
             ImGui::PushID(20000 + i);
+            if (ImGui::SmallButton("...##trrow")) {
+                ImGui::OpenPopup("trrowctx");
+            }
+            if (ImGui::BeginPopup("trrowctx")) {
+                if (ImGui::MenuItem("Copy")) {
+                    m_clipboardTransitions = { tr };
+                }
+                ImGui::BeginDisabled(m_clipboardTransitions.empty());
+                if (ImGui::MenuItem("Paste above")) trInsertAt = i;
+                if (ImGui::MenuItem("Paste below")) trInsertAt = i + 1;
+                ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
             // From combo: "Any" (-1) + state names.
             const char* fromLabel = (tr.fromIdx < 0)
                 ? "Any"
@@ -2264,6 +2342,27 @@ private:
         }
         if (removeTrAt >= 0) {
             ctrl->transitions.erase(ctrl->transitions.begin() + removeTrAt);
+            dirty = true;
+        }
+        if (trInsertAt >= 0 && !m_clipboardTransitions.empty()) {
+            // Per-row paste reuses the M5c33 clamp: edges whose
+            // fromIdx / toIdx fall outside the current state count
+            // land at safe sentinels so the row stays editable
+            // instead of crashing the runtime.
+            const int N = int(ctrl->states.size());
+            std::vector<SceneEditor::AnimatorTransition> pending;
+            pending.reserve(m_clipboardTransitions.size());
+            for (const auto& src : m_clipboardTransitions) {
+                SceneEditor::AnimatorTransition copy = src;
+                if (copy.fromIdx >= N) copy.fromIdx = -1;
+                if (copy.toIdx < 0 || copy.toIdx >= N) {
+                    copy.toIdx = (N > 0) ? 0 : -1;
+                }
+                pending.push_back(std::move(copy));
+            }
+            ctrl->transitions.insert(
+                ctrl->transitions.begin() + trInsertAt,
+                pending.begin(), pending.end());
             dirty = true;
         }
         if (ImGui::Button("+ Transition") && !ctrl->states.empty()) {
@@ -2472,6 +2571,7 @@ private:
         int  removeAt = -1;
         int  moveUp   = -1;
         int  moveDown = -1;
+        int  frameInsertAt = -1;
         for (size_t i = 0; i < an->frames.size(); ++i) {
             SceneEditor::AnimationFrame& fr = an->frames[i];
             if (!ParamNameMatchesFilter(
@@ -2479,6 +2579,24 @@ private:
                 continue;
             }
             ImGui::PushID(int(i));
+            if (ImGui::SmallButton("...##frrow")) {
+                ImGui::OpenPopup("frrowctx");
+            }
+            if (ImGui::BeginPopup("frrowctx")) {
+                if (ImGui::MenuItem("Copy")) {
+                    m_clipboardFrames = { fr };
+                }
+                ImGui::BeginDisabled(m_clipboardFrames.empty());
+                if (ImGui::MenuItem("Paste above")) {
+                    frameInsertAt = int(i);
+                }
+                if (ImGui::MenuItem("Paste below")) {
+                    frameInsertAt = int(i) + 1;
+                }
+                ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
             ImGui::Text("%2zu", i);
             ImGui::SameLine();
             ImGui::SetNextItemWidth(180.0f);
@@ -2522,6 +2640,12 @@ private:
         }
         if (removeAt >= 0) {
             an->frames.erase(an->frames.begin() + removeAt);
+            dirty = true;
+        }
+        if (frameInsertAt >= 0 && !m_clipboardFrames.empty()) {
+            an->frames.insert(an->frames.begin() + frameInsertAt,
+                              m_clipboardFrames.begin(),
+                              m_clipboardFrames.end());
             dirty = true;
         }
         if (ImGui::Button("+ Frame")) {
@@ -2625,6 +2749,7 @@ private:
         };
         bool anyTimeChanged = false;
         int  removeEvAt = -1;
+        int  eventInsertAt = -1;
         if (m_animEditorSelEvent >= int(an->events.size())) {
             m_animEditorSelEvent = -1;
         }
@@ -2635,6 +2760,24 @@ private:
                 continue;
             }
             ImGui::PushID(int(60000 + i));
+            if (ImGui::SmallButton("...##evrow")) {
+                ImGui::OpenPopup("evrowctx");
+            }
+            if (ImGui::BeginPopup("evrowctx")) {
+                if (ImGui::MenuItem("Copy")) {
+                    m_clipboardEvents = { ev };
+                }
+                ImGui::BeginDisabled(m_clipboardEvents.empty());
+                if (ImGui::MenuItem("Paste above")) {
+                    eventInsertAt = int(i);
+                }
+                if (ImGui::MenuItem("Paste below")) {
+                    eventInsertAt = int(i) + 1;
+                }
+                ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
             const bool selRow = (m_animEditorSelEvent == int(i));
             // Jump-to button. Selects the row + parks the scrubber on
             // the event's time, paused, so the preview locks onto
@@ -2717,6 +2860,15 @@ private:
         if (removeEvAt >= 0) {
             an->events.erase(an->events.begin() + removeEvAt);
             dirty = true;
+        }
+        if (eventInsertAt >= 0 && !m_clipboardEvents.empty()) {
+            an->events.insert(an->events.begin() + eventInsertAt,
+                              m_clipboardEvents.begin(),
+                              m_clipboardEvents.end());
+            dirty = true;
+            if (m_animEditorAutoSort) {
+                SortEventsByTime();
+            }
         }
         bool eventAdded = false;
         if (ImGui::Button("+ Event")) {
