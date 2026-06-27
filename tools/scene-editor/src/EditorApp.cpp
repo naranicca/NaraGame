@@ -267,6 +267,7 @@ public:
         DrawViewportPanel();
         DrawConsolePanel();
         DrawProjectPanel();
+        DrawTilePalettePanel();
         DrawNewProjectModal();
         DrawSortingLayersModal();
         DrawSpriteEditorWindow();
@@ -1860,6 +1861,80 @@ private:
         return SceneEditor::kInvalidEntityId;
     }
 
+    // Tilemap paint mode. Returns true when the input was consumed so
+    // the rest of HandleViewportInput (gizmo + selection) is skipped.
+    // Cells are addressed by floored (rx, ry) / cellWorld so the user
+    // can drag a continuous stroke and every crossed cell ends up
+    // painted / erased.
+    bool HandleTilemapPaintInput(bool hovered,
+                                 const ImVec2& panelMin,
+                                 const ImVec2& panelSize) {
+        if (m_paintTool == PaintTool::None) return false;
+        SceneEditor::Entity* selEntity = m_scene.Get(m_selection);
+        if (!selEntity) return false;
+        SceneEditor::TilemapComponent* tm =
+            selEntity->GetComponent<SceneEditor::TilemapComponent>();
+        if (!tm || !tm->tileset.IsValid()) return false;
+
+        // Resolve world cell size via the texture's PPU; matches the
+        // viewport tilemap renderer so the brush snaps exactly.
+        SceneEditor::TextureImportSettings imp;
+        if (const auto* entry = m_assetDb.FindByGuid(tm->tileset)) {
+            imp.FromJson(entry->importSettings);
+        }
+        const float cellWorldW = float(tm->cellPixelW) / imp.pixelsPerUnit;
+        const float cellWorldH = float(tm->cellPixelH) / imp.pixelsPerUnit;
+        if (cellWorldW <= 0.0f || cellWorldH <= 0.0f) return true;
+
+        const ImVec2 ep   = EntityWorldPos(*selEntity);
+        const ImVec2 mp   = ImGui::GetMousePos();
+        const ImVec2 wp   = ScreenToWorld(mp, panelMin, panelSize);
+        const float  rx   = wp.x - ep.x;
+        const float  ry   = wp.y - ep.y;
+        const int    gx   = int(std::floor(rx / cellWorldW));
+        const int    gy   = int(std::floor(ry / cellWorldH));
+
+        // Ghost overlay: shows the cell that would be painted/erased.
+        if (hovered) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 c = WorldToScreen(ep, panelMin, panelSize);
+            const float  z = m_viewCam.zoom;
+            const ImVec2 a{c.x + (gx * cellWorldW)     * z,
+                           c.y - ((gy + 1) * cellWorldH) * z};
+            const ImVec2 b{c.x + ((gx + 1) * cellWorldW) * z,
+                           c.y - (gy       * cellWorldH) * z};
+            const ImU32 ghostFill = (m_paintTool == PaintTool::Brush)
+                ? IM_COL32(120, 240, 120,  50)
+                : IM_COL32(240, 120, 120,  50);
+            const ImU32 ghostLine = (m_paintTool == PaintTool::Brush)
+                ? IM_COL32(120, 240, 120, 255)
+                : IM_COL32(240, 120, 120, 255);
+            dl->AddRectFilled(a, b, ghostFill);
+            dl->AddRect(a, b, ghostLine, 0.0f, 0, 1.5f);
+        }
+
+        bool changed = false;
+        if (hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            if (m_paintTool == PaintTool::Brush) {
+                auto it = tm->cells.find({gx, gy});
+                if (it == tm->cells.end() ||
+                    it->second != m_paintTileIndex) {
+                    tm->cells[{gx, gy}] = m_paintTileIndex;
+                    changed = true;
+                }
+            } else {  // Eraser
+                if (tm->cells.erase({gx, gy}) > 0) {
+                    changed = true;
+                }
+            }
+        }
+        if (changed) m_scene.MarkDirty();
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            UpdateWindowTitle();
+        }
+        return true;
+    }
+
     void HandleViewportInput(bool hovered, bool active,
                              const ImVec2& panelMin,
                              const ImVec2& panelSize) {
@@ -1884,6 +1959,14 @@ private:
             const ImVec2 d = io.MouseDelta;
             m_viewCam.center.x -= d.x / m_viewCam.zoom;
             m_viewCam.center.y += d.y / m_viewCam.zoom;  // screen Y inverted
+        }
+
+        // Tilemap paint dispatch. When the selected entity has a
+        // Tilemap component AND a paint tool is active, the left mouse
+        // belongs to painting; the gizmo + selection flow below is
+        // skipped. Middle-drag pan + wheel zoom still work above.
+        if (HandleTilemapPaintInput(hovered, panelMin, panelSize)) {
+            return;
         }
 
         // Hover feedback: highlight whichever gizmo handle the mouse is
@@ -2562,6 +2645,126 @@ private:
         ImGui::End();
     }
 
+    void DrawTilePalettePanel() {
+        if (!ImGui::Begin("Tile Palette")) {
+            ImGui::End();
+            return;
+        }
+        // The palette is bound to whichever entity is currently
+        // selected; without a Tilemap on that entity there's nothing to
+        // paint into.
+        SceneEditor::Entity* selEntity = m_scene.Get(m_selection);
+        SceneEditor::TilemapComponent* tm = selEntity
+            ? selEntity->GetComponent<SceneEditor::TilemapComponent>()
+            : nullptr;
+        if (!tm) {
+            ImGui::TextDisabled("Select a Tilemap entity to paint.");
+            ImGui::End();
+            return;
+        }
+        if (!tm->tileset.IsValid()) {
+            ImGui::TextDisabled("Tilemap has no tileset assigned.");
+            ImGui::End();
+            return;
+        }
+        NaraGame::RHITexture* tex =
+            m_assetDb.GetTexture(GetDevice(), tm->tileset);
+        if (!tex || tex->Width() == 0 || tex->Height() == 0) {
+            ImGui::TextDisabled("Tileset texture unavailable.");
+            ImGui::End();
+            return;
+        }
+        const int texCols = int(tex->Width())  / tm->cellPixelW;
+        const int texRows = int(tex->Height()) / tm->cellPixelH;
+        if (texCols <= 0 || texRows <= 0) {
+            ImGui::TextDisabled("Cell size larger than texture.");
+            ImGui::End();
+            return;
+        }
+
+        // Toolbar: tool toggles + active tile indicator.
+        auto toolBtn = [&](const char* label, PaintTool tool) {
+            const bool active = (m_paintTool == tool);
+            if (active) ImGui::PushStyleColor(ImGuiCol_Button,
+                                              IM_COL32(220, 180, 70, 255));
+            const bool clicked = ImGui::Button(label);
+            if (active) ImGui::PopStyleColor();
+            if (clicked) {
+                m_paintTool = active ? PaintTool::None : tool;
+            }
+        };
+        toolBtn("Brush",  PaintTool::Brush);
+        ImGui::SameLine();
+        toolBtn("Eraser", PaintTool::Eraser);
+        ImGui::SameLine();
+        ImGui::TextDisabled("active tile: %d", m_paintTileIndex);
+        ImGui::Separator();
+
+        // Texture preview, scale-to-fit.
+        const float texW  = float(tex->Width());
+        const float texH  = float(tex->Height());
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        float scale = std::min(avail.x / texW, avail.y / texH);
+        if (scale <= 0.0f) scale = 1.0f;
+        const ImVec2 imgSize{texW * scale, texH * scale};
+        const ImVec2 imgMin = ImGui::GetCursorScreenPos();
+
+        const ImTextureID texId =
+            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                tex->GetNativeView()));
+        ImGui::Image(texId, imgSize);
+
+        // Capture mouse on top of the image.
+        ImGui::SetCursorScreenPos(imgMin);
+        ImGui::InvisibleButton("##palette_hit", imgSize,
+                               ImGuiButtonFlags_MouseButtonLeft);
+        const bool clicked = ImGui::IsItemClicked();
+
+        // Grid overlay + active cell highlight.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImU32 gridCol = IM_COL32(255, 255, 255, 60);
+        const float cellPxScreenW = float(tm->cellPixelW) * scale;
+        const float cellPxScreenH = float(tm->cellPixelH) * scale;
+        for (int r = 0; r <= texRows; ++r) {
+            const float y = imgMin.y + r * cellPxScreenH;
+            dl->AddLine(ImVec2{imgMin.x,             y},
+                        ImVec2{imgMin.x + imgSize.x, y}, gridCol, 1.0f);
+        }
+        for (int cc = 0; cc <= texCols; ++cc) {
+            const float x = imgMin.x + cc * cellPxScreenW;
+            dl->AddLine(ImVec2{x, imgMin.y},
+                        ImVec2{x, imgMin.y + imgSize.y}, gridCol, 1.0f);
+        }
+        if (m_paintTileIndex >= 0 &&
+            m_paintTileIndex < texCols * texRows) {
+            const int col = m_paintTileIndex % texCols;
+            const int row = m_paintTileIndex / texCols;
+            const ImVec2 a{imgMin.x +  col      * cellPxScreenW,
+                           imgMin.y +  row      * cellPxScreenH};
+            const ImVec2 b{imgMin.x + (col + 1) * cellPxScreenW,
+                           imgMin.y + (row + 1) * cellPxScreenH};
+            dl->AddRect(a, b, IM_COL32(255, 220, 60, 255),
+                        0.0f, 0, 2.0f);
+        }
+
+        if (clicked) {
+            const ImVec2 mp = ImGui::GetMousePos();
+            const int px = int((mp.x - imgMin.x) / scale);
+            const int py = int((mp.y - imgMin.y) / scale);
+            const int col = px / tm->cellPixelW;
+            const int row = py / tm->cellPixelH;
+            if (col >= 0 && col < texCols && row >= 0 && row < texRows) {
+                m_paintTileIndex = row * texCols + col;
+                // Auto-switch to Brush so a fresh palette selection
+                // skips the extra "click Brush" step.
+                if (m_paintTool == PaintTool::None) {
+                    m_paintTool = PaintTool::Brush;
+                }
+            }
+        }
+        ImGui::End();
+    }
+
     void DrawProjectPanel() {
         ImGui::Begin("Project");
         if (!m_project.IsOpen()) {
@@ -2730,6 +2933,12 @@ private:
     // border editing works in every slice mode, not just Manual.
     BorderDragSide      m_borderDrag        = BorderDragSide::None;
     BorderDragSide      m_borderHover       = BorderDragSide::None;
+    // Tilemap paint state. m_paintTileIndex survives selection changes
+    // so the user keeps their brush when switching maps that share a
+    // tileset.
+    enum class PaintTool { None, Brush, Eraser };
+    PaintTool           m_paintTool         = PaintTool::None;
+    int                 m_paintTileIndex    = 0;
     // New Project modal state.
     bool                m_openNewProjectModal = false;
     std::array<char, 256> m_newProjectName{};
