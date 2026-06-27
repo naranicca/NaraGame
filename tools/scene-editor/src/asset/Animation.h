@@ -3,6 +3,8 @@
 #include "AssetGuid.h"
 
 #include <NaraGame/assets/MiniJson.h>
+#include <NaraGame/math/Vec2.h>
+#include <NaraGame/renderer/rhi/RHITypes.h>
 
 #include <string>
 #include <vector>
@@ -24,11 +26,16 @@ struct AnimationFrame {
 // float, int)" payload -- every callback gets the same surface, the
 // receiver picks whatever it cares about.
 struct AnimationEvent {
-    float       time = 0.0f;       // seconds from animation start
-    std::string name;
-    std::string stringArg;
-    float       floatArg = 0.0f;
-    int         intArg   = 0;
+    float          time = 0.0f;       // seconds from animation start
+    std::string    name;
+    std::string    stringArg;
+    float          floatArg = 0.0f;
+    int            intArg   = 0;
+    bool           boolArg  = false;
+    NaraGame::Vec2 vec2Arg{0.0f, 0.0f};
+    // Defaults to fully transparent so "no colour set" is unambiguous:
+    // the formatted log skips colour when alpha == 0.
+    NaraGame::Color colorArg{0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 // .nanim asset: an ordered list of frames sampled from a single source

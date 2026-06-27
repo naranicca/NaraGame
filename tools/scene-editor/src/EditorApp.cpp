@@ -313,24 +313,60 @@ private:
         SetWindowTitle(m_hwnd, title);
     }
 
+    // Build a "[k=v k=v ...]" payload string from whichever args of
+    // an AnimationEvent differ from their defaults. Returned empty
+    // when nothing's set.
+    static std::string FormatAnimationEventArgs(
+        const SceneEditor::AnimationEvent& ev) {
+        std::string out;
+        auto append = [&](const std::string& s) {
+            if (!out.empty()) out += ' ';
+            out += s;
+        };
+        char buf[128];
+        if (!ev.stringArg.empty()) {
+            std::snprintf(buf, sizeof(buf), "s=\"%s\"",
+                          ev.stringArg.c_str());
+            append(buf);
+        }
+        if (ev.floatArg != 0.0f) {
+            std::snprintf(buf, sizeof(buf), "f=%.3f", double(ev.floatArg));
+            append(buf);
+        }
+        if (ev.intArg != 0) {
+            std::snprintf(buf, sizeof(buf), "i=%d", ev.intArg);
+            append(buf);
+        }
+        if (ev.boolArg) append("b=true");
+        if (ev.vec2Arg.x != 0.0f || ev.vec2Arg.y != 0.0f) {
+            std::snprintf(buf, sizeof(buf), "v=(%.3f,%.3f)",
+                          double(ev.vec2Arg.x), double(ev.vec2Arg.y));
+            append(buf);
+        }
+        if (ev.colorArg.a != 0.0f) {
+            std::snprintf(buf, sizeof(buf), "c=(%.2f,%.2f,%.2f,%.2f)",
+                          double(ev.colorArg.r), double(ev.colorArg.g),
+                          double(ev.colorArg.b), double(ev.colorArg.a));
+            append(buf);
+        }
+        if (out.empty()) return out;
+        return "[" + out + "]";
+    }
+
     // Append one entry to the rolling event log. Trim from the front
     // so the tail (and Console rendering) stays bounded. Non-default
-    // args get appended as `["s" f i]` so the receiver can tell at a
-    // glance which payload reached them.
+    // args get appended in a `[s="x" f=.. i=.. ...]` block so the
+    // receiver can tell at a glance which payload reached them.
     void LogAnimationEvent(const std::string& entityName,
                            const std::string& animName,
                            const SceneEditor::AnimationEvent& ev) {
-        const bool hasArgs = !ev.stringArg.empty() ||
-                             ev.floatArg != 0.0f ||
-                             ev.intArg   != 0;
-        char buf[320];
-        if (hasArgs) {
+        const std::string args = FormatAnimationEventArgs(ev);
+        char buf[512];
+        if (!args.empty()) {
             std::snprintf(buf, sizeof(buf),
-                          "%s | %s @ %.2fs : %s [\"%s\" %.3f %d]",
+                          "%s | %s @ %.2fs : %s %s",
                           entityName.c_str(), animName.c_str(),
-                          ev.time, ev.name.c_str(),
-                          ev.stringArg.c_str(),
-                          double(ev.floatArg), ev.intArg);
+                          ev.time, ev.name.c_str(), args.c_str());
         } else {
             std::snprintf(buf, sizeof(buf),
                           "%s | %s @ %.2fs : %s",
@@ -1993,13 +2029,43 @@ private:
                 dirty = true;
             }
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(80.0f);
+            ImGui::SetNextItemWidth(70.0f);
             if (ImGui::DragFloat("##evfarg", &ev.floatArg, 0.05f,
                                   0.0f, 0.0f, "f %.2f")) dirty = true;
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(60.0f);
+            ImGui::SetNextItemWidth(55.0f);
             if (ImGui::DragInt("##eviarg", &ev.intArg, 0.2f,
                                 0, 0, "i %d")) dirty = true;
+            ImGui::SameLine();
+            {
+                bool draft = ev.boolArg;
+                if (ImGui::Checkbox("##evbarg", &draft)) {
+                    ev.boolArg = draft;
+                    dirty = true;
+                }
+            }
+            ImGui::SameLine();
+            {
+                float v2[2] = { ev.vec2Arg.x, ev.vec2Arg.y };
+                ImGui::SetNextItemWidth(95.0f);
+                if (ImGui::DragFloat2("##evv2arg", v2, 0.05f,
+                                       0.0f, 0.0f, "%.2f")) {
+                    ev.vec2Arg = { v2[0], v2[1] };
+                    dirty = true;
+                }
+            }
+            ImGui::SameLine();
+            {
+                float col[4] = { ev.colorArg.r, ev.colorArg.g,
+                                 ev.colorArg.b, ev.colorArg.a };
+                if (ImGui::ColorEdit4("##evcarg", col,
+                                       ImGuiColorEditFlags_NoLabel |
+                                       ImGuiColorEditFlags_NoInputs |
+                                       ImGuiColorEditFlags_AlphaPreviewHalf)) {
+                    ev.colorArg = { col[0], col[1], col[2], col[3] };
+                    dirty = true;
+                }
+            }
             ImGui::SameLine();
             if (ImGui::SmallButton("X")) removeEvAt = int(i);
             ImGui::PopID();
@@ -2187,16 +2253,13 @@ private:
                         if (hovered >= 0) {
                             const auto& ev =
                                 an->events[size_t(hovered)];
-                            const bool hasArgs =
-                                !ev.stringArg.empty() ||
-                                ev.floatArg != 0.0f ||
-                                ev.intArg   != 0;
-                            if (hasArgs) {
+                            const std::string args =
+                                FormatAnimationEventArgs(ev);
+                            if (!args.empty()) {
                                 ImGui::SetTooltip(
-                                    "\"%s\" @ %.3fs\n[\"%s\" %.3f %d]",
+                                    "\"%s\" @ %.3fs\n%s",
                                     ev.name.c_str(), ev.time,
-                                    ev.stringArg.c_str(),
-                                    double(ev.floatArg), ev.intArg);
+                                    args.c_str());
                             } else {
                                 ImGui::SetTooltip("\"%s\" @ %.3fs",
                                                   ev.name.c_str(), ev.time);

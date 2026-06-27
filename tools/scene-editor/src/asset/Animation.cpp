@@ -56,6 +56,27 @@ void AnimationAsset::FromJson(const Value& root) {
                 ev.stringArg = e.GetString("stringArg");
                 ev.floatArg  = float(e.GetNumber("floatArg", 0.0));
                 ev.intArg    = e.GetInt("intArg", 0);
+                ev.boolArg   = e.GetBool("boolArg", false);
+                if (const Value* v = e.Find("vec2Arg")) {
+                    if (v->IsArray() && v->arrayValue.size() >= 2) {
+                        ev.vec2Arg.x = v->arrayValue[0].IsNumber()
+                            ? float(v->arrayValue[0].numberValue) : 0.0f;
+                        ev.vec2Arg.y = v->arrayValue[1].IsNumber()
+                            ? float(v->arrayValue[1].numberValue) : 0.0f;
+                    }
+                }
+                if (const Value* c = e.Find("colorArg")) {
+                    if (c->IsArray() && c->arrayValue.size() >= 4) {
+                        auto pick = [&](size_t i) {
+                            const Value& vv = c->arrayValue[i];
+                            return vv.IsNumber() ? float(vv.numberValue) : 0.0f;
+                        };
+                        ev.colorArg.r = pick(0);
+                        ev.colorArg.g = pick(1);
+                        ev.colorArg.b = pick(2);
+                        ev.colorArg.a = pick(3);
+                    }
+                }
                 events.push_back(std::move(ev));
             }
         }
@@ -83,6 +104,17 @@ Value AnimationAsset::ToJson() const {
         e.Add("stringArg", Value::MakeString(ev.stringArg));
         e.Add("floatArg",  Value::MakeNumber(ev.floatArg));
         e.Add("intArg",    Value::MakeNumber(ev.intArg));
+        e.Add("boolArg",   Value::MakeBool(ev.boolArg));
+        Value vArr = Value::MakeArray();
+        vArr.Push(Value::MakeNumber(ev.vec2Arg.x));
+        vArr.Push(Value::MakeNumber(ev.vec2Arg.y));
+        e.Add("vec2Arg", std::move(vArr));
+        Value cArr = Value::MakeArray();
+        cArr.Push(Value::MakeNumber(ev.colorArg.r));
+        cArr.Push(Value::MakeNumber(ev.colorArg.g));
+        cArr.Push(Value::MakeNumber(ev.colorArg.b));
+        cArr.Push(Value::MakeNumber(ev.colorArg.a));
+        e.Add("colorArg", std::move(cArr));
         evArr.Push(std::move(e));
     }
     root.Add("events", std::move(evArr));
