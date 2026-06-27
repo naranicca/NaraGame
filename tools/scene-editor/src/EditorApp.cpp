@@ -239,6 +239,7 @@ public:
             if (p.Open(m_startupProjectPath)) {
                 m_project = std::move(p);
                 m_assetDb.Open(m_project);
+                ReloadAllScripts();
                 UpdateWindowTitle();
             }
         }
@@ -822,7 +823,38 @@ private:
         if (!p.Open(folder)) return;
         m_project = std::move(p);
         m_assetDb.Open(m_project);
+        ReloadAllScripts();
         UpdateWindowTitle();
+    }
+
+    // Walks every "Script" typed asset in the database + sends it
+    // to the host. Used both at startup (after the initial scan)
+    // and from the Edit > Reload Scripts menu when the user has
+    // edited a .lua file outside the editor and wants the
+    // interpreter to pick up the change without restarting.
+    void ReloadAllScripts() {
+        if (!m_assetDb.IsOpen()) return;
+        size_t loaded = 0;
+        for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+            if (a.typeName != "Script") continue;
+            const std::string abs =
+                m_assetDb.AssetsRoot() + "/" + a.relPath;
+            if (m_scriptHost.LoadFile(abs, a.relPath)) ++loaded;
+        }
+        if (loaded == 0 && !m_assetDb.Entries().empty()) {
+            // Silent on empty projects; tell the user when there
+            // really were Script assets but every one failed to
+            // load so they don't think the call did nothing.
+            bool anyScripts = false;
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName == "Script") { anyScripts = true; break; }
+            }
+            if (anyScripts) {
+                m_scriptHost.AppendLine(
+                    "[lua] reload finished with errors -- "
+                    "check the lines above");
+            }
+        }
     }
 
     void DoCloseProject() {
@@ -1009,6 +1041,12 @@ private:
             const bool canR = !m_redoStack.empty();
             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canU)) DoUndo();
             if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canR)) DoRedo();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Reload Scripts", nullptr, false,
+                                m_project.IsOpen())) {
+                m_assetDb.Rescan();
+                ReloadAllScripts();
+            }
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Window")) {
@@ -4257,6 +4295,7 @@ private:
             if (p.Create(root, name)) {
                 m_project = std::move(p);
                 m_assetDb.Open(m_project);
+                ReloadAllScripts();
                 UpdateWindowTitle();
                 ImGui::CloseCurrentPopup();
             } else {

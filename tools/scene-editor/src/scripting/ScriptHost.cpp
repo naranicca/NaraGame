@@ -91,6 +91,51 @@ ScriptHost::ScriptHost() {
     }
 }
 
+bool ScriptHost::LoadFile(const std::string& absolutePath,
+                          const std::string& displayName) {
+    if (!m_lua) return false;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    if (luaL_loadfile(L, absolutePath.c_str()) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + displayName + " load: " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+        return false;
+    }
+    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + displayName + " run: " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+        return false;
+    }
+    AppendLine("[lua] loaded " + displayName);
+    return true;
+}
+
+bool ScriptHost::LoadString(const std::string& code,
+                            const std::string& displayName) {
+    if (!m_lua) return false;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    if (luaL_loadbuffer(L, code.c_str(), code.size(),
+                         displayName.c_str()) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + displayName + " load: " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+        return false;
+    }
+    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + displayName + " run: " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+        return false;
+    }
+    AppendLine("[lua] loaded " + displayName);
+    return true;
+}
+
 ScriptHost::~ScriptHost() {
     if (m_lua) {
         lua_close(static_cast<lua_State*>(m_lua));
@@ -142,6 +187,20 @@ void ScriptHost::OnAnimationEvent(
 
 ScriptHost::ScriptHost()  = default;
 ScriptHost::~ScriptHost() = default;
+
+bool ScriptHost::LoadFile(const std::string&,
+                          const std::string& displayName) {
+    AppendLine("[script-stub] would load " + displayName +
+               " (vendor Lua to enable)");
+    return false;
+}
+
+bool ScriptHost::LoadString(const std::string&,
+                            const std::string& displayName) {
+    AppendLine("[script-stub] would load " + displayName +
+               " (vendor Lua to enable)");
+    return false;
+}
 
 void ScriptHost::OnAnimationEvent(
     const std::string& entityName,

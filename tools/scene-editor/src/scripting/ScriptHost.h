@@ -38,6 +38,19 @@ public:
                           const std::string& animationName,
                           const AnimationEvent& event);
 
+    // Executes a Lua source file in the host's interpreter. Logs
+    // load + runtime errors as `[lua-error] <file>: <message>`
+    // entries in the output buffer. `displayName` only affects
+    // log lines (we want the asset's relative path, not the
+    // absolute path), so the receiver can tell which script ran.
+    // No-op (returns false) when the stub fallback is active.
+    bool LoadFile(const std::string& absolutePath,
+                  const std::string& displayName);
+    // Same shape but for an in-memory string. Useful for the
+    // built-in bootstrap + future "REPL" surface.
+    bool LoadString(const std::string& code,
+                    const std::string& displayName);
+
     // Read-only access to the rolling output buffer. Console panel
     // walks it in reverse to show newest-first the same way the
     // animation event log does.
