@@ -1660,6 +1660,27 @@ private:
                 }
                 ImGui::EndCombo();
             }
+            // Drop target on the animation combo: dragging a .nanim
+            // from the Project panel assigns it without opening the
+            // combo. Other asset types fall through (no assignment).
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* p =
+                        ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                    if (p->DataSize ==
+                            sizeof(SceneEditor::AssetGuid)) {
+                        SceneEditor::AssetGuid guid;
+                        std::memcpy(&guid, p->Data, sizeof(guid));
+                        if (const auto* a =
+                                m_assetDb.FindByGuid(guid)) {
+                            if (a->typeName == "Animation") {
+                                st.animation = guid;
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
             ImGui::SameLine();
             ImGui::SetNextItemWidth(80.0f);
             if (ImGui::DragFloat("##speed", &st.speed, 0.01f,
@@ -2703,6 +2724,59 @@ private:
                     ? "Clipboard empty."
                     : "Append %zu frames from clipboard.",
                 m_clipboardFrames.size());
+        }
+        // Drop zone: dragging another .nanim from the Project panel
+        // here appends its frames + events to the current asset.
+        // Renders a faint outlined rectangle so the affordance is
+        // visible even before the user starts a drag.
+        {
+            const ImVec2 dropMin = ImGui::GetCursorScreenPos();
+            const float  dropW   = ImGui::GetContentRegionAvail().x;
+            const float  dropH   = 28.0f;
+            ImGui::InvisibleButton("##animdrop",
+                                    ImVec2(dropW, dropH));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 dropMax{dropMin.x + dropW, dropMin.y + dropH};
+            const bool   hovered = ImGui::IsItemHovered();
+            const ImU32  border  = hovered
+                ? IM_COL32(255, 220, 60, 255)
+                : IM_COL32(120, 120, 130, 160);
+            dl->AddRect(dropMin, dropMax, border, 4.0f, 0,
+                        hovered ? 2.0f : 1.0f);
+            const char* hint = "Drop a .nanim here to append its "
+                               "frames + events.";
+            const ImVec2 textSize = ImGui::CalcTextSize(hint);
+            const ImVec2 textPos{
+                dropMin.x + (dropW - textSize.x) * 0.5f,
+                dropMin.y + (dropH - textSize.y) * 0.5f };
+            dl->AddText(textPos,
+                        hovered ? IM_COL32(255, 240, 200, 255)
+                                : IM_COL32(160, 160, 170, 200),
+                        hint);
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* p =
+                        ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                    if (p->DataSize ==
+                            sizeof(SceneEditor::AssetGuid)) {
+                        SceneEditor::AssetGuid guid;
+                        std::memcpy(&guid, p->Data, sizeof(guid));
+                        // Skip self-drop -- pasting an asset into
+                        // itself would double every row.
+                        if (guid != m_animEditorAsset) {
+                            if (auto* src = m_assetDb.GetAnimation(guid)) {
+                                for (const auto& f : src->frames) {
+                                    an->frames.push_back(f);
+                                }
+                                for (const auto& e : src->events) {
+                                    an->events.push_back(e);
+                                }
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
         }
 
         // Events: one-shot markers fired when the play cursor
