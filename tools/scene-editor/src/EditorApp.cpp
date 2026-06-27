@@ -453,6 +453,13 @@ private:
         }
         if (auto* sc =
                 e->GetComponent<SceneEditor::ScriptComponent>()) {
+            // OnDisable runs first when the entity was alive +
+            // enabled, mirroring Unity's
+            // "OnDisable before OnDestroy" rule.
+            if (sc->lastSeenEnabled) {
+                m_scriptHost.CallOnDisable(e->name, sc->entryFunction);
+                sc->lastSeenEnabled = false;
+            }
             if (sc->started) {
                 m_scriptHost.CallOnDestroy(e->name, sc->entryFunction);
                 sc->started = false;
@@ -488,9 +495,22 @@ private:
         CollectAllEntities(m_scene.Roots(), ids);
         for (SceneEditor::EntityId id : ids) {
             SceneEditor::Entity* e = m_scene.Get(id);
-            if (!e || !e->enabled) continue;
+            if (!e) continue;
             auto* sc = e->GetComponent<SceneEditor::ScriptComponent>();
             if (!sc) continue;
+            // Edge detection on enabled. Fires before OnStart so
+            // a freshly-loaded enabled entity sees the same
+            // OnEnable -> OnStart -> OnUpdate ordering Unity ships
+            // with.
+            if (e->enabled != sc->lastSeenEnabled) {
+                if (e->enabled) {
+                    m_scriptHost.CallOnEnable(e->name, sc->entryFunction);
+                } else {
+                    m_scriptHost.CallOnDisable(e->name, sc->entryFunction);
+                }
+                sc->lastSeenEnabled = e->enabled;
+            }
+            if (!e->enabled) continue;
             if (!sc->started) {
                 m_scriptHost.CallOnStart(e->name, sc->entryFunction);
                 sc->started = true;

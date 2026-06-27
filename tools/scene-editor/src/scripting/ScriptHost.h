@@ -58,6 +58,10 @@ public:
                        const std::string& entryFunction = "");
     void CallOnDestroy(const std::string& entityName,
                        const std::string& entryFunction = "");
+    void CallOnEnable (const std::string& entityName,
+                       const std::string& entryFunction = "");
+    void CallOnDisable(const std::string& entityName,
+                       const std::string& entryFunction = "");
 
     // Executes a Lua source file in the host's interpreter. Logs
     // load + runtime errors as `[lua-error] <file>: <message>`

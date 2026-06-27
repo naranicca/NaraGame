@@ -31,7 +31,12 @@ public:
     // true the moment the first OnStart dispatches so subsequent
     // ticks only run OnUpdate. Not serialised -- always boots
     // false when a scene loads.
-    bool        started = false;
+    bool        started         = false;
+    // Edge tracker for OnEnable / OnDisable. Boots false so an
+    // entity that loads enabled fires OnEnable on its very first
+    // tick (matches Unity's "freshly-spawned enabled entity gets
+    // OnEnable before OnStart" ordering).
+    bool        lastSeenEnabled = false;
 
     static const char* StaticTypeName() { return "Script"; }
     const char* TypeName() const override { return StaticTypeName(); }
