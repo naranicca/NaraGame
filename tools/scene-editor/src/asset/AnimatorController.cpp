@@ -56,9 +56,10 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
                 AnimatorParameter par;
                 par.name = p.GetString("name");
                 const std::string& ts = p.GetString("type", "Bool");
-                if      (ts == "Float") par.type = AnimatorParameter::Type::Float;
-                else if (ts == "Int")   par.type = AnimatorParameter::Type::Int;
-                else                    par.type = AnimatorParameter::Type::Bool;
+                if      (ts == "Float")   par.type = AnimatorParameter::Type::Float;
+                else if (ts == "Int")     par.type = AnimatorParameter::Type::Int;
+                else if (ts == "Trigger") par.type = AnimatorParameter::Type::Trigger;
+                else                      par.type = AnimatorParameter::Type::Bool;
                 par.defaultBool  = p.GetBool ("defaultBool",
                                               p.GetBool("defaultValue", false));
                 par.defaultFloat = float(p.GetNumber("defaultFloat", 0.0));
@@ -115,8 +116,9 @@ Value AnimatorControllerAsset::ToJson() const {
         Value o = Value::MakeObject();
         o.Add("name", Value::MakeString(p.name));
         const char* tname = "Bool";
-        if      (p.type == AnimatorParameter::Type::Float) tname = "Float";
-        else if (p.type == AnimatorParameter::Type::Int)   tname = "Int";
+        if      (p.type == AnimatorParameter::Type::Float)   tname = "Float";
+        else if (p.type == AnimatorParameter::Type::Int)     tname = "Int";
+        else if (p.type == AnimatorParameter::Type::Trigger) tname = "Trigger";
         o.Add("type",         Value::MakeString(tname));
         o.Add("defaultBool",  Value::MakeBool(p.defaultBool));
         o.Add("defaultFloat", Value::MakeNumber(p.defaultFloat));

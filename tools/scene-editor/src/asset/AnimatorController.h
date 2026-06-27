@@ -27,7 +27,12 @@ struct AnimatorState {
 // live value at runtime in a type-matched map; transitions read it +
 // compare against their own per-type value to decide whether to fire.
 struct AnimatorParameter {
-    enum class Type { Bool, Float, Int };
+    // Bool / Float / Int are regular sticky values; Trigger is a
+    // one-shot bool: the runtime auto-resets the live value to false
+    // the instant a transition fires that reads it. Live trigger
+    // state still lives in AnimatorComponent::paramBools to keep the
+    // storage path consistent.
+    enum class Type { Bool, Float, Int, Trigger };
     std::string name;
     Type        type         = Type::Bool;
     bool        defaultBool  = false;

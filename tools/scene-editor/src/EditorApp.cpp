@@ -379,6 +379,13 @@ private:
                     if (an.paramInts.find(p.name) == an.paramInts.end()) {
                         an.paramInts[p.name] = p.defaultInt;
                     }
+                } else if (p.type == PT::Trigger) {
+                    // Trigger always boots false; the user has to
+                    // re-fire it explicitly through the inspector
+                    // button each time.
+                    if (an.paramBools.find(p.name) == an.paramBools.end()) {
+                        an.paramBools[p.name] = false;
+                    }
                 } else {
                     if (an.paramBools.find(p.name) == an.paramBools.end()) {
                         an.paramBools[p.name] = p.defaultBool;
@@ -440,17 +447,28 @@ private:
                             ? it->second : decl->defaultInt;
                 fire = cmp(v, tr.valueInt);
             } else {
+                // Bool + Trigger share the paramBools map. Bool only
+                // supports == / != meaningfully; the other ops
+                // degenerate to the equality check below. Triggers
+                // get a default of false on lookup (matches the
+                // bootstrap above).
                 auto it = an.paramBools.find(tr.param);
+                const bool baseline = (decl->type == PT::Trigger)
+                    ? false : decl->defaultBool;
                 const bool v = (it != an.paramBools.end())
-                             ? it->second : decl->defaultBool;
-                // Bool only supports == / != meaningfully; the other
-                // ops degenerate to the equality check below.
+                             ? it->second : baseline;
                 if (tr.op == OP::NotEqual) fire = (v != tr.valueBool);
                 else                       fire = (v == tr.valueBool);
             }
             if (!fire) continue;
             an.currentState = tr.toIdx;
             an.currentTime  = 0.0f;
+            // Trigger consumption: the parameter the transition just
+            // read auto-resets to false so the same trigger doesn't
+            // re-fire on the next tick.
+            if (decl->type == PT::Trigger) {
+                an.paramBools[tr.param] = false;
+            }
             break;
         }
     }
@@ -1184,10 +1202,10 @@ private:
                 dirty = true;
             }
             ImGui::SameLine();
-            const char* typeNames[] = { "Bool", "Float", "Int" };
+            const char* typeNames[] = { "Bool", "Float", "Int", "Trigger" };
             int typeIdx = int(p.type);
-            ImGui::SetNextItemWidth(80.0f);
-            if (ImGui::Combo("##ptype", &typeIdx, typeNames, 3)) {
+            ImGui::SetNextItemWidth(90.0f);
+            if (ImGui::Combo("##ptype", &typeIdx, typeNames, 4)) {
                 p.type = static_cast<SceneEditor::AnimatorParameter::Type>(typeIdx);
                 dirty = true;
             }
@@ -1200,6 +1218,8 @@ private:
             } else if (p.type == PT::Int) {
                 if (ImGui::DragInt("##pdef", &p.defaultInt, 0.2f,
                                     0, 0, "def %d")) dirty = true;
+            } else if (p.type == PT::Trigger) {
+                ImGui::TextDisabled("(auto-reset)");
             } else {
                 bool draft = p.defaultBool;
                 if (ImGui::Checkbox("default", &draft)) {
@@ -1295,9 +1315,12 @@ private:
                 ImGui::EndCombo();
             }
             ImGui::SameLine();
-            // Op combo. Per parameter type we expose either the full
-            // arithmetic ladder (Float / Int) or just Equals /
-            // NotEqual (Bool, since < / > don't read meaningfully).
+            // Op combo. Float / Int expose the full ladder; Bool /
+            // Trigger only get == / != (other comparisons are noise
+            // for bool semantics). Trigger transitions always read
+            // valueBool == true in practice -- we render the
+            // checkbox anyway so the user can mirror an explicit
+            // false-check if they want.
             const SceneEditor::AnimatorParameter* decl = nullptr;
             for (const auto& pr : ctrl->parameters) {
                 if (pr.name == tr.param) { decl = &pr; break; }
@@ -1305,8 +1328,10 @@ private:
             using PT = SceneEditor::AnimatorParameter::Type;
             using OP = SceneEditor::AnimatorTransition::Op;
             const char* opNamesAll[] = { "==", "!=", "<", "<=", ">", ">=" };
-            const int opCount =
-                (decl && decl->type != PT::Bool) ? 6 : 2;
+            const bool numericParam =
+                decl && (decl->type == PT::Float ||
+                         decl->type == PT::Int);
+            const int opCount = numericParam ? 6 : 2;
             int opIdx = int(tr.op);
             if (opIdx < 0 || opIdx >= opCount) opIdx = 0;
             ImGui::SetNextItemWidth(60.0f);
@@ -1320,6 +1345,14 @@ private:
                 if (ImGui::DragFloat("##val", &tr.valueFloat, 0.05f)) dirty = true;
             } else if (decl && decl->type == PT::Int) {
                 if (ImGui::DragInt("##val", &tr.valueInt)) dirty = true;
+            } else if (decl && decl->type == PT::Trigger) {
+                // Force expected = true for triggers; show a disabled
+                // checkbox so the rule is visible.
+                if (tr.valueBool != true) { tr.valueBool = true; dirty = true; }
+                bool draft = true;
+                ImGui::BeginDisabled();
+                ImGui::Checkbox("##val", &draft);
+                ImGui::EndDisabled();
             } else {
                 bool draft = tr.valueBool;
                 if (ImGui::Checkbox("##val", &draft)) {
@@ -2974,6 +3007,23 @@ private:
                             if (ImGui::DragInt(p.name.c_str(), &v)) {
                                 UndoSnapshot();
                                 an.paramInts[p.name] = v;
+                                changed = true;
+                            }
+                        } else if (p.type == PT::Trigger) {
+                            // Fire-once button. Reads "armed" when the
+                            // live value is already true, "fire" when
+                            // it's false. Press flips to true and the
+                            // runtime resets it the next tick.
+                            auto it = an.paramBools.find(p.name);
+                            const bool armed =
+                                (it != an.paramBools.end()) && it->second;
+                            char label[128];
+                            std::snprintf(label, sizeof(label),
+                                          armed ? "%s (armed)" : "Fire %s",
+                                          p.name.c_str());
+                            if (ImGui::Button(label)) {
+                                UndoSnapshot();
+                                an.paramBools[p.name] = true;
                                 changed = true;
                             }
                         } else {
