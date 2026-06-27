@@ -10,30 +10,31 @@
 
 namespace SceneEditor {
 
-// 4-bit cardinal-neighbour autotile rule. The 16-entry mask table maps
-// (north, east, south, west) presence bits -> visual tile index inside
-// the source texture (row-major, same indexing the TilemapComponent
-// uses for its raw cells).
-//
-// Bit layout:
-//   bit 0 = N neighbour present
-//   bit 1 = E neighbour present
-//   bit 2 = S neighbour present
-//   bit 3 = W neighbour present
-//
-// So mask[0] is the lonely / standalone tile and mask[15] is the fully
-// surrounded centre.
+// Autotile rule. Two modes are supported:
+//   Cardinal  -- 4-bit neighbour bitmask (N, E, S, W). 16-entry table.
+//                Bit layout: bit 0 = N, 1 = E, 2 = S, 3 = W.
+//   Blob      -- 8-bit neighbour bitmask (N, NE, E, SE, S, SW, W, NW).
+//                256-entry table; non-canonical entries (a diagonal
+//                whose adjacent cardinals are missing) shadow their
+//                canonical equivalents at load time. There are ~47
+//                canonical masks, the standard "blob tileset".
+//                Bit layout: 0 = N, 1 = NE, 2 = E, 3 = SE, 4 = S,
+//                5 = SW, 6 = W, 7 = NW.
 class AutotileAsset {
 public:
+    enum class Mode { Cardinal, Blob };
+    Mode                   mode = Mode::Cardinal;
+
     AssetGuid              texture;          // source texture asset GUID
     int                    cellPixelW = 16;
     int                    cellPixelH = 16;
-    std::array<int, 16>    mask{};           // mask -> tile index
+    std::array<int, 16>    mask{};           // Cardinal mode
+    std::array<int, 256>   blobMask{};       // Blob mode
 
-    // Set of every tile index that appears in the mask table. The paint
-    // flow uses this to decide whether a neighbour belongs to the
-    // autotile group when recomputing masks; rebuilt on every load /
-    // SetMask.
+    // Set of every tile index reachable from the active mode's table.
+    // The paint flow uses it to decide whether a neighbour belongs to
+    // the autotile group when recomputing masks; rebuilt on every
+    // load / mutation.
     std::set<int> tileSet;
 
     bool LoadFromFile(const std::string& path);
@@ -42,9 +43,16 @@ public:
     void FromJson(const NaraGame::MiniJson::Value& root);
     NaraGame::MiniJson::Value ToJson() const;
 
-    // Rebuild the tileSet from the current mask table. Called by
-    // FromJson and any future editor mutation path.
+    // Rebuild the tileSet from whichever table the current mode uses.
     void RebuildTileSet();
+
+    // Drop diagonal bits whose adjacent cardinals are missing. NE
+    // requires N + E; SE requires E + S; SW requires S + W; NW
+    // requires W + N.
+    static int Canonicalize8bit(int m);
+
+    // True when the 8-bit mask `m` is equal to its canonical form.
+    static bool IsCanonical8bit(int m) { return m == Canonicalize8bit(m); }
 };
 
 } // namespace SceneEditor

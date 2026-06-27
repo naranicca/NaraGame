@@ -629,6 +629,16 @@ private:
             at->cellPixelH = std::max(1, sz[1]);
             dirty = true;
         }
+        const char* modeNames[] = { "Cardinal (4-bit, 16 tiles)",
+                                    "Blob (8-bit, 47 tiles)" };
+        int modeIdx = int(at->mode);
+        if (ImGui::Combo("Mode", &modeIdx, modeNames, 2)) {
+            at->mode = static_cast<
+                SceneEditor::AutotileAsset::Mode>(modeIdx);
+            m_autotileEditorSlot = 0;
+            at->RebuildTileSet();
+            dirty = true;
+        }
         ImGui::Separator();
         if (!at->texture.IsValid()) {
             ImGui::TextDisabled("Pick a Texture above to start editing.");
@@ -652,9 +662,20 @@ private:
             ImGui::End();
             return;
         }
-        ImGui::TextDisabled("Click a tile in the preview to assign it "
-                            "to mask slot %d. Bits: N=1, E=2, S=4, W=8.",
-                            m_autotileEditorSlot);
+        const bool blob =
+            (at->mode == SceneEditor::AutotileAsset::Mode::Blob);
+        const int slotCount = blob ? 256 : 16;
+        if (m_autotileEditorSlot >= slotCount) m_autotileEditorSlot = 0;
+        if (blob) {
+            ImGui::TextDisabled("Click a tile to assign it to mask slot "
+                                "%d (canonical of the active selection). "
+                                "Bits: N=1 NE=2 E=4 SE=8 S=16 SW=32 W=64 "
+                                "NW=128.", m_autotileEditorSlot);
+        } else {
+            ImGui::TextDisabled("Click a tile in the preview to assign "
+                                "it to mask slot %d. Bits: N=1, E=2, "
+                                "S=4, W=8.", m_autotileEditorSlot);
+        }
 
         // Left: texture preview with grid.
         const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -690,8 +711,10 @@ private:
                         ImVec2{x, imgMin.y + imgSize.y}, grid, 1.0f);
         }
         // Highlight the cell currently assigned to the active slot.
-        if (m_autotileEditorSlot >= 0 && m_autotileEditorSlot < 16) {
-            const int idx = at->mask[size_t(m_autotileEditorSlot)];
+        if (m_autotileEditorSlot >= 0 && m_autotileEditorSlot < slotCount) {
+            const int idx = blob
+                ? at->blobMask[size_t(m_autotileEditorSlot)]
+                : at->mask[size_t(m_autotileEditorSlot)];
             if (idx >= 0 && idx < texCols * texRows) {
                 const int col = idx % texCols;
                 const int row = idx / texCols;
@@ -711,36 +734,81 @@ private:
             const int row = py / at->cellPixelH;
             if (col >= 0 && col < texCols && row >= 0 && row < texRows) {
                 const int idx = row * texCols + col;
-                if (at->mask[size_t(m_autotileEditorSlot)] != idx) {
-                    at->mask[size_t(m_autotileEditorSlot)] = idx;
-                    at->RebuildTileSet();
-                    dirty = true;
+                if (blob) {
+                    // Write to ALL non-canonical slots that share this
+                    // canonical entry so the direct lookup table stays
+                    // consistent.
+                    const int canon = SceneEditor::AutotileAsset::
+                        Canonicalize8bit(m_autotileEditorSlot);
+                    if (at->blobMask[size_t(canon)] != idx) {
+                        for (int m = 0; m < 256; ++m) {
+                            if (SceneEditor::AutotileAsset::
+                                    Canonicalize8bit(m) == canon) {
+                                at->blobMask[size_t(m)] = idx;
+                            }
+                        }
+                        at->RebuildTileSet();
+                        dirty = true;
+                    }
+                    // Advance to the next canonical slot so the user
+                    // can rip through the 47-entry blob without
+                    // grabbing the slot list.
+                    do {
+                        m_autotileEditorSlot =
+                            (m_autotileEditorSlot + 1) & 0xFF;
+                    } while (!SceneEditor::AutotileAsset::
+                                IsCanonical8bit(m_autotileEditorSlot) &&
+                             m_autotileEditorSlot != 0);
+                } else {
+                    if (at->mask[size_t(m_autotileEditorSlot)] != idx) {
+                        at->mask[size_t(m_autotileEditorSlot)] = idx;
+                        at->RebuildTileSet();
+                        dirty = true;
+                    }
+                    m_autotileEditorSlot =
+                        (m_autotileEditorSlot + 1) & 15;
                 }
-                // Advance to the next slot so the user can rip through
-                // the 16-entry table without grabbing the slot list.
-                m_autotileEditorSlot =
-                    (m_autotileEditorSlot + 1) & 15;
             }
         }
 
-        // Right: 16-slot mask table.
+        // Right: slot table. Cardinal lists all 16; Blob skips
+        // non-canonical entries so the user only sees the ~47 unique
+        // tile slots that actually need authoring.
         ImGui::SameLine();
         ImGui::BeginChild("##autotile_slots", ImVec2(0, fitH), true);
-        ImGui::Text("Mask slots");
+        ImGui::Text("Mask slots (%s)",
+                    blob ? "Blob, ~47 canonical"
+                         : "Cardinal, 16");
         ImGui::Separator();
-        for (int m = 0; m < 16; ++m) {
+        for (int m = 0; m < slotCount; ++m) {
+            if (blob && !SceneEditor::AutotileAsset::IsCanonical8bit(m))
+                continue;
             ImGui::PushID(m);
-            char neigh[8];
-            std::snprintf(neigh, sizeof(neigh), "%c%c%c%c",
-                          (m & 1) ? 'N' : '.',
-                          (m & 2) ? 'E' : '.',
-                          (m & 4) ? 'S' : '.',
-                          (m & 8) ? 'W' : '.');
-            const int  tile = at->mask[size_t(m)];
+            const int  tile = blob ? at->blobMask[size_t(m)]
+                                   : at->mask[size_t(m)];
             const bool sel  = (m_autotileEditorSlot == m);
-            char label[64];
-            std::snprintf(label, sizeof(label),
-                          "%2d  %s  -> tile %d", m, neigh, tile);
+            char label[96];
+            if (blob) {
+                std::snprintf(label, sizeof(label),
+                              "%3d  %c%c%c%c%c%c%c%c  -> tile %d", m,
+                              (m & 1)   ? 'N' : '.',
+                              (m & 2)   ? 'e' : '.',
+                              (m & 4)   ? 'E' : '.',
+                              (m & 8)   ? 's' : '.',
+                              (m & 16)  ? 'S' : '.',
+                              (m & 32)  ? 'w' : '.',
+                              (m & 64)  ? 'W' : '.',
+                              (m & 128) ? 'n' : '.',
+                              tile);
+            } else {
+                std::snprintf(label, sizeof(label),
+                              "%2d  %c%c%c%c  -> tile %d", m,
+                              (m & 1) ? 'N' : '.',
+                              (m & 2) ? 'E' : '.',
+                              (m & 4) ? 'S' : '.',
+                              (m & 8) ? 'W' : '.',
+                              tile);
+            }
             if (ImGui::Selectable(label, sel)) m_autotileEditorSlot = m;
             ImGui::PopID();
         }
@@ -2741,9 +2809,10 @@ private:
         return changed;
     }
 
-    // Read the mask for (gx, gy) by looking at its 4 cardinal
-    // neighbours. A neighbour counts if its tile index is part of the
-    // autotile's tileSet -- naive but matches the M4 paint flow.
+    // Read the mask for (gx, gy) by looking at neighbours. Cardinal
+    // mode tracks 4 cardinal neighbours; Blob mode tracks all 8 then
+    // canonicalises (a diagonal only counts when its two adjacent
+    // cardinals are also filled).
     int ComputeAutotileMask(const SceneEditor::TilemapComponent& tm,
                             int gx, int gy,
                             const SceneEditor::AutotileAsset& at) const {
@@ -2752,6 +2821,19 @@ private:
             return it != tm.cells.end() &&
                    at.tileSet.find(it->second) != at.tileSet.end();
         };
+        if (at.mode == SceneEditor::AutotileAsset::Mode::Blob) {
+            int m = 0;
+            // World Y up: NE = (gx+1, gy+1), etc.
+            if (matches(gx,     gy + 1)) m |= 1;    // N
+            if (matches(gx + 1, gy + 1)) m |= 2;    // NE
+            if (matches(gx + 1, gy    )) m |= 4;    // E
+            if (matches(gx + 1, gy - 1)) m |= 8;    // SE
+            if (matches(gx,     gy - 1)) m |= 16;   // S
+            if (matches(gx - 1, gy - 1)) m |= 32;   // SW
+            if (matches(gx - 1, gy    )) m |= 64;   // W
+            if (matches(gx - 1, gy + 1)) m |= 128;  // NW
+            return SceneEditor::AutotileAsset::Canonicalize8bit(m);
+        }
         int m = 0;
         if (matches(gx,     gy + 1)) m |= 1;   // N (world Y up)
         if (matches(gx + 1, gy    )) m |= 2;   // E
@@ -2770,29 +2852,42 @@ private:
         if (it == tm.cells.end()) return false;
         if (at.tileSet.find(it->second) == at.tileSet.end()) return false;
         const int m = ComputeAutotileMask(tm, gx, gy, at);
-        const int newTile = at.mask[size_t(m & 15)];
+        const int newTile =
+            (at.mode == SceneEditor::AutotileAsset::Mode::Blob)
+            ? at.blobMask[size_t(m & 0xFF)]
+            : at.mask[size_t(m & 15)];
         if (it->second == newTile) return false;
         it->second = newTile;
         return true;
+    }
+
+    // Placeholder tile for "this cell now belongs to the autotile
+    // group". Cardinal -> mask[0], Blob -> blobMask[0]. Both are the
+    // standalone (no-neighbour) tile in their respective modes.
+    int AutotileStandalone(const SceneEditor::AutotileAsset& at) const {
+        return (at.mode == SceneEditor::AutotileAsset::Mode::Blob)
+            ? at.blobMask[0] : at.mask[0];
     }
 
     bool PaintAutotileCell(SceneEditor::TilemapComponent& tm,
                            int gx, int gy,
                            const SceneEditor::AutotileAsset& at) {
         // Drop a placeholder tile so RefreshAutotileCell recognises
-        // the cell as autotile, then refresh self + 4 neighbours.
+        // the cell as autotile, then refresh self + (4 or 8) neighbours.
         bool changed = false;
         auto it = tm.cells.find({gx, gy});
         if (it == tm.cells.end() ||
             at.tileSet.find(it->second) == at.tileSet.end()) {
-            tm.cells[{gx, gy}] = at.mask[0];
+            tm.cells[{gx, gy}] = AutotileStandalone(at);
             changed = true;
         }
-        changed |= RefreshAutotileCell(tm, gx,     gy,     at);
-        changed |= RefreshAutotileCell(tm, gx,     gy + 1, at);
-        changed |= RefreshAutotileCell(tm, gx + 1, gy,     at);
-        changed |= RefreshAutotileCell(tm, gx,     gy - 1, at);
-        changed |= RefreshAutotileCell(tm, gx - 1, gy,     at);
+        const bool blob = (at.mode == SceneEditor::AutotileAsset::Mode::Blob);
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (!blob && dx != 0 && dy != 0) continue;
+                changed |= RefreshAutotileCell(tm, gx + dx, gy + dy, at);
+            }
+        }
         return changed;
     }
 
@@ -2803,13 +2898,14 @@ private:
         const int x1 = std::max(ax, bx);
         const int y0 = std::min(ay, by);
         const int y1 = std::max(ay, by);
+        const int standalone = AutotileStandalone(at);
         bool changed = false;
         for (int yy = y0; yy <= y1; ++yy) {
             for (int xx = x0; xx <= x1; ++xx) {
                 auto it = tm.cells.find({xx, yy});
                 if (it == tm.cells.end() ||
                     at.tileSet.find(it->second) == at.tileSet.end()) {
-                    tm.cells[{xx, yy}] = at.mask[0];
+                    tm.cells[{xx, yy}] = standalone;
                     changed = true;
                 }
             }
