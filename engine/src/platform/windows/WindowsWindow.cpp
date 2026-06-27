@@ -130,6 +130,20 @@ LRESULT CALLBACK WindowsWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 LRESULT WindowsWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     m_hwnd = hwnd;
 
+    // Editor / tooling hook: ImGui's Win32 backend needs to see every
+    // WM_* event before the engine's input router consumes it (or
+    // they'd never reach widgets). The hook returns true to swallow
+    // the message; otherwise we fall through to engine handling. Cast
+    // widths explicitly so the hook signature doesn't pin us to the
+    // Win32 typedefs in the public header.
+    if (m_messageHook) {
+        if (m_messageHook(hwnd, static_cast<unsigned int>(msg),
+                          static_cast<unsigned long long>(wParam),
+                          static_cast<long long>(lParam))) {
+            return 0;
+        }
+    }
+
     switch (msg) {
         case WM_CLOSE:
         case WM_DESTROY:

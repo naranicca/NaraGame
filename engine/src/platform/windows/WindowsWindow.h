@@ -24,6 +24,8 @@ public:
     void* NativeHandle() const override { return m_hwnd; }
     const WindowDesc& Desc() const override { return m_desc; }
 
+    void SetMessageHook(WindowMessageHook hook) override { m_messageHook = hook; }
+
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -33,6 +35,7 @@ private:
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     bool m_shouldClose = false;
+    WindowMessageHook m_messageHook = nullptr;
 };
 
 } // namespace NaraGame

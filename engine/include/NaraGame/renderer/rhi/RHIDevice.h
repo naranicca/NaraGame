@@ -71,6 +71,18 @@ public:
 
     virtual RHIBackend Backend() const = 0;
     virtual const char* BackendName() const = 0;
+
+    // Backend-native handles for runtime tooling (editor GUI, debug
+    // overlays). The caller is responsible for knowing which backend it
+    // is on and casting accordingly:
+    //   D3D11  : GetNativeDevice() -> ID3D11Device*,
+    //            GetNativeContext() -> ID3D11DeviceContext*
+    //   Vulkan : GetNativeDevice() -> VkDevice (dispatchable handle),
+    //            GetNativeContext() -> nullptr
+    // Default returns nullptr so a backend that hasn't surfaced these
+    // yet still compiles and just disables the tooling that needs them.
+    virtual void* GetNativeDevice()  const { return nullptr; }
+    virtual void* GetNativeContext() const { return nullptr; }
 };
 
 } // namespace NaraGame

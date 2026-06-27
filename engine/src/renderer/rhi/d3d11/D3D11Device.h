@@ -44,6 +44,9 @@ public:
     RHIBackend Backend() const override { return RHIBackend::D3D11; }
     const char* BackendName() const override { return "Direct3D 11"; }
 
+    void* GetNativeDevice()  const override { return m_device.Get(); }
+    void* GetNativeContext() const override { return m_context.Get(); }
+
 private:
     template <typename T>
     using ComPtr = Microsoft::WRL::ComPtr<T>;

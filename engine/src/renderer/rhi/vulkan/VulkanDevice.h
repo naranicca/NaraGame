@@ -49,6 +49,14 @@ public:
     RHIBackend Backend() const override { return RHIBackend::Vulkan; }
     const char* BackendName() const override { return "Vulkan"; }
 
+    // VkDevice is a dispatchable handle (opaque pointer); cast to void*
+    // for the generic accessor. There's no D3D-style immediate context
+    // on Vulkan, so GetNativeContext() returns null.
+    void* GetNativeDevice()  const override {
+        return reinterpret_cast<void*>(m_device);
+    }
+    void* GetNativeContext() const override { return nullptr; }
+
 private:
     bool CreateInstance();
     bool CreateDeviceAndQueue();
