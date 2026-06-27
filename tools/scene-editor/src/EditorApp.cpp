@@ -862,6 +862,21 @@ private:
         float  zoom = 48.0f;         // pixels per world unit
     };
 
+    // Translate gizmo state. None means we're not in a drag; the other
+    // values are the constrained axis the drag locks onto. Both is the
+    // free-move flavour used either from clicking the centre square or
+    // from clicking the entity's body directly.
+    enum class GizmoAxis { None, X, Y, Both };
+
+    // Screen-space hit zones / draw constants for the gizmo. Stay in
+    // pixels (not world units) so the handles are always the same size
+    // no matter how far the user has zoomed.
+    static constexpr float kGizmoHandleGap   = 12.0f;  // dead zone around centre
+    static constexpr float kGizmoArrowLen    = 60.0f;  // arrow shaft length
+    static constexpr float kGizmoArrowHead   = 12.0f;
+    static constexpr float kGizmoArrowThick  = 8.0f;   // hit-test half-thickness
+    static constexpr float kGizmoCenterHalf  = 9.0f;   // centre square half-size
+
     ImVec2 WorldToScreen(const ImVec2& worldPos,
                          const ImVec2& panelMin,
                          const ImVec2& panelSize) const {
@@ -964,6 +979,7 @@ private:
 
         DrawGrid(dl, panelMin, panelSize);
         DrawEntities(dl, panelMin, panelSize);
+        DrawGizmo(dl, panelMin, panelSize);
 
         dl->PopClipRect();
         ImGui::End();
@@ -1002,6 +1018,101 @@ private:
         UpdateWindowTitle();
     }
 
+    // Which gizmo handle the given screen-space point lies on, if any.
+    // Returns None whenever there's no selected entity (we draw nothing
+    // in that case so there's nothing to hit either).
+    GizmoAxis HitTestGizmo(const ImVec2& screenPos,
+                           const ImVec2& panelMin,
+                           const ImVec2& panelSize) const {
+        if (m_selection == SceneEditor::kInvalidEntityId) return GizmoAxis::None;
+        const auto* e = m_scene.Get(m_selection);
+        if (!e) return GizmoAxis::None;
+        const ImVec2 wp = EntityWorldPos(*e);
+        const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
+        const float dx = screenPos.x - c.x;
+        const float dy = screenPos.y - c.y;
+        // Centre square first -- it overlaps the inner ends of the
+        // arrows by design (drag from the centre = both axes).
+        if (std::abs(dx) <= kGizmoCenterHalf && std::abs(dy) <= kGizmoCenterHalf)
+            return GizmoAxis::Both;
+        // +X arrow: extends to the right on screen (world +X).
+        if (dx >= kGizmoHandleGap && dx <= kGizmoArrowLen &&
+            std::abs(dy) <= kGizmoArrowThick)
+            return GizmoAxis::X;
+        // +Y arrow: extends upward on screen (world +Y, screen -Y).
+        if (std::abs(dx) <= kGizmoArrowThick &&
+            dy <= -kGizmoHandleGap && dy >= -kGizmoArrowLen)
+            return GizmoAxis::Y;
+        return GizmoAxis::None;
+    }
+
+    void DrawGizmo(ImDrawList* dl, const ImVec2& panelMin,
+                   const ImVec2& panelSize) {
+        if (m_selection == SceneEditor::kInvalidEntityId) return;
+        const auto* e = m_scene.Get(m_selection);
+        if (!e) return;
+        const ImVec2 wp = EntityWorldPos(*e);
+        const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
+
+        const GizmoAxis live = (m_gizmoActive != GizmoAxis::None)
+                                 ? m_gizmoActive : m_gizmoHover;
+        const ImU32 colX     = (live == GizmoAxis::X)
+                                 ? IM_COL32(255, 120, 120, 255)
+                                 : IM_COL32(210,  60,  60, 255);
+        const ImU32 colY     = (live == GizmoAxis::Y)
+                                 ? IM_COL32(120, 255, 140, 255)
+                                 : IM_COL32( 60, 200,  90, 255);
+        const ImU32 colBoth  = (live == GizmoAxis::Both)
+                                 ? IM_COL32(255, 230, 100, 255)
+                                 : IM_COL32(220, 200,  80, 255);
+
+        // X arrow (red, right).
+        const ImVec2 xTipBase{c.x + kGizmoArrowLen - kGizmoArrowHead, c.y};
+        const ImVec2 xTip    {c.x + kGizmoArrowLen,                    c.y};
+        dl->AddLine(ImVec2{c.x + kGizmoHandleGap, c.y}, xTipBase, colX, 3.0f);
+        dl->AddTriangleFilled(xTip,
+                              ImVec2{xTipBase.x, xTipBase.y - kGizmoArrowHead * 0.45f},
+                              ImVec2{xTipBase.x, xTipBase.y + kGizmoArrowHead * 0.45f},
+                              colX);
+
+        // Y arrow (green, up on screen).
+        const ImVec2 yTipBase{c.x, c.y - kGizmoArrowLen + kGizmoArrowHead};
+        const ImVec2 yTip    {c.x, c.y - kGizmoArrowLen};
+        dl->AddLine(ImVec2{c.x, c.y - kGizmoHandleGap}, yTipBase, colY, 3.0f);
+        dl->AddTriangleFilled(yTip,
+                              ImVec2{yTipBase.x - kGizmoArrowHead * 0.45f, yTipBase.y},
+                              ImVec2{yTipBase.x + kGizmoArrowHead * 0.45f, yTipBase.y},
+                              colY);
+
+        // Centre handle.
+        dl->AddRectFilled(ImVec2{c.x - kGizmoCenterHalf, c.y - kGizmoCenterHalf},
+                          ImVec2{c.x + kGizmoCenterHalf, c.y + kGizmoCenterHalf},
+                          colBoth, 2.0f);
+        dl->AddRect(ImVec2{c.x - kGizmoCenterHalf, c.y - kGizmoCenterHalf},
+                    ImVec2{c.x + kGizmoCenterHalf, c.y + kGizmoCenterHalf},
+                    IM_COL32(30, 30, 30, 255), 2.0f, 0, 1.0f);
+    }
+
+    // True if the screen point overlaps any drawn entity (any of its
+    // sprite quad bounds for sprite entities, the 0.6-unit marker box
+    // for plain ones). Returns the topmost (last-drawn) hit so a child
+    // that's painted over a parent wins.
+    SceneEditor::EntityId HitTestEntity(const ImVec2& worldMouse) const {
+        std::vector<SceneEditor::EntityId> ids;
+        ids.reserve(64);
+        CollectAllEntities(m_scene.Roots(), ids);
+        for (auto it = ids.rbegin(); it != ids.rend(); ++it) {
+            const auto* e = m_scene.Get(*it);
+            if (!e || !e->enabled) continue;
+            const ImVec2 wp = EntityWorldPos(*e);
+            if (std::abs(worldMouse.x - wp.x) <= 0.5f &&
+                std::abs(worldMouse.y - wp.y) <= 0.5f) {
+                return *it;
+            }
+        }
+        return SceneEditor::kInvalidEntityId;
+    }
+
     void HandleViewportInput(bool hovered, bool active,
                              const ImVec2& panelMin,
                              const ImVec2& panelSize) {
@@ -1027,37 +1138,87 @@ private:
             m_viewCam.center.x -= d.x / m_viewCam.zoom;
             m_viewCam.center.y += d.y / m_viewCam.zoom;  // screen Y inverted
         }
-        // Left click: hit-test entities. A 0.5-world-unit half-extent
-        // around the marker centre matches the rectangle we draw below.
+
+        // Hover feedback: highlight whichever gizmo handle the mouse is
+        // over (only meaningful when we have a selection). Cleared on
+        // leave so the gizmo dims back down.
+        m_gizmoHover = hovered ? HitTestGizmo(io.MousePos, panelMin, panelSize)
+                               : GizmoAxis::None;
+
+        // Left mouse-down. Order of preference:
+        //   1. Gizmo handle on the current selection -> start axis drag,
+        //      selection unchanged.
+        //   2. Entity body -> select + start free-drag in one motion.
+        //   3. Empty -> clear selection, no drag.
         if (active && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const ImVec2 worldMouse = ScreenToWorld(io.MousePos,
                                                     panelMin, panelSize);
-            SceneEditor::EntityId hit = SceneEditor::kInvalidEntityId;
-            // Walk in reverse-stable order so the topmost (last
-            // drawn) entity wins on overlap.
-            std::vector<SceneEditor::EntityId> ids;
-            ids.reserve(64);
-            CollectAllEntities(m_scene.Roots(), ids);
-            for (auto it = ids.rbegin(); it != ids.rend(); ++it) {
-                if (const auto* e = m_scene.Get(*it)) {
-                    const ImVec2 wp = EntityWorldPos(*e);
-                    if (std::abs(worldMouse.x - wp.x) <= 0.5f &&
-                        std::abs(worldMouse.y - wp.y) <= 0.5f) {
-                        hit = *it;
-                        break;
-                    }
+            const GizmoAxis gizHit = HitTestGizmo(io.MousePos, panelMin, panelSize);
+            if (gizHit != GizmoAxis::None) {
+                BeginDrag(gizHit, worldMouse);
+            } else {
+                const SceneEditor::EntityId entHit = HitTestEntity(worldMouse);
+                if (entHit != SceneEditor::kInvalidEntityId) {
+                    m_selection     = entHit;
+                    m_selectedAsset = SceneEditor::AssetGuid{};
+                    BeginDrag(GizmoAxis::Both, worldMouse);
+                } else {
+                    m_selection    = SceneEditor::kInvalidEntityId;
+                    m_gizmoActive  = GizmoAxis::None;
                 }
             }
-            m_selection = hit;  // empty click clears selection
-            if (hit != SceneEditor::kInvalidEntityId) {
-                m_selectedAsset = SceneEditor::AssetGuid{};
-            }
         }
+        // Drag in progress: apply the constrained delta to the entity's
+        // local position. Ignore tiny mouse-down releases that didn't
+        // actually move (no-op + no dirty flip).
+        if (m_gizmoActive != GizmoAxis::None &&
+            ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const ImVec2 worldMouse = ScreenToWorld(io.MousePos,
+                                                    panelMin, panelSize);
+            ApplyGizmoDelta(worldMouse);
+        }
+        if (m_gizmoActive != GizmoAxis::None &&
+            ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            m_gizmoActive = GizmoAxis::None;
+            UpdateWindowTitle();
+        }
+
         // 'F' key frames the selected entity.
         if (hovered && ImGui::IsKeyPressed(ImGuiKey_F) && m_selection) {
             if (const auto* e = m_scene.Get(m_selection)) {
                 m_viewCam.center = EntityWorldPos(*e);
             }
+        }
+    }
+
+    void BeginDrag(GizmoAxis axis, const ImVec2& worldMouse) {
+        m_gizmoActive    = axis;
+        m_gizmoDownWorld = worldMouse;
+        if (auto* e = m_scene.Get(m_selection)) {
+            if (auto* t = e->GetComponent<SceneEditor::TransformComponent>()) {
+                m_gizmoStartPos = t->position;
+            }
+        }
+    }
+
+    void ApplyGizmoDelta(const ImVec2& worldMouse) {
+        auto* e = m_scene.Get(m_selection);
+        if (!e) return;
+        auto* t = e->GetComponent<SceneEditor::TransformComponent>();
+        if (!t) return;
+        // Without parent rotation/scale (the current TransformComponent
+        // semantics), world-space delta and local-space delta line up.
+        // Z stays put -- this gizmo is the 2D translator.
+        float dx = worldMouse.x - m_gizmoDownWorld.x;
+        float dy = worldMouse.y - m_gizmoDownWorld.y;
+        if (m_gizmoActive == GizmoAxis::X) dy = 0.0f;
+        if (m_gizmoActive == GizmoAxis::Y) dx = 0.0f;
+        const float newX = m_gizmoStartPos.x + dx;
+        const float newY = m_gizmoStartPos.y + dy;
+        if (newX != t->position.x || newY != t->position.y) {
+            t->position.x = newX;
+            t->position.y = newY;
+            m_scene.MarkDirty();
         }
     }
 
@@ -1355,6 +1516,14 @@ private:
     SceneEditor::AssetGuid     m_selectedAsset;
 
     ViewportCamera             m_viewCam;
+
+    // Translate-gizmo state. Hover updates every hovered frame; active
+    // sticks from mouse-down to release. m_gizmoDownWorld + m_gizmoStartPos
+    // are the anchors the per-frame delta is applied against.
+    GizmoAxis      m_gizmoHover     = GizmoAxis::None;
+    GizmoAxis      m_gizmoActive    = GizmoAxis::None;
+    ImVec2         m_gizmoDownWorld{0.0f, 0.0f};
+    NaraGame::Vec3 m_gizmoStartPos{0.0f, 0.0f, 0.0f};
 
     // New Project modal state.
     bool                m_openNewProjectModal = false;
