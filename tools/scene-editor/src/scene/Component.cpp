@@ -1,6 +1,7 @@
 #include "Component.h"
 
 #include "SpriteRendererComponent.h"
+#include "TilemapComponent.h"
 #include "TransformComponent.h"
 
 namespace SceneEditor {
@@ -38,6 +39,8 @@ void RegisterBuiltinComponents() {
                [] { return std::make_unique<TransformComponent>(); });
     r.Register(SpriteRendererComponent::StaticTypeName(),
                [] { return std::make_unique<SpriteRendererComponent>(); });
+    r.Register(TilemapComponent::StaticTypeName(),
+               [] { return std::make_unique<TilemapComponent>(); });
 }
 
 } // namespace SceneEditor

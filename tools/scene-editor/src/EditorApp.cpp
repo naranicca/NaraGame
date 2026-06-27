@@ -13,6 +13,7 @@
 #include "scene/Entity.h"
 #include "scene/Scene.h"
 #include "scene/SpriteRendererComponent.h"
+#include "scene/TilemapComponent.h"
 #include "scene/TransformComponent.h"
 
 #include <NaraGame/renderer/rhi/RHIResources.h>
@@ -1258,9 +1259,70 @@ private:
             DrawTransformEditor(*t);
         } else if (auto* s = dynamic_cast<SceneEditor::SpriteRendererComponent*>(comp)) {
             DrawSpriteRendererEditor(entity, *s);
+        } else if (auto* tm = dynamic_cast<SceneEditor::TilemapComponent*>(comp)) {
+            DrawTilemapEditor(entity, *tm);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
         }
+    }
+
+    void DrawTilemapEditor(SceneEditor::Entity& entity,
+                           SceneEditor::TilemapComponent& tm) {
+        bool changed = false;
+        // Tileset (source texture) Combo over every Texture asset in
+        // the project, mirroring the SpriteRenderer sprite picker.
+        std::string current = "(none)";
+        if (tm.tileset.IsValid()) {
+            if (const auto* e = m_assetDb.FindByGuid(tm.tileset)) {
+                current = e->relPath;
+            } else {
+                current = tm.tileset.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Tileset", current.c_str())) {
+            if (ImGui::Selectable("(none)", !tm.tileset.IsValid())) {
+                tm.tileset = SceneEditor::AssetGuid{};
+                changed = true;
+            }
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "Texture") continue;
+                const bool sel = (a.guid == tm.tileset);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    tm.tileset = a.guid;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        // Drop a texture from the Project panel directly onto the combo.
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p =
+                    ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                if (p->DataSize == sizeof(SceneEditor::AssetGuid)) {
+                    SceneEditor::AssetGuid guid;
+                    std::memcpy(&guid, p->Data, sizeof(guid));
+                    if (const auto* e = m_assetDb.FindByGuid(guid)) {
+                        if (e->typeName == "Texture") {
+                            tm.tileset = guid;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+        int sz[2] = { tm.cellPixelW, tm.cellPixelH };
+        if (ImGui::DragInt2("Cell Pixels (W,H)", sz, 0.2f, 1, 4096)) {
+            tm.cellPixelW = std::max(1, sz[0]);
+            tm.cellPixelH = std::max(1, sz[1]);
+            changed = true;
+        }
+        ImGui::TextDisabled("Painted cells: %zu", tm.cells.size());
+        if (changed) {
+            m_scene.MarkDirty();
+            UpdateWindowTitle();
+        }
+        (void)entity;
     }
 
     // Asset Inspector: shown when the user clicks a file in the Project
@@ -1967,6 +2029,20 @@ private:
         std::vector<SceneEditor::EntityId> ids;
         CollectAllEntities(m_scene.Roots(), ids);
 
+        // Tilemap pass first so the grid lays down as background under
+        // every sprite. Layer-aware sorting between tilemaps + sprites
+        // is a follow-up; for M4c1 tilemaps simply draw before any
+        // SpriteRenderer in the same scene.
+        for (SceneEditor::EntityId id : ids) {
+            const auto* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            const auto* tm = e->GetComponent<SceneEditor::TilemapComponent>();
+            if (tm && tm->tileset.IsValid()) {
+                DrawTilemapEntity(dl, *e, *tm, panelMin, panelSize,
+                                  id == m_selection);
+            }
+        }
+
         // Split sprite-bearing entities from marker-only ones. Sprites
         // sort by (layer, orderInLayer, sceneTraversalOrder) so the
         // user's layer + order choices take precedence. Markers are
@@ -2015,6 +2091,96 @@ private:
             const ImVec2 wp = EntityWorldPos(*e);
             const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
             DrawMarkerEntity(dl, *e, c, id == m_selection);
+        }
+    }
+
+    // Render the painted cells of a TilemapComponent. Each cell sits in
+    // a regular grid anchored on the entity's transform; the source UV
+    // comes from the cell's tile index inside the texture (row-major,
+    // zero = top-left of the texture).
+    void DrawTilemapEntity(ImDrawList* dl, const SceneEditor::Entity& e,
+                           const SceneEditor::TilemapComponent& tm,
+                           const ImVec2& panelMin,
+                           const ImVec2& panelSize, bool selected) {
+        if (tm.cellPixelW <= 0 || tm.cellPixelH <= 0) return;
+        NaraGame::RHITexture* tex =
+            m_assetDb.GetTexture(GetDevice(), tm.tileset);
+        if (!tex || tex->Width() == 0 || tex->Height() == 0) return;
+        const int texCols = int(tex->Width())  / tm.cellPixelW;
+        const int texRows = int(tex->Height()) / tm.cellPixelH;
+        if (texCols <= 0 || texRows <= 0) return;
+
+        // World units per pixel: read the texture's import settings so
+        // the tilemap inherits the project's chosen PPU. Default 100
+        // matches the texture default.
+        SceneEditor::TextureImportSettings imp;
+        if (const auto* entry = m_assetDb.FindByGuid(tm.tileset)) {
+            imp.FromJson(entry->importSettings);
+        }
+        const float ppu        = imp.pixelsPerUnit;
+        const float cellWorldW = float(tm.cellPixelW) / ppu;
+        const float cellWorldH = float(tm.cellPixelH) / ppu;
+
+        const float texW = float(tex->Width());
+        const float texH = float(tex->Height());
+        const ImVec2 entityWp = EntityWorldPos(e);
+        const float  zoom     = m_viewCam.zoom;
+        const ImVec2 c        = WorldToScreen(entityWp, panelMin, panelSize);
+        const ImU32  tint     = IM_COL32(255, 255, 255, 255);
+        const ImTextureID texId =
+            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                tex->GetNativeView()));
+
+        // Bounding box (in world) used for the selection outline.
+        float bbMinX =  std::numeric_limits<float>::infinity();
+        float bbMinY =  std::numeric_limits<float>::infinity();
+        float bbMaxX = -std::numeric_limits<float>::infinity();
+        float bbMaxY = -std::numeric_limits<float>::infinity();
+
+        for (const auto& kv : tm.cells) {
+            const int gx  = kv.first.first;
+            const int gy  = kv.first.second;
+            const int idx = kv.second;
+            if (idx < 0) continue;
+
+            // Map tile index -> source pixel rect (row-major, Y-down
+            // in source so row 0 sits at the texture's top).
+            const int tileCol = idx % texCols;
+            const int tileRow = idx / texCols;
+            if (tileRow >= texRows) continue;
+            const float u0 =  float(tileCol     * tm.cellPixelW) / texW;
+            const float v0 =  float(tileRow     * tm.cellPixelH) / texH;
+            const float u1 =  float((tileCol + 1) * tm.cellPixelW) / texW;
+            const float v1 =  float((tileRow + 1) * tm.cellPixelH) / texH;
+
+            // World rect (Y-up: gy = 0 = bottom row).
+            const float worldL = entityWp.x +  gx       * cellWorldW;
+            const float worldR = entityWp.x + (gx + 1) * cellWorldW;
+            const float worldB = entityWp.y +  gy       * cellWorldH;
+            const float worldT = entityWp.y + (gy + 1) * cellWorldH;
+            bbMinX = std::min(bbMinX, worldL); bbMaxX = std::max(bbMaxX, worldR);
+            bbMinY = std::min(bbMinY, worldB); bbMaxY = std::max(bbMaxY, worldT);
+
+            const ImVec2 pMin{c.x + (worldL - entityWp.x) * zoom,
+                              c.y - (worldT - entityWp.y) * zoom};
+            const ImVec2 pMax{c.x + (worldR - entityWp.x) * zoom,
+                              c.y - (worldB - entityWp.y) * zoom};
+            dl->AddImage(texId, pMin, pMax,
+                         ImVec2{u0, v0}, ImVec2{u1, v1}, tint);
+        }
+
+        // Selection outline + label only when we drew at least one cell.
+        if (bbMinX <= bbMaxX && bbMinY <= bbMaxY) {
+            const ImVec2 a{c.x + (bbMinX - entityWp.x) * zoom,
+                           c.y - (bbMaxY - entityWp.y) * zoom};
+            const ImVec2 b{c.x + (bbMaxX - entityWp.x) * zoom,
+                           c.y - (bbMinY - entityWp.y) * zoom};
+            if (selected) {
+                dl->AddRect(a, b, IM_COL32(255, 220, 60, 255),
+                            0.0f, 0, 2.0f);
+            }
+            dl->AddText(ImVec2{a.x, b.y + 2.0f},
+                        IM_COL32(220, 220, 220, 255), e.name.c_str());
         }
     }
 
