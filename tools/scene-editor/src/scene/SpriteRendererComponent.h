@@ -23,6 +23,13 @@ enum class SpriteDrawMode { Simple = 0, Sliced = 1, Tiled = 2 };
 class SpriteRendererComponent final : public Component {
 public:
     AssetGuid       sprite;                       // asset GUID; invalid = unassigned
+    // Named slice from the texture's SpriteSheet. Empty string means
+    // "draw the whole texture" (the original behaviour); a non-empty
+    // name resolves through the texture's importSettings.spriteSheet
+    // at draw time. Names survive reorders + edits in the Sprite
+    // Editor, but a rename leaves an orphan reference here -- the
+    // inspector flags those so the user can pick a live name.
+    std::string     subSprite;
     NaraGame::Color color = NaraGame::Color::White();
     bool            flipX = false;
     bool            flipY = false;

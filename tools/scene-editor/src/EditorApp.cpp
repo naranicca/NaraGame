@@ -1057,6 +1057,48 @@ private:
             }
             ImGui::EndDragDropTarget();
         }
+
+        // Sub-sprite picker: only meaningful when the bound texture has
+        // a Multiple-mode sprite sheet. The "(whole texture)" entry is
+        // always there as the unsliced default; an orphan name pinned
+        // at the top lets the user keep it or swap to a live one.
+        if (s.sprite.IsValid()) {
+            if (const auto* entry = m_assetDb.FindByGuid(s.sprite)) {
+                SceneEditor::TextureImportSettings imp;
+                imp.FromJson(entry->importSettings);
+                const auto& subs = imp.spriteSheet.sprites;
+                if (!subs.empty()) {
+                    bool nameInList = s.subSprite.empty();
+                    for (const auto& sub : subs) {
+                        if (sub.name == s.subSprite) { nameInList = true; break; }
+                    }
+                    const char* preview = s.subSprite.empty()
+                        ? "(whole texture)" : s.subSprite.c_str();
+                    if (ImGui::BeginCombo("Sub-sprite", preview)) {
+                        if (!nameInList && !s.subSprite.empty()) {
+                            if (ImGui::Selectable((s.subSprite + "  (orphan)").c_str(),
+                                                  true)) {
+                                // No-op; keep the orphan.
+                            }
+                            ImGui::Separator();
+                        }
+                        if (ImGui::Selectable("(whole texture)",
+                                              s.subSprite.empty())) {
+                            s.subSprite.clear();
+                            changed = true;
+                        }
+                        for (const auto& sub : subs) {
+                            const bool sel = (sub.name == s.subSprite);
+                            if (ImGui::Selectable(sub.name.c_str(), sel)) {
+                                s.subSprite = sub.name;
+                                changed = true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+            }
+        }
         float col[4] = { s.color.r, s.color.g, s.color.b, s.color.a };
         if (ImGui::ColorEdit4("Tint", col)) {
             s.color = { col[0], col[1], col[2], col[3] };
@@ -1645,9 +1687,33 @@ private:
         if (const auto* entry = m_assetDb.FindByGuid(spr.sprite)) {
             imp.FromJson(entry->importSettings);
         }
-        const float wWorld = float(tex->Width())  / imp.pixelsPerUnit;
-        const float hWorld = float(tex->Height()) / imp.pixelsPerUnit;
-        const NaraGame::Vec2 pivot = imp.ResolvedPivot();
+
+        // Resolve the optional sub-sprite reference. An empty subSprite
+        // means "use the whole texture" -- the existing behaviour. A
+        // non-empty name that isn't in the sheet falls through to whole-
+        // texture too, so a stale reference still draws something.
+        float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+        float regionPxW = float(tex->Width());
+        float regionPxH = float(tex->Height());
+        NaraGame::Vec2 pivot = imp.ResolvedPivot();
+        if (!spr.subSprite.empty()) {
+            for (const SceneEditor::SubSprite& s : imp.spriteSheet.sprites) {
+                if (s.name == spr.subSprite) {
+                    u0 = float(s.x) / float(tex->Width());
+                    v0 = float(s.y) / float(tex->Height());
+                    u1 = float(s.x + s.w) / float(tex->Width());
+                    v1 = float(s.y + s.h) / float(tex->Height());
+                    regionPxW = float(s.w);
+                    regionPxH = float(s.h);
+                    // SubSprite ships its own pivot; use it instead of
+                    // the texture-level setting.
+                    pivot = s.pivot;
+                    break;
+                }
+            }
+        }
+        const float wWorld = regionPxW / imp.pixelsPerUnit;
+        const float hWorld = regionPxH / imp.pixelsPerUnit;
         // World-space rect anchored on the entity's transform. The pivot
         // chooses which texel sits on the transform position: (0.5,0.5)
         // centres it, (0,0) puts the bottom-left of the sprite there,
@@ -1663,11 +1729,13 @@ private:
         const ImVec2 b{c.x + worldRight * m_viewCam.zoom,
                        c.y - worldBottom* m_viewCam.zoom};
 
-        // UV flip via swapped corners. Sprite tint multiplies the texture.
-        const ImVec2 uv0{spr.flipX ? 1.0f : 0.0f,
-                         spr.flipY ? 1.0f : 0.0f};
-        const ImVec2 uv1{spr.flipX ? 0.0f : 1.0f,
-                         spr.flipY ? 0.0f : 1.0f};
+        // UV flip swaps the resolved (u0, v0) / (u1, v1) endpoints in
+        // place, so sub-sprite + flip combinations stay inside the
+        // intended sheet cell.
+        if (spr.flipX) std::swap(u0, u1);
+        if (spr.flipY) std::swap(v0, v1);
+        const ImVec2 uv0{u0, v0};
+        const ImVec2 uv1{u1, v1};
         const ImU32 tint = IM_COL32(
             uint8_t(std::clamp(spr.color.r, 0.0f, 1.0f) * 255.0f),
             uint8_t(std::clamp(spr.color.g, 0.0f, 1.0f) * 255.0f),

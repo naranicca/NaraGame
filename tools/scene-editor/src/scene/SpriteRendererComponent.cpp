@@ -60,6 +60,7 @@ NaraGame::Vec2 JsonToVec2(const Value* node, const NaraGame::Vec2& def) {
 
 void SpriteRendererComponent::Serialize(Value& out) const {
     out.Add("sprite",       Value::MakeString(sprite.ToString()));
+    out.Add("subSprite",    Value::MakeString(subSprite));
     out.Add("color",        ColorToJson(color));
     out.Add("flipX",        Value::MakeBool(flipX));
     out.Add("flipY",        Value::MakeBool(flipY));
@@ -71,6 +72,7 @@ void SpriteRendererComponent::Serialize(Value& out) const {
 
 void SpriteRendererComponent::Deserialize(const Value& obj) {
     sprite       = AssetGuid::FromString(obj.GetString("sprite"));
+    subSprite    = obj.GetString("subSprite");
     color        = JsonToColor(obj.Find("color"), NaraGame::Color::White());
     flipX        = obj.GetBool("flipX", false);
     flipY        = obj.GetBool("flipY", false);
