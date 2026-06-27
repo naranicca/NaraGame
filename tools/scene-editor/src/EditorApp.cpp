@@ -262,6 +262,7 @@ public:
         EnsureDefaultLayout(dockId);
 
         DrawMainMenuBar();
+        HandleGlobalShortcuts();
         DrawHierarchyPanel();
         DrawInspectorPanel();
         DrawViewportPanel();
@@ -299,6 +300,75 @@ private:
         SetWindowTitle(m_hwnd, title);
     }
 
+    // Editor-wide keyboard shortcuts. ImGui-driven so input that landed
+    // in a text field falls through to the widget instead of triggering
+    // a global undo.
+    void HandleGlobalShortcuts() {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.WantTextInput) return;
+        const bool ctrl  = io.KeyCtrl;
+        const bool shift = io.KeyShift;
+        if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_Z)) DoUndo();
+        if (ctrl && (ImGui::IsKeyPressed(ImGuiKey_Y) ||
+                     (shift && ImGui::IsKeyPressed(ImGuiKey_Z)))) {
+            DoRedo();
+        }
+    }
+
+    // --- Undo / redo -----------------------------------------------------
+    //
+    // Snapshot the active scene before a user action that mutates it.
+    // Wipes the redo stack -- a fresh edit branches off the timeline.
+    void UndoSnapshot() {
+        m_undoStack.push_back(m_scene.SerializeToString());
+        if (m_undoStack.size() > kUndoStackMax) {
+            m_undoStack.erase(m_undoStack.begin());
+        }
+        m_redoStack.clear();
+    }
+
+    void UndoClear() {
+        m_undoStack.clear();
+        m_redoStack.clear();
+    }
+
+    void DoUndo() {
+        if (m_undoStack.empty()) return;
+        m_redoStack.push_back(m_scene.SerializeToString());
+        if (m_redoStack.size() > kUndoStackMax) {
+            m_redoStack.erase(m_redoStack.begin());
+        }
+        m_scene.DeserializeFromString(m_undoStack.back());
+        m_undoStack.pop_back();
+        m_scene.MarkDirty();
+        AfterUndoStateChange();
+    }
+
+    void DoRedo() {
+        if (m_redoStack.empty()) return;
+        m_undoStack.push_back(m_scene.SerializeToString());
+        if (m_undoStack.size() > kUndoStackMax) {
+            m_undoStack.erase(m_undoStack.begin());
+        }
+        m_scene.DeserializeFromString(m_redoStack.back());
+        m_redoStack.pop_back();
+        m_scene.MarkDirty();
+        AfterUndoStateChange();
+    }
+
+    // Selection + transient editor state can point at entities the
+    // undone state no longer contains; clear so we don't hold a stale
+    // id. Drag flags reset for the same reason.
+    void AfterUndoStateChange() {
+        if (m_selection != SceneEditor::kInvalidEntityId &&
+            !m_scene.Get(m_selection)) {
+            m_selection = SceneEditor::kInvalidEntityId;
+        }
+        m_gizmoActive = GizmoAxis::None;
+        m_rectActive  = false;
+        UpdateWindowTitle();
+    }
+
     // --- Project flow ----------------------------------------------------
 
     void StartNewProjectFlow() {
@@ -327,6 +397,7 @@ private:
         m_scene = SceneEditor::Scene();
         m_currentScenePath.clear();
         m_selection = SceneEditor::kInvalidEntityId;
+        UndoClear();
         UpdateWindowTitle();
     }
 
@@ -342,6 +413,7 @@ private:
         m_scene.SetName("Untitled");
         m_currentScenePath.clear();
         m_selection = SceneEditor::kInvalidEntityId;
+        UndoClear();
         UpdateWindowTitle();
     }
 
@@ -354,6 +426,7 @@ private:
         if (m_scene.Load(path)) {
             m_currentScenePath = path;
             m_selection = SceneEditor::kInvalidEntityId;
+            UndoClear();
             UpdateWindowTitle();
         }
     }
@@ -408,6 +481,13 @@ private:
                 DoSaveSceneAs();
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) Close();
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Edit")) {
+            const bool canU = !m_undoStack.empty();
+            const bool canR = !m_redoStack.empty();
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canU)) DoUndo();
+            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canR)) DoRedo();
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Window")) {
@@ -1093,6 +1173,7 @@ private:
             return;
         }
         if (ImGui::Button("+ Entity")) {
+            UndoSnapshot();
             const SceneEditor::EntityId id = m_scene.CreateEntity("Entity");
             m_selection = id;
             UpdateWindowTitle();
@@ -1163,10 +1244,12 @@ private:
         }
         if (ImGui::BeginPopupContextItem()) {
             if (ImGui::MenuItem("Add Child")) {
+                UndoSnapshot();
                 m_scene.CreateEntity("Entity", id);
                 UpdateWindowTitle();
             }
             if (ImGui::MenuItem("Delete")) {
+                UndoSnapshot();
                 m_scene.DestroyEntity(id);
                 if (m_selection == id) m_selection = SceneEditor::kInvalidEntityId;
                 UpdateWindowTitle();
@@ -1745,6 +1828,7 @@ private:
         if (!guid.IsValid()) return;
         const auto* entry = m_assetDb.FindByGuid(guid);
         if (!entry || entry->typeName != "Texture") return;
+        UndoSnapshot();
         // Use the file stem as a friendly entity name.
         std::string stem = entry->relPath;
         const size_t slash = stem.find_last_of('/');
@@ -1960,19 +2044,14 @@ private:
 
         switch (m_paintTool) {
             case PaintTool::Brush: {
-                // Per-frame stamp placement so drag strokes cover every
-                // crossed cell. The whole stamp lands at the cursor's
-                // bottom-left, so a 2x2 stamp at (gx, gy) writes the
-                // 2x2 region (gx..gx+1, gy..gy+1).
-                if (hovered && down) {
-                    changed = StampBrush(*tm, gx, gy);
-                }
+                // Snapshot on stroke-start; subsequent drag frames
+                // share that single undo entry.
+                if (clicked) UndoSnapshot();
+                if (hovered && down) changed = StampBrush(*tm, gx, gy);
                 break;
             }
             case PaintTool::Eraser: {
-                // Eraser stays per-cell on purpose -- a stamp-sized
-                // eraser is rarely what users want when cleaning up
-                // single mis-painted tiles.
+                if (clicked) UndoSnapshot();
                 if (hovered && down) {
                     if (tm->cells.erase({gx, gy}) > 0) changed = true;
                 }
@@ -1980,12 +2059,14 @@ private:
             }
             case PaintTool::Bucket: {
                 if (clicked) {
+                    UndoSnapshot();
                     changed = BucketFill(*tm, gx, gy);
                 }
                 break;
             }
             case PaintTool::Rect: {
                 if (clicked) {
+                    UndoSnapshot();
                     m_rectActive   = true;
                     m_rectAnchorGx = gx;
                     m_rectAnchorGy = gy;
@@ -2207,6 +2288,9 @@ private:
     }
 
     void BeginDrag(GizmoAxis axis, const ImVec2& worldMouse) {
+        // Snapshot once per drag (mouse-down). Every drag frame mutates
+        // through the same undo entry.
+        UndoSnapshot();
         m_gizmoActive    = axis;
         m_gizmoDownWorld = worldMouse;
         if (auto* e = m_scene.Get(m_selection)) {
@@ -3099,6 +3183,14 @@ private:
     SceneEditor::Scene    m_scene;
     std::string           m_currentScenePath;
     SceneEditor::EntityId m_selection = SceneEditor::kInvalidEntityId;
+
+    // Undo / redo stacks. Each entry is a full Scene snapshot string;
+    // simple and robust against the wide variety of mutation paths
+    // (paint, gizmo drag, component add, reparent, ...). Capped so the
+    // stack can't grow without bound during a long editing session.
+    std::vector<std::string> m_undoStack;
+    std::vector<std::string> m_redoStack;
+    static constexpr size_t  kUndoStackMax = 64;
 
     SceneEditor::AssetDatabase m_assetDb;
     SceneEditor::AssetGuid     m_selectedAsset;

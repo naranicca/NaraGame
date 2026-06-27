@@ -35,6 +35,12 @@ public:
     bool Save(const std::string& path) const;
     bool Load(const std::string& path);
 
+    // In-memory round-trip used by the editor's undo system. Same JSON
+    // shape Save / Load produce; failures in DeserializeFromString leave
+    // the scene unchanged the same way Load does on parse error.
+    std::string SerializeToString() const;
+    bool        DeserializeFromString(const std::string& json);
+
     void Clear();
 
     const std::string& Name() const { return m_name; }

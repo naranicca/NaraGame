@@ -149,13 +149,13 @@ Value EntityToJson(const Entity& e) {
 
 } // namespace
 
-bool Scene::Save(const std::string& path) const {
+std::string Scene::SerializeToString() const {
     Value root = Value::MakeObject();
     root.Add("schema",    Value::MakeNumber(1));
     root.Add("sceneName", Value::MakeString(m_name));
     root.Add("nextId",    Value::MakeNumber(double(m_nextId)));
     Value entities = Value::MakeArray();
-    // Iterate in stable order (by id) so the file diff stays sane.
+    // Iterate in stable order (by id) so the diff stays sane.
     std::vector<EntityId> ids;
     ids.reserve(m_entities.size());
     for (const auto& [id, _] : m_entities) ids.push_back(id);
@@ -165,8 +165,11 @@ bool Scene::Save(const std::string& path) const {
         if (e) entities.Push(EntityToJson(*e));
     }
     root.Add("entities", std::move(entities));
+    return NaraGame::MiniJson::Write(root);
+}
 
-    const std::string text = NaraGame::MiniJson::Write(root);
+bool Scene::Save(const std::string& path) const {
+    const std::string text = SerializeToString();
     if (!WriteFileText(path, text)) {
         NARAGAME_ERROR("Scene::Save: cannot write '%s'", path.c_str());
         return false;
@@ -176,17 +179,12 @@ bool Scene::Save(const std::string& path) const {
     return true;
 }
 
-bool Scene::Load(const std::string& path) {
-    std::string text;
-    if (!ReadFileText(path, text)) {
-        NARAGAME_ERROR("Scene::Load: cannot read '%s'", path.c_str());
-        return false;
-    }
+bool Scene::DeserializeFromString(const std::string& text) {
     std::string err;
     const Value root = NaraGame::MiniJson::Parse(text, &err);
     if (!root.IsObject()) {
-        NARAGAME_ERROR("Scene::Load: '%s' parse failed: %s",
-                       path.c_str(), err.c_str());
+        NARAGAME_ERROR("Scene::Deserialize: parse failed: %s",
+                       err.c_str());
         return false;
     }
 
@@ -202,8 +200,7 @@ bool Scene::Load(const std::string& path) {
             e->enabled = eo.GetBool("enabled", true);
             e->parent  = EntityId(eo.GetNumber("parent", 0));
             if (e->id == kInvalidEntityId) {
-                NARAGAME_WARN("Scene::Load: '%s' entry missing id, skipped",
-                              path.c_str());
+                NARAGAME_WARN("Scene::Deserialize: entry missing id, skipped");
                 continue;
             }
             const Value* comps = eo.Find("components");
@@ -212,8 +209,8 @@ bool Scene::Load(const std::string& path) {
                     const std::string& type = co.GetString("type");
                     auto comp = ComponentRegistry::Get().Create(type);
                     if (!comp) {
-                        NARAGAME_WARN("Scene::Load: unknown component '%s' on "
-                                      "entity %llu",
+                        NARAGAME_WARN("Scene::Deserialize: unknown component "
+                                      "'%s' on entity %llu",
                                       type.c_str(), e->id);
                         continue;
                     }
@@ -236,8 +233,8 @@ bool Scene::Load(const std::string& path) {
         } else if (Entity* p = Get(ent->parent)) {
             p->children.push_back(id);
         } else {
-            NARAGAME_WARN("Scene::Load: entity %llu references missing "
-                          "parent %llu; treating as root",
+            NARAGAME_WARN("Scene::Deserialize: entity %llu references "
+                          "missing parent %llu; treating as root",
                           id, ent->parent);
             ent->parent = kInvalidEntityId;
             m_roots.push_back(id);
@@ -252,6 +249,19 @@ bool Scene::Load(const std::string& path) {
     m_nextId = std::max(m_nextId, savedNext);
 
     m_dirty = false;
+    return true;
+}
+
+bool Scene::Load(const std::string& path) {
+    std::string text;
+    if (!ReadFileText(path, text)) {
+        NARAGAME_ERROR("Scene::Load: cannot read '%s'", path.c_str());
+        return false;
+    }
+    if (!DeserializeFromString(text)) {
+        NARAGAME_ERROR("Scene::Load: '%s' parse failed", path.c_str());
+        return false;
+    }
     NARAGAME_INFO("Scene::Load: '%s' loaded (%zu entities)",
                   path.c_str(), m_entities.size());
     return true;
