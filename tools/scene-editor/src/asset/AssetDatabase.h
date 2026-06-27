@@ -18,6 +18,7 @@ class RHITexture;
 namespace SceneEditor {
 
 class Project;
+class TilesetAsset;
 
 // One catalogued asset. The same row drives the Project panel display,
 // inspector lookups, and the GUID -> data resolution that scene /
@@ -80,6 +81,15 @@ public:
     NaraGame::RHITexture* GetTexture(NaraGame::RHIDevice& device,
                                      const AssetGuid& guid);
 
+    // Lazy tileset cache. First call reads the .ntileset file from
+    // disk; later calls reuse the cached pointer. Returns nullptr if
+    // the guid is unknown or classifies as a non-tileset.
+    TilesetAsset* GetTileset(const AssetGuid& guid);
+    // Persist the in-memory tileset back to its .ntileset path.
+    bool SaveTileset(const AssetGuid& guid);
+    // Drop a tileset from the cache (forces re-read on next access).
+    void EvictTileset(const AssetGuid& guid);
+
 private:
     void ScanDir(const std::string& dirAbs,
                  const std::string& relPrefix,
@@ -105,6 +115,10 @@ private:
     // route this through a proper hot-reload watch.
     std::unordered_map<AssetGuid,
                        std::unique_ptr<NaraGame::RHITexture>> m_textureCache;
+    // Loaded .ntileset files, keyed by asset guid. Lazy + cleared on
+    // Close like the texture cache.
+    std::unordered_map<AssetGuid,
+                       std::unique_ptr<TilesetAsset>>          m_tilesetCache;
 };
 
 } // namespace SceneEditor

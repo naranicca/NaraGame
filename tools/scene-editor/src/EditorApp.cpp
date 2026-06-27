@@ -8,6 +8,7 @@
 #include "asset/AssetDatabase.h"
 #include "asset/SpriteSheet.h"
 #include "asset/TextureImportSettings.h"
+#include "asset/Tileset.h"
 #include "project/Project.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
@@ -272,6 +273,7 @@ public:
         DrawNewProjectModal();
         DrawSortingLayersModal();
         DrawSpriteEditorWindow();
+        DrawTilesetEditorWindow();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
 
         ImGui::Render();
@@ -439,6 +441,36 @@ private:
         }
     }
 
+    void DoNewTileset() {
+        const std::string tilesetsDir =
+            m_project.IsOpen() ? (m_project.AssetsDir() + "/Tilesets")
+                               : std::string{};
+        const std::string path = PickFileDialog(
+            m_hwnd, CLSID_FileSaveDialog, L"New Tileset",
+            L"NaraGame Tileset (*.ntileset)", L"*.ntileset", L"ntileset",
+            tilesetsDir);
+        if (path.empty()) return;
+        SceneEditor::TilesetAsset ts;
+        if (!ts.SaveToFile(path)) return;
+        m_assetDb.Rescan();
+        // Open the editor on the freshly created file so the user can
+        // start picking its texture immediately.
+        if (const auto* entry = m_assetDb.FindByPath(RelToAssets(path))) {
+            OpenTilesetEditor(entry->guid);
+        }
+    }
+
+    // Strip the project's Assets/ prefix off `abs` so we can hand a
+    // relative path to AssetDatabase::FindByPath.
+    std::string RelToAssets(const std::string& abs) const {
+        const std::string root = m_project.AssetsDir() + "/";
+        if (abs.size() > root.size() &&
+            abs.compare(0, root.size(), root) == 0) {
+            return abs.substr(root.size());
+        }
+        return abs;
+    }
+
     void DoSaveSceneAs() {
         const std::string path = PickFileDialog(
             m_hwnd, CLSID_FileSaveDialog, L"Save Scene As",
@@ -480,6 +512,9 @@ private:
             if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S", false, projOpen))
                 DoSaveSceneAs();
             ImGui::Separator();
+            if (ImGui::MenuItem("New Tileset...", nullptr, false, projOpen))
+                DoNewTileset();
+            ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) Close();
             ImGui::EndMenu();
         }
@@ -517,6 +552,168 @@ private:
         m_spriteEditorAsset    = guid;
         m_spriteEditorOpen     = true;
         m_spriteEditorActivate = true;
+    }
+
+    void OpenTilesetEditor(const SceneEditor::AssetGuid& guid) {
+        m_tilesetEditorAsset    = guid;
+        m_tilesetEditorOpen     = true;
+        m_tilesetEditorActivate = true;
+    }
+
+    // Tileset Editor window. Lets the user pick the source texture, set
+    // cell size, and per-tile flag tiles as "collides" via a click on
+    // the preview grid. Auto-saves to the .ntileset file on every edit.
+    void DrawTilesetEditorWindow() {
+        if (!m_tilesetEditorOpen) return;
+        if (m_tilesetEditorActivate) {
+            ImGui::SetNextWindowSize(ImVec2(720, 540), ImGuiCond_Appearing);
+            ImGui::SetNextWindowFocus();
+            m_tilesetEditorActivate = false;
+        }
+        if (!ImGui::Begin("Tileset Editor", &m_tilesetEditorOpen)) {
+            ImGui::End();
+            return;
+        }
+        const SceneEditor::AssetEntry* entry =
+            m_assetDb.FindByGuid(m_tilesetEditorAsset);
+        if (!entry || entry->typeName != "Tileset") {
+            ImGui::TextDisabled("Double-click a .ntileset in the Project "
+                                "panel to edit it.");
+            ImGui::End();
+            return;
+        }
+        SceneEditor::TilesetAsset* ts =
+            m_assetDb.GetTileset(m_tilesetEditorAsset);
+        if (!ts) {
+            ImGui::TextDisabled("Could not load '%s'.",
+                                entry->relPath.c_str());
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("%s", entry->relPath.c_str());
+
+        bool dirty = false;
+
+        // Texture combo.
+        std::string current = "(none)";
+        if (ts->texture.IsValid()) {
+            if (const auto* te = m_assetDb.FindByGuid(ts->texture)) {
+                current = te->relPath;
+            } else {
+                current = ts->texture.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Texture", current.c_str())) {
+            if (ImGui::Selectable("(none)", !ts->texture.IsValid())) {
+                ts->texture = SceneEditor::AssetGuid{};
+                dirty = true;
+            }
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "Texture") continue;
+                const bool sel = (a.guid == ts->texture);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    ts->texture = a.guid;
+                    dirty = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        int sz[2] = { ts->cellPixelW, ts->cellPixelH };
+        if (ImGui::DragInt2("Cell Pixels (W,H)", sz, 0.2f, 1, 4096)) {
+            ts->cellPixelW = std::max(1, sz[0]);
+            ts->cellPixelH = std::max(1, sz[1]);
+            dirty = true;
+        }
+        ImGui::Separator();
+
+        if (!ts->texture.IsValid()) {
+            ImGui::TextDisabled("Pick a Texture above to start tagging tiles.");
+            if (dirty) m_assetDb.SaveTileset(m_tilesetEditorAsset);
+            ImGui::End();
+            return;
+        }
+        NaraGame::RHITexture* tex =
+            m_assetDb.GetTexture(GetDevice(), ts->texture);
+        if (!tex || tex->Width() == 0 || tex->Height() == 0) {
+            ImGui::TextDisabled("Texture preview unavailable.");
+            if (dirty) m_assetDb.SaveTileset(m_tilesetEditorAsset);
+            ImGui::End();
+            return;
+        }
+        const int texCols = int(tex->Width())  / ts->cellPixelW;
+        const int texRows = int(tex->Height()) / ts->cellPixelH;
+        ImGui::TextDisabled("%d x %d tiles  -- click a cell to toggle "
+                            "collides", texCols, texRows);
+
+        // Preview area.
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const float texW = float(tex->Width());
+        const float texH = float(tex->Height());
+        float scale = std::min(avail.x / texW, avail.y / texH);
+        if (scale <= 0.0f) scale = 1.0f;
+        const ImVec2 imgSize{texW * scale, texH * scale};
+        const ImVec2 imgMin = ImGui::GetCursorScreenPos();
+        const ImTextureID texId =
+            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                tex->GetNativeView()));
+        ImGui::Image(texId, imgSize);
+        ImGui::SetCursorScreenPos(imgMin);
+        ImGui::InvisibleButton("##tileset_hit", imgSize,
+                               ImGuiButtonFlags_MouseButtonLeft);
+        const bool clicked = ImGui::IsItemClicked();
+        const float cellScreenW = float(ts->cellPixelW) * scale;
+        const float cellScreenH = float(ts->cellPixelH) * scale;
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImU32 grid = IM_COL32(255, 255, 255, 50);
+        for (int r = 0; r <= texRows; ++r) {
+            const float y = imgMin.y + r * cellScreenH;
+            dl->AddLine(ImVec2{imgMin.x,             y},
+                        ImVec2{imgMin.x + imgSize.x, y}, grid, 1.0f);
+        }
+        for (int c = 0; c <= texCols; ++c) {
+            const float x = imgMin.x + c * cellScreenW;
+            dl->AddLine(ImVec2{x, imgMin.y},
+                        ImVec2{x, imgMin.y + imgSize.y}, grid, 1.0f);
+        }
+        // Highlight cells flagged "collides" with a translucent red.
+        for (const auto& kv : ts->tiles) {
+            if (!kv.second.collides) continue;
+            const int idx = kv.first;
+            const int col = idx % texCols;
+            const int row = idx / texCols;
+            if (row >= texRows) continue;
+            const ImVec2 a{imgMin.x +  col      * cellScreenW,
+                           imgMin.y +  row      * cellScreenH};
+            const ImVec2 b{imgMin.x + (col + 1) * cellScreenW,
+                           imgMin.y + (row + 1) * cellScreenH};
+            dl->AddRectFilled(a, b, IM_COL32(220, 60, 60, 90));
+            dl->AddRect(a, b, IM_COL32(255, 100, 100, 255), 0.0f, 0, 2.0f);
+        }
+
+        if (clicked) {
+            const ImVec2 mp = ImGui::GetMousePos();
+            const int px = int((mp.x - imgMin.x) / scale);
+            const int py = int((mp.y - imgMin.y) / scale);
+            const int col = px / ts->cellPixelW;
+            const int row = py / ts->cellPixelH;
+            if (col >= 0 && col < texCols && row >= 0 && row < texRows) {
+                const int idx = row * texCols + col;
+                auto it = ts->tiles.find(idx);
+                if (it == ts->tiles.end()) {
+                    SceneEditor::TilesetTile t;
+                    t.collides = true;
+                    ts->tiles[idx] = t;
+                } else {
+                    it->second.collides = !it->second.collides;
+                    if (!it->second.collides) ts->tiles.erase(it);
+                }
+                dirty = true;
+            }
+        }
+
+        if (dirty) m_assetDb.SaveTileset(m_tilesetEditorAsset);
+        ImGui::End();
     }
 
     void DrawSpriteEditorWindow() {
@@ -1376,6 +1573,18 @@ private:
                 tm.tileset = SceneEditor::AssetGuid{};
                 changed = true;
             }
+            // .ntileset assets first (the higher-level form), then raw
+            // textures as a fallback for the M4c1 path.
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "Tileset") continue;
+                const bool sel = (a.guid == tm.tileset);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    UndoSnapshot();
+                    tm.tileset = a.guid;
+                    changed = true;
+                }
+            }
+            ImGui::Separator();
             for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
                 if (a.typeName != "Texture") continue;
                 const bool sel = (a.guid == tm.tileset);
@@ -1394,7 +1603,8 @@ private:
                     SceneEditor::AssetGuid guid;
                     std::memcpy(&guid, p->Data, sizeof(guid));
                     if (const auto* e = m_assetDb.FindByGuid(guid)) {
-                        if (e->typeName == "Texture") {
+                        if (e->typeName == "Texture" ||
+                            e->typeName == "Tileset") {
                             UndoSnapshot();
                             tm.tileset = guid;
                             changed = true;
@@ -1404,12 +1614,22 @@ private:
             }
             ImGui::EndDragDropTarget();
         }
+        // Cell Pixels only matters when the tileset GUID points at a
+        // raw Texture. When it points at a .ntileset asset, the
+        // tileset file owns its own cellPixelW/H and these fields are
+        // greyed out as a hint.
+        const bool tilesetOwnedCells =
+            tm.tileset.IsValid() &&
+            m_assetDb.FindByGuid(tm.tileset) &&
+            m_assetDb.FindByGuid(tm.tileset)->typeName == "Tileset";
+        if (tilesetOwnedCells) ImGui::BeginDisabled();
         int sz[2] = { tm.cellPixelW, tm.cellPixelH };
         if (ImGui::DragInt2("Cell Pixels (W,H)", sz, 0.2f, 1, 4096)) {
             tm.cellPixelW = std::max(1, sz[0]);
             tm.cellPixelH = std::max(1, sz[1]);
             changed = true;
         }
+        if (tilesetOwnedCells) ImGui::EndDisabled();
         if (ImGui::IsItemActivated()) UndoSnapshot();
 
         // Sorting layer + order, mirroring the SpriteRenderer inspector
@@ -2004,7 +2224,7 @@ private:
     // for plain ones, ANY painted cell for tilemap entities). Returns
     // the topmost (last-drawn) hit so a child that's painted over a
     // parent wins.
-    SceneEditor::EntityId HitTestEntity(const ImVec2& worldMouse) const {
+    SceneEditor::EntityId HitTestEntity(const ImVec2& worldMouse) {
         std::vector<SceneEditor::EntityId> ids;
         ids.reserve(64);
         CollectAllEntities(m_scene.Roots(), ids);
@@ -2018,17 +2238,18 @@ private:
             // freshly created tilemap with no cells stays clickable
             // via its transform marker.
             if (const auto* tm = e->GetComponent<SceneEditor::TilemapComponent>()) {
-                if (tm->tileset.IsValid() &&
-                    tm->cellPixelW > 0 && tm->cellPixelH > 0 &&
+                const ResolvedTileset rt = ResolveTileset(*tm);
+                if (rt.textureGuid.IsValid() &&
+                    rt.cellW > 0 && rt.cellH > 0 &&
                     !tm->cells.empty()) {
                     SceneEditor::TextureImportSettings imp;
-                    if (const auto* entry = m_assetDb.FindByGuid(tm->tileset)) {
+                    if (const auto* entry = m_assetDb.FindByGuid(rt.textureGuid)) {
                         imp.FromJson(entry->importSettings);
                     }
                     const float ppu = imp.pixelsPerUnit;
                     if (ppu > 0.0f) {
-                        const float cellW = float(tm->cellPixelW) / ppu;
-                        const float cellH = float(tm->cellPixelH) / ppu;
+                        const float cellW = float(rt.cellW) / ppu;
+                        const float cellH = float(rt.cellH) / ppu;
                         const int gx = int(std::floor((worldMouse.x - wp.x) / cellW));
                         const int gy = int(std::floor((worldMouse.y - wp.y) / cellH));
                         if (tm->cells.count({gx, gy}) > 0) {
@@ -2060,14 +2281,17 @@ private:
             selEntity->GetComponent<SceneEditor::TilemapComponent>();
         if (!tm || !tm->tileset.IsValid()) return false;
 
-        // Resolve world cell size via the texture's PPU; matches the
-        // viewport tilemap renderer so the brush snaps exactly.
+        // Resolve the tileset reference (Texture or Tileset asset) so
+        // the brush snaps to whatever cell size the renderer uses.
+        const ResolvedTileset rt = ResolveTileset(*tm);
+        if (!rt.textureGuid.IsValid() || rt.cellW <= 0 || rt.cellH <= 0)
+            return false;
         SceneEditor::TextureImportSettings imp;
-        if (const auto* entry = m_assetDb.FindByGuid(tm->tileset)) {
+        if (const auto* entry = m_assetDb.FindByGuid(rt.textureGuid)) {
             imp.FromJson(entry->importSettings);
         }
-        const float cellWorldW = float(tm->cellPixelW) / imp.pixelsPerUnit;
-        const float cellWorldH = float(tm->cellPixelH) / imp.pixelsPerUnit;
+        const float cellWorldW = float(rt.cellW) / imp.pixelsPerUnit;
+        const float cellWorldH = float(rt.cellH) / imp.pixelsPerUnit;
         if (cellWorldW <= 0.0f || cellWorldH <= 0.0f) return true;
 
         const ImVec2 ep   = EntityWorldPos(*selEntity);
@@ -2235,11 +2459,12 @@ private:
     }
 
     int TexCols(const SceneEditor::TilemapComponent& tm) {
-        if (tm.cellPixelW <= 0) return 0;
+        const ResolvedTileset rt = ResolveTileset(tm);
+        if (rt.cellW <= 0) return 0;
         NaraGame::RHITexture* tex =
-            m_assetDb.GetTexture(GetDevice(), tm.tileset);
+            m_assetDb.GetTexture(GetDevice(), rt.textureGuid);
         if (!tex) return 0;
-        return int(tex->Width()) / tm.cellPixelW;
+        return int(tex->Width()) / rt.cellW;
     }
 
     // Place the stamp with its bottom-left at (gx, gy). dxWorld grows
@@ -2553,6 +2778,35 @@ private:
         }
     }
 
+    // Resolve a TilemapComponent's "tileset" GUID into the renderer's
+    // working values. The GUID can point at a Texture (the M4c1 path,
+    // cellSize comes from the component) or a .ntileset asset (cellSize
+    // comes from the tileset). On a Tileset, the source texture's GUID
+    // is loaded out as the underlying texture for sampling.
+    struct ResolvedTileset {
+        SceneEditor::AssetGuid textureGuid;
+        int                    cellW = 0;
+        int                    cellH = 0;
+    };
+
+    ResolvedTileset ResolveTileset(const SceneEditor::TilemapComponent& tm) {
+        ResolvedTileset r;
+        r.textureGuid = tm.tileset;
+        r.cellW       = tm.cellPixelW;
+        r.cellH       = tm.cellPixelH;
+        if (const auto* entry = m_assetDb.FindByGuid(tm.tileset)) {
+            if (entry->typeName == "Tileset") {
+                if (SceneEditor::TilesetAsset* ts =
+                        m_assetDb.GetTileset(tm.tileset)) {
+                    r.textureGuid = ts->texture;
+                    r.cellW       = ts->cellPixelW;
+                    r.cellH       = ts->cellPixelH;
+                }
+            }
+        }
+        return r;
+    }
+
     // Render the painted cells of a TilemapComponent. Each cell sits in
     // a regular grid anchored on the entity's transform; the source UV
     // comes from the cell's tile index inside the texture (row-major,
@@ -2561,24 +2815,24 @@ private:
                            const SceneEditor::TilemapComponent& tm,
                            const ImVec2& panelMin,
                            const ImVec2& panelSize, bool selected) {
-        if (tm.cellPixelW <= 0 || tm.cellPixelH <= 0) return;
+        const ResolvedTileset rt = ResolveTileset(tm);
+        if (rt.cellW <= 0 || rt.cellH <= 0) return;
         NaraGame::RHITexture* tex =
-            m_assetDb.GetTexture(GetDevice(), tm.tileset);
+            m_assetDb.GetTexture(GetDevice(), rt.textureGuid);
         if (!tex || tex->Width() == 0 || tex->Height() == 0) return;
-        const int texCols = int(tex->Width())  / tm.cellPixelW;
-        const int texRows = int(tex->Height()) / tm.cellPixelH;
+        const int texCols = int(tex->Width())  / rt.cellW;
+        const int texRows = int(tex->Height()) / rt.cellH;
         if (texCols <= 0 || texRows <= 0) return;
 
-        // World units per pixel: read the texture's import settings so
-        // the tilemap inherits the project's chosen PPU. Default 100
-        // matches the texture default.
+        // World units per pixel: read the underlying texture's import
+        // settings so the tilemap inherits the project's chosen PPU.
         SceneEditor::TextureImportSettings imp;
-        if (const auto* entry = m_assetDb.FindByGuid(tm.tileset)) {
+        if (const auto* entry = m_assetDb.FindByGuid(rt.textureGuid)) {
             imp.FromJson(entry->importSettings);
         }
         const float ppu        = imp.pixelsPerUnit;
-        const float cellWorldW = float(tm.cellPixelW) / ppu;
-        const float cellWorldH = float(tm.cellPixelH) / ppu;
+        const float cellWorldW = float(rt.cellW) / ppu;
+        const float cellWorldH = float(rt.cellH) / ppu;
 
         const float texW = float(tex->Width());
         const float texH = float(tex->Height());
@@ -2607,10 +2861,10 @@ private:
             const int tileCol = idx % texCols;
             const int tileRow = idx / texCols;
             if (tileRow >= texRows) continue;
-            const float u0 =  float(tileCol     * tm.cellPixelW) / texW;
-            const float v0 =  float(tileRow     * tm.cellPixelH) / texH;
-            const float u1 =  float((tileCol + 1) * tm.cellPixelW) / texW;
-            const float v1 =  float((tileRow + 1) * tm.cellPixelH) / texH;
+            const float u0 =  float(tileCol     * rt.cellW) / texW;
+            const float v0 =  float(tileRow     * rt.cellH) / texH;
+            const float u1 =  float((tileCol + 1) * rt.cellW) / texW;
+            const float v1 =  float((tileRow + 1) * rt.cellH) / texH;
 
             // World rect (Y-up: gy = 0 = bottom row).
             const float worldL = entityWp.x +  gx       * cellWorldW;
@@ -3043,15 +3297,21 @@ private:
             ImGui::End();
             return;
         }
+        const ResolvedTileset rt = ResolveTileset(*tm);
         NaraGame::RHITexture* tex =
-            m_assetDb.GetTexture(GetDevice(), tm->tileset);
+            m_assetDb.GetTexture(GetDevice(), rt.textureGuid);
         if (!tex || tex->Width() == 0 || tex->Height() == 0) {
             ImGui::TextDisabled("Tileset texture unavailable.");
             ImGui::End();
             return;
         }
-        const int texCols = int(tex->Width())  / tm->cellPixelW;
-        const int texRows = int(tex->Height()) / tm->cellPixelH;
+        if (rt.cellW <= 0 || rt.cellH <= 0) {
+            ImGui::TextDisabled("Cell size invalid.");
+            ImGui::End();
+            return;
+        }
+        const int texCols = int(tex->Width())  / rt.cellW;
+        const int texRows = int(tex->Height()) / rt.cellH;
         if (texCols <= 0 || texRows <= 0) {
             ImGui::TextDisabled("Cell size larger than texture.");
             ImGui::End();
@@ -3094,8 +3354,8 @@ private:
                 tex->GetNativeView()));
         ImGui::Image(texId, imgSize);
 
-        const float cellPxScreenW = float(tm->cellPixelW) * scale;
-        const float cellPxScreenH = float(tm->cellPixelH) * scale;
+        const float cellPxScreenW = float(rt.cellW) * scale;
+        const float cellPxScreenH = float(rt.cellH) * scale;
 
         // Capture mouse on top of the image. We own the left button so
         // we can drive a click-to-pick + drag-to-grow stamp selection.
@@ -3225,6 +3485,11 @@ private:
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             OpenSpriteEditor(e->guid);
         }
+        if (e && e->typeName == "Tileset" &&
+            ImGui::IsItemHovered() &&
+            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            OpenTilesetEditor(e->guid);
+        }
         if (e && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             // The 16-byte GUID is the entire payload. Editor drop sites
             // use the type tag to pick what to do with it.
@@ -3321,6 +3586,10 @@ private:
     bool                m_spriteEditorOpen     = false;
     bool                m_spriteEditorActivate = false;
     SceneEditor::AssetGuid m_spriteEditorAsset;
+    // Tileset Editor follows the same activation pattern.
+    bool                m_tilesetEditorOpen     = false;
+    bool                m_tilesetEditorActivate = false;
+    SceneEditor::AssetGuid m_tilesetEditorAsset;
     int                 m_spriteEditorMode  = 0;    // 0=by size, 1=by count
     int                 m_spriteEditorCellW = 32;
     int                 m_spriteEditorCellH = 32;

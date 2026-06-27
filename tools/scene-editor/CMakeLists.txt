@@ -40,6 +40,7 @@ add_executable(scene-editor
     src/asset/AssetGuid.cpp
     src/asset/SpriteSheet.cpp
     src/asset/TextureImportSettings.cpp
+    src/asset/Tileset.cpp
     src/project/Project.cpp
     src/scene/Component.cpp
     src/scene/Scene.cpp

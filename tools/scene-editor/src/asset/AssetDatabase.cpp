@@ -2,6 +2,7 @@
 
 #include "../project/Project.h"
 #include "TextureImportSettings.h"
+#include "Tileset.h"
 
 #include <NaraGame/assets/Image.h>
 #include <NaraGame/assets/MiniJson.h>
@@ -75,6 +76,7 @@ void AssetDatabase::Close() {
     m_byGuid.clear();
     m_root.reset();
     m_textureCache.clear();
+    m_tilesetCache.clear();
 }
 
 NaraGame::RHITexture* AssetDatabase::GetTexture(NaraGame::RHIDevice& device,
@@ -269,6 +271,37 @@ void AssetDatabase::EvictTexture(const AssetGuid& guid) {
     m_textureCache.erase(guid);
 }
 
+TilesetAsset* AssetDatabase::GetTileset(const AssetGuid& guid) {
+    if (!guid.IsValid()) return nullptr;
+    if (auto it = m_tilesetCache.find(guid); it != m_tilesetCache.end()) {
+        return it->second.get();
+    }
+    const AssetEntry* entry = FindByGuid(guid);
+    if (!entry || entry->typeName != "Tileset") return nullptr;
+    const std::string abs = m_assetsRoot + "/" + entry->relPath;
+    auto ts = std::make_unique<TilesetAsset>();
+    if (!ts->LoadFromFile(abs)) {
+        m_tilesetCache.emplace(guid, nullptr);
+        return nullptr;
+    }
+    TilesetAsset* raw = ts.get();
+    m_tilesetCache.emplace(guid, std::move(ts));
+    return raw;
+}
+
+bool AssetDatabase::SaveTileset(const AssetGuid& guid) {
+    TilesetAsset* ts = GetTileset(guid);
+    if (!ts) return false;
+    const AssetEntry* entry = FindByGuid(guid);
+    if (!entry) return false;
+    const std::string abs = m_assetsRoot + "/" + entry->relPath;
+    return ts->SaveToFile(abs);
+}
+
+void AssetDatabase::EvictTileset(const AssetGuid& guid) {
+    m_tilesetCache.erase(guid);
+}
+
 std::string AssetDatabase::ClassifyByExtension(const std::string& relPath) {
     const std::string ext = LowerExt(relPath);
     if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" ||
@@ -278,7 +311,7 @@ std::string AssetDatabase::ClassifyByExtension(const std::string& relPath) {
         return "Script";
     if (ext == ".nscene") return "Scene";
     if (ext == ".nprefab") return "Prefab";
-    if (ext == ".tileset") return "Tileset";
+    if (ext == ".ntileset") return "Tileset";
     if (ext == ".autotile") return "AutotileRule";
     if (ext == ".sprite")  return "SpriteSheet";
     if (ext == ".hdr")     return "HdrEnvironment";
