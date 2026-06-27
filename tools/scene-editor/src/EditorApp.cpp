@@ -313,15 +313,29 @@ private:
     }
 
     // Append one entry to the rolling event log. Trim from the front
-    // so the tail (and Console rendering) stays bounded.
+    // so the tail (and Console rendering) stays bounded. Non-default
+    // args get appended as `["s" f i]` so the receiver can tell at a
+    // glance which payload reached them.
     void LogAnimationEvent(const std::string& entityName,
                            const std::string& animName,
-                           const std::string& eventName,
-                           float at) {
-        char buf[256];
-        std::snprintf(buf, sizeof(buf), "%s | %s @ %.2fs : %s",
-                      entityName.c_str(), animName.c_str(),
-                      at, eventName.c_str());
+                           const SceneEditor::AnimationEvent& ev) {
+        const bool hasArgs = !ev.stringArg.empty() ||
+                             ev.floatArg != 0.0f ||
+                             ev.intArg   != 0;
+        char buf[320];
+        if (hasArgs) {
+            std::snprintf(buf, sizeof(buf),
+                          "%s | %s @ %.2fs : %s [\"%s\" %.3f %d]",
+                          entityName.c_str(), animName.c_str(),
+                          ev.time, ev.name.c_str(),
+                          ev.stringArg.c_str(),
+                          double(ev.floatArg), ev.intArg);
+        } else {
+            std::snprintf(buf, sizeof(buf),
+                          "%s | %s @ %.2fs : %s",
+                          entityName.c_str(), animName.c_str(),
+                          ev.time, ev.name.c_str());
+        }
         m_eventLog.emplace_back(buf);
         if (m_eventLog.size() > kEventLogMax) {
             m_eventLog.erase(m_eventLog.begin(),
@@ -346,7 +360,7 @@ private:
         auto fire = [&](float lo, float hi) {
             for (const auto& ev : anim.events) {
                 if (ev.time >  lo && ev.time <= hi) {
-                    LogAnimationEvent(entName, animName, ev.name, ev.time);
+                    LogAnimationEvent(entName, animName, ev);
                 }
             }
         };
@@ -1939,17 +1953,35 @@ private:
         for (size_t i = 0; i < an->events.size(); ++i) {
             SceneEditor::AnimationEvent& ev = an->events[i];
             ImGui::PushID(int(60000 + i));
-            ImGui::SetNextItemWidth(100.0f);
+            ImGui::SetNextItemWidth(85.0f);
             if (ImGui::DragFloat("##evt", &ev.time, 0.01f,
                                   0.0f, 0.0f, "%.3fs")) dirty = true;
             ImGui::SameLine();
             char nameBuf[64];
             std::snprintf(nameBuf, sizeof(nameBuf), "%s", ev.name.c_str());
-            ImGui::SetNextItemWidth(-100.0f);
+            ImGui::SetNextItemWidth(110.0f);
             if (ImGui::InputText("##evname", nameBuf, sizeof(nameBuf))) {
                 ev.name = nameBuf;
                 dirty = true;
             }
+            ImGui::SameLine();
+            char sargBuf[128];
+            std::snprintf(sargBuf, sizeof(sargBuf), "%s",
+                          ev.stringArg.c_str());
+            ImGui::SetNextItemWidth(120.0f);
+            if (ImGui::InputTextWithHint("##evsarg", "string",
+                                          sargBuf, sizeof(sargBuf))) {
+                ev.stringArg = sargBuf;
+                dirty = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.0f);
+            if (ImGui::DragFloat("##evfarg", &ev.floatArg, 0.05f,
+                                  0.0f, 0.0f, "f %.2f")) dirty = true;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60.0f);
+            if (ImGui::DragInt("##eviarg", &ev.intArg, 0.2f,
+                                0, 0, "i %d")) dirty = true;
             ImGui::SameLine();
             if (ImGui::SmallButton("X")) removeEvAt = int(i);
             ImGui::PopID();

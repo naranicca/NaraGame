@@ -19,10 +19,16 @@ struct AnimationFrame {
 
 // One-shot marker fired when playback crosses `time`. The editor logs
 // these to the Console panel; runtime callers (Lua hook -- next
-// milestone) will dispatch them as scripted events.
+// milestone) will dispatch them as scripted events. The three arg
+// fields cover the common Unity-style "function name + (string,
+// float, int)" payload -- every callback gets the same surface, the
+// receiver picks whatever it cares about.
 struct AnimationEvent {
     float       time = 0.0f;       // seconds from animation start
     std::string name;
+    std::string stringArg;
+    float       floatArg = 0.0f;
+    int         intArg   = 0;
 };
 
 // .nanim asset: an ordered list of frames sampled from a single source

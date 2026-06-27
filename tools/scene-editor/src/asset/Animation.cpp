@@ -51,8 +51,11 @@ void AnimationAsset::FromJson(const Value& root) {
             for (const Value& e : arr->arrayValue) {
                 if (!e.IsObject()) continue;
                 AnimationEvent ev;
-                ev.time = float(e.GetNumber("time", 0.0));
-                ev.name = e.GetString("name");
+                ev.time      = float(e.GetNumber("time", 0.0));
+                ev.name      = e.GetString("name");
+                ev.stringArg = e.GetString("stringArg");
+                ev.floatArg  = float(e.GetNumber("floatArg", 0.0));
+                ev.intArg    = e.GetInt("intArg", 0);
                 events.push_back(std::move(ev));
             }
         }
@@ -75,8 +78,11 @@ Value AnimationAsset::ToJson() const {
     Value evArr = Value::MakeArray();
     for (const AnimationEvent& ev : events) {
         Value e = Value::MakeObject();
-        e.Add("time", Value::MakeNumber(ev.time));
-        e.Add("name", Value::MakeString(ev.name));
+        e.Add("time",      Value::MakeNumber(ev.time));
+        e.Add("name",      Value::MakeString(ev.name));
+        e.Add("stringArg", Value::MakeString(ev.stringArg));
+        e.Add("floatArg",  Value::MakeNumber(ev.floatArg));
+        e.Add("intArg",    Value::MakeNumber(ev.intArg));
         evArr.Push(std::move(e));
     }
     root.Add("events", std::move(evArr));
