@@ -1045,6 +1045,9 @@ private:
         m_graphContextNode         = -1;
         m_controllerEditorParamFilter[0] = '\0';
         m_controllerEditorParamTypeFilter = 0;
+        m_controllerEditorTrFromFilter    = 0;
+        m_controllerEditorTrToFilter      = 0;
+        m_controllerEditorTrParamFilter   = 0;
     }
 
     // True when the Combo's "All" entry (idx 0) is picked or when
@@ -1834,11 +1837,142 @@ private:
         // -----------------------------------------------------------
         ImGui::Separator();
         ImGui::Text("Transitions (%zu)", ctrl->transitions.size());
+        // Filter row: 3 BeginCombos -- From / To / Param. Each filter
+        // takes 0 = "Show all" and otherwise maps to either a state
+        // index, the global (fromIdx == -1) bucket, or the empty-
+        // param bucket.
+        {
+            const auto& states = ctrl->states;
+            const auto& params = ctrl->parameters;
+            // Clamp filters that went stale after the user removed
+            // a state / parameter while the combo still pointed at
+            // its slot.
+            if (m_controllerEditorTrFromFilter >
+                int(states.size()) + 1) {
+                m_controllerEditorTrFromFilter = 0;
+            }
+            if (m_controllerEditorTrToFilter > int(states.size())) {
+                m_controllerEditorTrToFilter = 0;
+            }
+            if (m_controllerEditorTrParamFilter >
+                int(params.size()) + 1) {
+                m_controllerEditorTrParamFilter = 0;
+            }
+            auto fromLabelFor = [&](int idx) -> const char* {
+                if (idx == 0) return "From: all";
+                if (idx == 1) return "From: (global)";
+                const int s = idx - 2;
+                return (s >= 0 && s < int(states.size()))
+                    ? states[size_t(s)].name.c_str() : "(invalid)";
+            };
+            auto toLabelFor = [&](int idx) -> const char* {
+                if (idx == 0) return "To: all";
+                const int s = idx - 1;
+                return (s >= 0 && s < int(states.size()))
+                    ? states[size_t(s)].name.c_str() : "(invalid)";
+            };
+            auto paramLabelFor = [&](int idx) -> const char* {
+                if (idx == 0) return "Param: all";
+                if (idx == 1) return "Param: (none)";
+                const int p = idx - 2;
+                return (p >= 0 && p < int(params.size()))
+                    ? params[size_t(p)].name.c_str() : "(invalid)";
+            };
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::BeginCombo("##trfromfilter",
+                    fromLabelFor(m_controllerEditorTrFromFilter))) {
+                if (ImGui::Selectable("From: all",
+                        m_controllerEditorTrFromFilter == 0)) {
+                    m_controllerEditorTrFromFilter = 0;
+                }
+                if (ImGui::Selectable("From: (global)",
+                        m_controllerEditorTrFromFilter == 1)) {
+                    m_controllerEditorTrFromFilter = 1;
+                }
+                for (int s = 0; s < int(states.size()); ++s) {
+                    const int entry = s + 2;
+                    if (ImGui::Selectable(states[size_t(s)].name.c_str(),
+                            m_controllerEditorTrFromFilter == entry)) {
+                        m_controllerEditorTrFromFilter = entry;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::BeginCombo("##trtofilter",
+                    toLabelFor(m_controllerEditorTrToFilter))) {
+                if (ImGui::Selectable("To: all",
+                        m_controllerEditorTrToFilter == 0)) {
+                    m_controllerEditorTrToFilter = 0;
+                }
+                for (int s = 0; s < int(states.size()); ++s) {
+                    const int entry = s + 1;
+                    if (ImGui::Selectable(states[size_t(s)].name.c_str(),
+                            m_controllerEditorTrToFilter == entry)) {
+                        m_controllerEditorTrToFilter = entry;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::BeginCombo("##trparamfilter",
+                    paramLabelFor(m_controllerEditorTrParamFilter))) {
+                if (ImGui::Selectable("Param: all",
+                        m_controllerEditorTrParamFilter == 0)) {
+                    m_controllerEditorTrParamFilter = 0;
+                }
+                if (ImGui::Selectable("Param: (none)",
+                        m_controllerEditorTrParamFilter == 1)) {
+                    m_controllerEditorTrParamFilter = 1;
+                }
+                for (int p = 0; p < int(params.size()); ++p) {
+                    const int entry = p + 2;
+                    if (ImGui::Selectable(params[size_t(p)].name.c_str(),
+                            m_controllerEditorTrParamFilter == entry)) {
+                        m_controllerEditorTrParamFilter = entry;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        // True when the transition survives every active filter
+        // (AND across all three axes). Combo entry semantics match
+        // the storage layout described on the field declaration.
+        auto transitionPassesFilter = [&](
+            const SceneEditor::AnimatorTransition& tr) {
+            if (m_controllerEditorTrFromFilter > 0) {
+                const int want = m_controllerEditorTrFromFilter - 2;
+                if (m_controllerEditorTrFromFilter == 1) {
+                    if (tr.fromIdx != -1) return false;
+                } else if (tr.fromIdx != want) {
+                    return false;
+                }
+            }
+            if (m_controllerEditorTrToFilter > 0) {
+                const int want = m_controllerEditorTrToFilter - 1;
+                if (tr.toIdx != want) return false;
+            }
+            if (m_controllerEditorTrParamFilter > 0) {
+                if (m_controllerEditorTrParamFilter == 1) {
+                    if (!tr.param.empty()) return false;
+                } else {
+                    const int idx = m_controllerEditorTrParamFilter - 2;
+                    if (idx < 0 ||
+                        idx >= int(ctrl->parameters.size())) return false;
+                    if (tr.param !=
+                        ctrl->parameters[size_t(idx)].name) return false;
+                }
+            }
+            return true;
+        };
         int removeTrAt = -1;
         int moveTrUp   = -1;
         int moveTrDown = -1;
         for (int i = 0; i < int(ctrl->transitions.size()); ++i) {
             SceneEditor::AnimatorTransition& tr = ctrl->transitions[size_t(i)];
+            if (!transitionPassesFilter(tr)) continue;
             ImGui::PushID(20000 + i);
             // From combo: "Any" (-1) + state names.
             const char* fromLabel = (tr.fromIdx < 0)
@@ -6370,6 +6504,14 @@ private:
     char                m_animInspectorParamFilter[64]    = "";
     int                 m_controllerEditorParamTypeFilter = 0;
     int                 m_animInspectorParamTypeFilter    = 0;
+    // Transition list filters in the Controller Editor. 0 = show
+    // every row. For "From" 1 = the (global) fromIdx == -1 bucket,
+    // 2..N+1 = state[i - 2]. For "To" 1..N = state[i - 1]. For
+    // "Param" 1 = the empty-param "(none)" bucket, 2..M+1 =
+    // parameter[i - 2].
+    int                 m_controllerEditorTrFromFilter    = 0;
+    int                 m_controllerEditorTrToFilter      = 0;
+    int                 m_controllerEditorTrParamFilter   = 0;
     // Animator Controller Editor follows the same pattern.
     bool                m_controllerEditorOpen     = false;
     bool                m_controllerEditorActivate = false;
