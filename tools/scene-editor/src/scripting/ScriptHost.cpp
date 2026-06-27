@@ -6,7 +6,12 @@
 #include "../scene/SpriteRendererComponent.h"
 #include "../scene/TransformComponent.h"
 
+#if defined(NARAGAME_SCENE_EDITOR_HAS_LUA) && NARAGAME_SCENE_EDITOR_HAS_LUA
+#include <imgui.h>
+#endif
+
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #if defined(NARAGAME_SCENE_EDITOR_HAS_LUA) && NARAGAME_SCENE_EDITOR_HAS_LUA
@@ -66,6 +71,114 @@ static TransformComponent* FindTransform(ScriptHost* host,
     Entity* e = host->BoundScene()->FindByName(entityName);
     if (!e) return nullptr;
     return e->GetComponent<TransformComponent>();
+}
+
+// Map an editor-friendly key name to ImGui's enum. Supports the
+// canonical 1-character A-Z / 0-9 spellings plus the most-used
+// named keys (arrows, modifiers, common control keys). Anything
+// the table doesn't know about returns ImGuiKey_None which the
+// callbacks then treat as "key isn't down" -- no scripting error.
+static ImGuiKey LookupImGuiKey(const char* name) {
+    if (!name || !name[0]) return ImGuiKey_None;
+    if (name[1] == '\0') {
+        char c = name[0];
+        if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
+        if (c >= 'A' && c <= 'Z') return ImGuiKey(ImGuiKey_A + (c - 'A'));
+        if (c >= '0' && c <= '9') return ImGuiKey(ImGuiKey_0 + (c - '0'));
+    }
+    struct Entry { const char* name; ImGuiKey key; };
+    static const Entry kTable[] = {
+        {"Space",      ImGuiKey_Space},
+        {"Enter",      ImGuiKey_Enter},
+        {"Return",     ImGuiKey_Enter},
+        {"Escape",     ImGuiKey_Escape},
+        {"Esc",        ImGuiKey_Escape},
+        {"Tab",        ImGuiKey_Tab},
+        {"Backspace",  ImGuiKey_Backspace},
+        {"Delete",     ImGuiKey_Delete},
+        {"Home",       ImGuiKey_Home},
+        {"End",        ImGuiKey_End},
+        {"PageUp",     ImGuiKey_PageUp},
+        {"PageDown",   ImGuiKey_PageDown},
+        {"Up",         ImGuiKey_UpArrow},
+        {"UpArrow",    ImGuiKey_UpArrow},
+        {"Down",       ImGuiKey_DownArrow},
+        {"DownArrow",  ImGuiKey_DownArrow},
+        {"Left",       ImGuiKey_LeftArrow},
+        {"LeftArrow",  ImGuiKey_LeftArrow},
+        {"Right",      ImGuiKey_RightArrow},
+        {"RightArrow", ImGuiKey_RightArrow},
+        {"LeftShift",  ImGuiKey_LeftShift},
+        {"RightShift", ImGuiKey_RightShift},
+        {"LeftCtrl",   ImGuiKey_LeftCtrl},
+        {"RightCtrl",  ImGuiKey_RightCtrl},
+        {"LeftAlt",    ImGuiKey_LeftAlt},
+        {"RightAlt",   ImGuiKey_RightAlt},
+    };
+    for (const Entry& e : kTable) {
+        if (std::strcmp(e.name, name) == 0) return e.key;
+    }
+    return ImGuiKey_None;
+}
+
+// input.is_key_down / is_key_pressed / is_key_released /
+// mouse_position / is_mouse_down / is_mouse_pressed /
+// is_mouse_released / mouse_wheel. Routes through ImGui's already-
+// polled input state, so scripts see exactly what the editor's
+// own panels see this frame -- no separate polling layer to keep
+// in sync.
+static int LuaInputIsKeyDown(lua_State* L) {
+    ImGuiKey k = LookupImGuiKey(luaL_checkstring(L, 1));
+    lua_pushboolean(L,
+        k != ImGuiKey_None && ImGui::IsKeyDown(k));
+    return 1;
+}
+static int LuaInputIsKeyPressed(lua_State* L) {
+    ImGuiKey k = LookupImGuiKey(luaL_checkstring(L, 1));
+    // Second arg controls key-repeat firing; defaults to false so
+    // the common "fire once per press" pattern just works.
+    bool repeat = false;
+    if (lua_gettop(L) >= 2) repeat = lua_toboolean(L, 2) != 0;
+    lua_pushboolean(L,
+        k != ImGuiKey_None && ImGui::IsKeyPressed(k, repeat));
+    return 1;
+}
+static int LuaInputIsKeyReleased(lua_State* L) {
+    ImGuiKey k = LookupImGuiKey(luaL_checkstring(L, 1));
+    lua_pushboolean(L,
+        k != ImGuiKey_None && ImGui::IsKeyReleased(k));
+    return 1;
+}
+static int LuaInputMousePosition(lua_State* L) {
+    const ImVec2 p = ImGui::GetMousePos();
+    lua_pushnumber(L, p.x);
+    lua_pushnumber(L, p.y);
+    return 2;
+}
+static int LuaInputIsMouseDown(lua_State* L) {
+    int btn = int(luaL_optinteger(L, 1, 0));
+    lua_pushboolean(L,
+        btn >= 0 && btn < 5 &&
+        ImGui::IsMouseDown(ImGuiMouseButton(btn)));
+    return 1;
+}
+static int LuaInputIsMousePressed(lua_State* L) {
+    int btn = int(luaL_optinteger(L, 1, 0));
+    lua_pushboolean(L,
+        btn >= 0 && btn < 5 &&
+        ImGui::IsMouseClicked(ImGuiMouseButton(btn)));
+    return 1;
+}
+static int LuaInputIsMouseReleased(lua_State* L) {
+    int btn = int(luaL_optinteger(L, 1, 0));
+    lua_pushboolean(L,
+        btn >= 0 && btn < 5 &&
+        ImGui::IsMouseReleased(ImGuiMouseButton(btn)));
+    return 1;
+}
+static int LuaInputMouseWheel(lua_State* L) {
+    lua_pushnumber(L, ImGui::GetIO().MouseWheel);
+    return 1;
 }
 
 // Same pattern again for SpriteRendererComponent. Entities without
@@ -498,6 +611,24 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kSpriteApi, 1);
     lua_setglobal(L, "sprite");
+    static const luaL_Reg kInputApi[] = {
+        {"is_key_down",       LuaInputIsKeyDown},
+        {"is_key_pressed",    LuaInputIsKeyPressed},
+        {"is_key_released",   LuaInputIsKeyReleased},
+        {"mouse_position",    LuaInputMousePosition},
+        {"is_mouse_down",     LuaInputIsMouseDown},
+        {"is_mouse_pressed",  LuaInputIsMousePressed},
+        {"is_mouse_released", LuaInputIsMouseReleased},
+        {"mouse_wheel",       LuaInputMouseWheel},
+        {nullptr,             nullptr},
+    };
+    lua_newtable(L);
+    // No upvalue needed -- ImGui's input state lives in a thread-
+    // local context the callbacks reach through ImGui::*. We pass
+    // a zero closure count so luaL_setfuncs doesn't try to pop a
+    // missing upvalue from the stack.
+    luaL_setfuncs(L, kInputApi, 0);
+    lua_setglobal(L, "input");
     if (luaL_dostring(L, kDefaultBootstrap) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
         AppendLine(std::string("[lua-error] bootstrap: ") +
