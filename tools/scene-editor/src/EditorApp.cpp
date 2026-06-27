@@ -312,6 +312,55 @@ private:
         SetWindowTitle(m_hwnd, title);
     }
 
+    // Append one entry to the rolling event log. Trim from the front
+    // so the tail (and Console rendering) stays bounded.
+    void LogAnimationEvent(const std::string& entityName,
+                           const std::string& animName,
+                           const std::string& eventName,
+                           float at) {
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "%s | %s @ %.2fs : %s",
+                      entityName.c_str(), animName.c_str(),
+                      at, eventName.c_str());
+        m_eventLog.emplace_back(buf);
+        if (m_eventLog.size() > kEventLogMax) {
+            m_eventLog.erase(m_eventLog.begin(),
+                             m_eventLog.begin() +
+                                 (m_eventLog.size() - kEventLogMax));
+        }
+    }
+
+    // Fire every event in `anim` that sits inside the play interval
+    // (prevT, curT]. Honours loop wrap when curT < prevT.
+    void FireEventsBetween(const SceneEditor::Entity& e,
+                           const SceneEditor::AnimationAsset& anim,
+                           float prevT, float curT) {
+        if (anim.events.empty()) return;
+        const float total = anim.TotalDuration();
+        // Pull the texture's display name out of the entity for the
+        // log line. The animation asset doesn't carry its own name --
+        // the file path on the AssetEntry would, but threading it
+        // here would be noisy.
+        const std::string& entName = e.name;
+        const std::string  animName = "anim";
+        auto fire = [&](float lo, float hi) {
+            for (const auto& ev : anim.events) {
+                if (ev.time >  lo && ev.time <= hi) {
+                    LogAnimationEvent(entName, animName, ev.name, ev.time);
+                }
+            }
+        };
+        if (curT >= prevT) {
+            fire(prevT, curT);
+        } else {
+            // Looped: fire the tail of the previous lap + the head of
+            // the new one. Total > 0 because curT < prevT implies at
+            // least one wrap.
+            fire(prevT, total + 0.001f);
+            fire(-1.0f, curT);
+        }
+    }
+
     // Advance every AnimatorComponent by `dt` seconds (when the global
     // play toggle is on) and push the sampled frame's sub-sprite name
     // into the entity's SpriteRenderer. Tickless when m_animPlaying is
@@ -337,7 +386,10 @@ private:
             SceneEditor::AnimationAsset* anim =
                 m_assetDb.GetAnimation(an->animation);
             if (!anim || anim->frames.empty()) continue;
+            const float prev = an->prevTime;
             an->currentTime += dt;
+            FireEventsBetween(*e, *anim, prev, an->currentTime);
+            an->prevTime = an->currentTime;
             const SceneEditor::AnimationFrame* fr =
                 anim->Sample(an->currentTime);
             if (!fr) continue;
@@ -397,7 +449,10 @@ private:
         const SceneEditor::AnimatorState& st = ctrl->states[size_t(an.currentState)];
         SceneEditor::AnimationAsset* anim = m_assetDb.GetAnimation(st.animation);
         if (anim && !anim->frames.empty()) {
+            const float prev = an.prevTime;
             an.currentTime += dt * st.speed;
+            FireEventsBetween(e, *anim, prev, an.currentTime);
+            an.prevTime = an.currentTime;
             if (const SceneEditor::AnimationFrame* fr =
                     anim->Sample(an.currentTime)) {
                 if (auto* spr =
@@ -436,6 +491,7 @@ private:
                 if (!tr.hasExitTime) continue;
                 an.currentState = tr.toIdx;
                 an.currentTime  = 0.0f;
+                an.prevTime     = 0.0f;
                 break;
             }
             const SceneEditor::AnimatorParameter* decl = nullptr;
@@ -484,6 +540,7 @@ private:
             if (!fire) continue;
             an.currentState = tr.toIdx;
             an.currentTime  = 0.0f;
+            an.prevTime     = 0.0f;
             // Trigger consumption: the parameter the transition just
             // read auto-resets to false so the same trigger doesn't
             // re-fire on the next tick.
@@ -1762,6 +1819,43 @@ private:
             nf.sprite = subNames.empty() ? std::string{} : subNames.front();
             nf.duration = 0.1f;
             an->frames.push_back(std::move(nf));
+            dirty = true;
+        }
+
+        // Events: one-shot markers fired when the play cursor
+        // crosses `time`. The editor's Console panel logs them; the
+        // runtime hook lives with the script system in the next
+        // milestone.
+        ImGui::Separator();
+        ImGui::Text("Events (%zu)", an->events.size());
+        int  removeEvAt = -1;
+        for (size_t i = 0; i < an->events.size(); ++i) {
+            SceneEditor::AnimationEvent& ev = an->events[i];
+            ImGui::PushID(int(60000 + i));
+            ImGui::SetNextItemWidth(100.0f);
+            if (ImGui::DragFloat("##evt", &ev.time, 0.01f,
+                                  0.0f, 0.0f, "%.3fs")) dirty = true;
+            ImGui::SameLine();
+            char nameBuf[64];
+            std::snprintf(nameBuf, sizeof(nameBuf), "%s", ev.name.c_str());
+            ImGui::SetNextItemWidth(-100.0f);
+            if (ImGui::InputText("##evname", nameBuf, sizeof(nameBuf))) {
+                ev.name = nameBuf;
+                dirty = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) removeEvAt = int(i);
+            ImGui::PopID();
+        }
+        if (removeEvAt >= 0) {
+            an->events.erase(an->events.begin() + removeEvAt);
+            dirty = true;
+        }
+        if (ImGui::Button("+ Event")) {
+            SceneEditor::AnimationEvent ev;
+            ev.time = 0.0f;
+            ev.name = "event";
+            an->events.push_back(std::move(ev));
             dirty = true;
         }
         ImGui::Separator();
@@ -5163,9 +5257,18 @@ private:
 
     void DrawConsolePanel() {
         ImGui::Begin("Console");
-        ImGui::TextWrapped("Editor + script log output will land here.");
+        // Toolbar.
+        if (ImGui::SmallButton("Clear")) m_eventLog.clear();
+        ImGui::SameLine();
+        ImGui::TextDisabled("Animation events: %zu", m_eventLog.size());
         ImGui::Separator();
-        ImGui::TextDisabled("(placeholder, M1)");
+        // Show newest first so the latest event stays in view as
+        // playback churns.
+        ImGui::BeginChild("##eventlog", ImVec2(0, 0), false);
+        for (auto it = m_eventLog.rbegin(); it != m_eventLog.rend(); ++it) {
+            ImGui::TextUnformatted(it->c_str());
+        }
+        ImGui::EndChild();
         ImGui::End();
     }
 
@@ -5584,6 +5687,11 @@ private:
     // sees the animation live in the viewport. Off freezes the
     // currently sampled frame.
     bool                m_animPlaying          = true;
+    // Rolling log of recently fired AnimationEvents. Console panel
+    // shows the tail; capped so a runaway emitter can't grow without
+    // bound.
+    std::vector<std::string> m_eventLog;
+    static constexpr size_t  kEventLogMax = 64;
 
     // Tilemap paint state. The active stamp is a rectangular region of
     // palette cells defined by (Anchor, Cur) in palette (column, row)

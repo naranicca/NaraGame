@@ -17,6 +17,14 @@ struct AnimationFrame {
     float       duration = 0.1f;   // seconds
 };
 
+// One-shot marker fired when playback crosses `time`. The editor logs
+// these to the Console panel; runtime callers (Lua hook -- next
+// milestone) will dispatch them as scripted events.
+struct AnimationEvent {
+    float       time = 0.0f;       // seconds from animation start
+    std::string name;
+};
+
 // .nanim asset: an ordered list of frames sampled from a single source
 // texture's sprite sheet. The editor's AnimatorComponent owns playback
 // state (time + isPlaying) and points at one of these assets.
@@ -24,6 +32,7 @@ class AnimationAsset {
 public:
     AssetGuid                     texture;     // source texture asset GUID
     std::vector<AnimationFrame>   frames;
+    std::vector<AnimationEvent>   events;
     bool                          loop = true;
 
     bool LoadFromFile(const std::string& path);

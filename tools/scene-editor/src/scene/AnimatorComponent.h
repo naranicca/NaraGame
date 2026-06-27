@@ -22,6 +22,10 @@ public:
     AssetGuid animation;
     float     currentTime = 0.0f;
     bool      isPlaying   = true;
+    // Runtime-only cursor used to detect "we just crossed an event".
+    // Not serialised because it follows currentTime each tick and
+    // resets to 0 on a state switch.
+    float     prevTime    = 0.0f;
 
     // Optional .ncontroller reference. When set, the runtime ignores
     // `animation` and plays the controller's currentState animation

@@ -34,14 +34,28 @@ void AnimationAsset::FromJson(const Value& root) {
     texture = AssetGuid::FromString(root.GetString("texture"));
     loop    = root.GetBool("loop", true);
     frames.clear();
-    const Value* arr = root.Find("frames");
-    if (!arr || !arr->IsArray()) return;
-    for (const Value& f : arr->arrayValue) {
-        if (!f.IsObject()) continue;
-        AnimationFrame fr;
-        fr.sprite   = f.GetString("sprite");
-        fr.duration = float(f.GetNumber("duration", 0.1));
-        frames.push_back(std::move(fr));
+    if (const Value* arr = root.Find("frames")) {
+        if (arr->IsArray()) {
+            for (const Value& f : arr->arrayValue) {
+                if (!f.IsObject()) continue;
+                AnimationFrame fr;
+                fr.sprite   = f.GetString("sprite");
+                fr.duration = float(f.GetNumber("duration", 0.1));
+                frames.push_back(std::move(fr));
+            }
+        }
+    }
+    events.clear();
+    if (const Value* arr = root.Find("events")) {
+        if (arr->IsArray()) {
+            for (const Value& e : arr->arrayValue) {
+                if (!e.IsObject()) continue;
+                AnimationEvent ev;
+                ev.time = float(e.GetNumber("time", 0.0));
+                ev.name = e.GetString("name");
+                events.push_back(std::move(ev));
+            }
+        }
     }
 }
 
@@ -58,6 +72,14 @@ Value AnimationAsset::ToJson() const {
         arr.Push(std::move(f));
     }
     root.Add("frames", std::move(arr));
+    Value evArr = Value::MakeArray();
+    for (const AnimationEvent& ev : events) {
+        Value e = Value::MakeObject();
+        e.Add("time", Value::MakeNumber(ev.time));
+        e.Add("name", Value::MakeString(ev.name));
+        evArr.Push(std::move(e));
+    }
+    root.Add("events", std::move(evArr));
     return root;
 }
 
