@@ -27,10 +27,13 @@
 #include <shobjidl.h>          // IFileOpenDialog
 #include <combaseapi.h>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 // Forward-declared by imgui_impl_win32.h with C++ linkage. We wrap it
 // through the engine's untyped MessageHook signature below.
@@ -608,14 +611,251 @@ private:
         }
     }
 
+    // --- 2D viewport ------------------------------------------------------
+    //
+    // The viewport is drawn entirely with ImGui's DrawList for M1: we
+    // capture an invisible button covering the panel for input, then
+    // walk the scene + grid + axes into the same list. SpriteRenderer
+    // arrives in M2 and at that point this path swaps to a real
+    // Renderer2D + offscreen RT pipeline; entity markers below stand in
+    // for the asset-driven visuals.
+    struct ViewportCamera {
+        ImVec2 center{0.0f, 0.0f};   // world coords at the panel centre
+        float  zoom = 48.0f;         // pixels per world unit
+    };
+
+    ImVec2 WorldToScreen(const ImVec2& worldPos,
+                         const ImVec2& panelMin,
+                         const ImVec2& panelSize) const {
+        const ImVec2 centre{panelMin.x + panelSize.x * 0.5f,
+                            panelMin.y + panelSize.y * 0.5f};
+        return ImVec2{centre.x + (worldPos.x - m_viewCam.center.x) * m_viewCam.zoom,
+                      centre.y - (worldPos.y - m_viewCam.center.y) * m_viewCam.zoom};
+    }
+
+    ImVec2 ScreenToWorld(const ImVec2& screenPos,
+                         const ImVec2& panelMin,
+                         const ImVec2& panelSize) const {
+        const ImVec2 centre{panelMin.x + panelSize.x * 0.5f,
+                            panelMin.y + panelSize.y * 0.5f};
+        return ImVec2{m_viewCam.center.x + (screenPos.x - centre.x) / m_viewCam.zoom,
+                      m_viewCam.center.y - (screenPos.y - centre.y) / m_viewCam.zoom};
+    }
+
+    // Compose the entity's world-space transform by walking up the
+    // parent chain and summing local translations. Rotation + scale are
+    // ignored for the marker pass; the goal is to show the user where
+    // an entity is, not to fully simulate the transform stack.
+    ImVec2 EntityWorldPos(const SceneEditor::Entity& e) const {
+        ImVec2 acc{0.0f, 0.0f};
+        const SceneEditor::Entity* cur = &e;
+        int safety = 256;
+        while (cur && safety-- > 0) {
+            if (const auto* t = cur->GetComponent<SceneEditor::TransformComponent>()) {
+                acc.x += t->position.x;
+                acc.y += t->position.y;
+            }
+            cur = (cur->parent == SceneEditor::kInvalidEntityId)
+                ? nullptr : m_scene.Get(cur->parent);
+        }
+        return acc;
+    }
+
     void DrawViewportPanel() {
         ImGui::Begin("Viewport");
-        ImGui::TextWrapped("2D ortho viewport + grid will render into an "
-                           "offscreen RT and display here. (3D toggle is "
-                           "a follow-up milestone.)");
-        ImGui::Separator();
-        ImGui::TextDisabled("(placeholder, M1)");
+
+        // Toolbar row: zoom / camera controls at a glance.
+        ImGui::Text("Zoom %.0f px/u  |  Centre (%.2f, %.2f)",
+                    m_viewCam.zoom, m_viewCam.center.x, m_viewCam.center.y);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset View")) {
+            m_viewCam = ViewportCamera{};
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Frame Selected") && m_selection) {
+            if (const auto* e = m_scene.Get(m_selection)) {
+                m_viewCam.center = EntityWorldPos(*e);
+            }
+        }
+
+        const ImVec2 panelMin  = ImGui::GetCursorScreenPos();
+        const ImVec2 panelSize = ImGui::GetContentRegionAvail();
+        if (panelSize.x < 4 || panelSize.y < 4) {
+            ImGui::End();
+            return;
+        }
+        // Invisible button captures all mouse interaction over the
+        // viewport area. ImGui still renders the DrawList commands we
+        // queue after it because we draw to GetWindowDrawList().
+        ImGui::InvisibleButton("##viewport_hit", panelSize,
+                               ImGuiButtonFlags_MouseButtonLeft |
+                               ImGuiButtonFlags_MouseButtonMiddle);
+        const bool hovered = ImGui::IsItemHovered();
+        const bool active  = ImGui::IsItemActive();
+
+        HandleViewportInput(hovered, active, panelMin, panelSize);
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        // Clip to the viewport region so grid lines and entity markers
+        // can't bleed into the dockspace edges.
+        dl->PushClipRect(panelMin,
+                         ImVec2{panelMin.x + panelSize.x,
+                                panelMin.y + panelSize.y}, true);
+        // Background fill.
+        dl->AddRectFilled(panelMin,
+                          ImVec2{panelMin.x + panelSize.x,
+                                 panelMin.y + panelSize.y},
+                          IM_COL32(28, 30, 34, 255));
+
+        DrawGrid(dl, panelMin, panelSize);
+        DrawEntities(dl, panelMin, panelSize);
+
+        dl->PopClipRect();
         ImGui::End();
+    }
+
+    void HandleViewportInput(bool hovered, bool active,
+                             const ImVec2& panelMin,
+                             const ImVec2& panelSize) {
+        ImGuiIO& io = ImGui::GetIO();
+
+        // Wheel zoom around the cursor so the world point under the
+        // mouse stays put. Skip zoom while a drag is in progress so a
+        // fast pan with the wheel doesn't get hijacked.
+        if (hovered && std::abs(io.MouseWheel) > 0.0f) {
+            const ImVec2 worldBefore = ScreenToWorld(io.MousePos,
+                                                     panelMin, panelSize);
+            const float factor = std::pow(1.15f, io.MouseWheel);
+            m_viewCam.zoom = std::clamp(m_viewCam.zoom * factor, 4.0f, 512.0f);
+            const ImVec2 worldAfter = ScreenToWorld(io.MousePos,
+                                                    panelMin, panelSize);
+            m_viewCam.center.x += worldBefore.x - worldAfter.x;
+            m_viewCam.center.y += worldBefore.y - worldAfter.y;
+        }
+        // Mid-button drag pans. We don't need ImGui::IsItemActive for the
+        // middle button -- IsMouseDragging works against the active item.
+        if ((active || hovered) && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+            const ImVec2 d = io.MouseDelta;
+            m_viewCam.center.x -= d.x / m_viewCam.zoom;
+            m_viewCam.center.y += d.y / m_viewCam.zoom;  // screen Y inverted
+        }
+        // Left click: hit-test entities. A 0.5-world-unit half-extent
+        // around the marker centre matches the rectangle we draw below.
+        if (active && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            const ImVec2 worldMouse = ScreenToWorld(io.MousePos,
+                                                    panelMin, panelSize);
+            SceneEditor::EntityId hit = SceneEditor::kInvalidEntityId;
+            // Walk in reverse-stable order so the topmost (last
+            // drawn) entity wins on overlap.
+            std::vector<SceneEditor::EntityId> ids;
+            ids.reserve(64);
+            CollectAllEntities(m_scene.Roots(), ids);
+            for (auto it = ids.rbegin(); it != ids.rend(); ++it) {
+                if (const auto* e = m_scene.Get(*it)) {
+                    const ImVec2 wp = EntityWorldPos(*e);
+                    if (std::abs(worldMouse.x - wp.x) <= 0.5f &&
+                        std::abs(worldMouse.y - wp.y) <= 0.5f) {
+                        hit = *it;
+                        break;
+                    }
+                }
+            }
+            m_selection = hit;  // empty click clears selection
+        }
+        // 'F' key frames the selected entity.
+        if (hovered && ImGui::IsKeyPressed(ImGuiKey_F) && m_selection) {
+            if (const auto* e = m_scene.Get(m_selection)) {
+                m_viewCam.center = EntityWorldPos(*e);
+            }
+        }
+    }
+
+    void CollectAllEntities(const std::vector<SceneEditor::EntityId>& roots,
+                            std::vector<SceneEditor::EntityId>& out) const {
+        for (SceneEditor::EntityId id : roots) {
+            const auto* e = m_scene.Get(id);
+            if (!e) continue;
+            out.push_back(id);
+            CollectAllEntities(e->children, out);
+        }
+    }
+
+    void DrawGrid(ImDrawList* dl, const ImVec2& panelMin,
+                  const ImVec2& panelSize) const {
+        const ImVec2 worldTL = ScreenToWorld(panelMin, panelMin, panelSize);
+        const ImVec2 worldBR = ScreenToWorld(
+            ImVec2{panelMin.x + panelSize.x, panelMin.y + panelSize.y},
+            panelMin, panelSize);
+        // Skip drawing every cell line at low zoom -- choose a step that
+        // keeps the on-screen line spacing >= 6 px.
+        int step = 1;
+        while (step * m_viewCam.zoom < 6.0f) step *= 5;
+        const int xMin = int(std::floor(std::min(worldTL.x, worldBR.x) / step)) * step;
+        const int xMax = int(std::ceil (std::max(worldTL.x, worldBR.x) / step)) * step;
+        const int yMin = int(std::floor(std::min(worldTL.y, worldBR.y) / step)) * step;
+        const int yMax = int(std::ceil (std::max(worldTL.y, worldBR.y) / step)) * step;
+        const ImU32 minorCol = IM_COL32(60, 62, 68, 255);
+        const ImU32 majorCol = IM_COL32(80, 84, 92, 255);
+        for (int x = xMin; x <= xMax; x += step) {
+            const ImVec2 a = WorldToScreen(ImVec2(float(x), float(yMin)),
+                                            panelMin, panelSize);
+            const ImVec2 b = WorldToScreen(ImVec2(float(x), float(yMax)),
+                                            panelMin, panelSize);
+            const ImU32 col = (x % (step * 5) == 0) ? majorCol : minorCol;
+            dl->AddLine(a, b, col, 1.0f);
+        }
+        for (int y = yMin; y <= yMax; y += step) {
+            const ImVec2 a = WorldToScreen(ImVec2(float(xMin), float(y)),
+                                            panelMin, panelSize);
+            const ImVec2 b = WorldToScreen(ImVec2(float(xMax), float(y)),
+                                            panelMin, panelSize);
+            const ImU32 col = (y % (step * 5) == 0) ? majorCol : minorCol;
+            dl->AddLine(a, b, col, 1.0f);
+        }
+        // Axes: red X (worldY = 0) horizontal, green Y (worldX = 0) vertical.
+        const ImVec2 xAxisA = WorldToScreen(ImVec2(float(xMin), 0.0f),
+                                             panelMin, panelSize);
+        const ImVec2 xAxisB = WorldToScreen(ImVec2(float(xMax), 0.0f),
+                                             panelMin, panelSize);
+        dl->AddLine(xAxisA, xAxisB, IM_COL32(200, 80, 80, 255), 1.5f);
+        const ImVec2 yAxisA = WorldToScreen(ImVec2(0.0f, float(yMin)),
+                                             panelMin, panelSize);
+        const ImVec2 yAxisB = WorldToScreen(ImVec2(0.0f, float(yMax)),
+                                             panelMin, panelSize);
+        dl->AddLine(yAxisA, yAxisB, IM_COL32(80, 200, 100, 255), 1.5f);
+    }
+
+    void DrawEntities(ImDrawList* dl, const ImVec2& panelMin,
+                      const ImVec2& panelSize) const {
+        std::vector<SceneEditor::EntityId> ids;
+        CollectAllEntities(m_scene.Roots(), ids);
+        for (SceneEditor::EntityId id : ids) {
+            const auto* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            const ImVec2 wp = EntityWorldPos(*e);
+            const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
+            // Marker: 0.6-world-unit square. Selected entities get a
+            // brighter outline + dot so they pop against the grid.
+            const float half = 0.3f * m_viewCam.zoom;
+            const ImVec2 a{c.x - half, c.y - half};
+            const ImVec2 b{c.x + half, c.y + half};
+            const bool sel = (id == m_selection);
+            dl->AddRectFilled(a, b,
+                              sel ? IM_COL32(220, 180, 70, 255)
+                                  : IM_COL32(110, 160, 220, 255),
+                              4.0f);
+            dl->AddRect(a, b,
+                        sel ? IM_COL32(255, 255, 200, 255)
+                            : IM_COL32(40, 40, 50, 255),
+                        4.0f, 0, sel ? 2.0f : 1.0f);
+            // Centre dot helps line markers up against the grid lines.
+            dl->AddCircleFilled(c, 2.0f, IM_COL32(20, 20, 20, 255));
+            // Name label below the marker.
+            const float ts = ImGui::GetFontSize();
+            dl->AddText(ImVec2{c.x + half + 4.0f, c.y - ts * 0.5f},
+                        IM_COL32(220, 220, 220, 255),
+                        e->name.c_str());
+        }
     }
 
     void DrawConsolePanel() {
@@ -741,6 +981,8 @@ private:
 
     SceneEditor::AssetDatabase m_assetDb;
     SceneEditor::AssetGuid     m_selectedAsset;
+
+    ViewportCamera             m_viewCam;
 
     // New Project modal state.
     bool                m_openNewProjectModal = false;
