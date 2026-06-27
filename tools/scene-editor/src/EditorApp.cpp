@@ -6,6 +6,7 @@
 // panels on top of the project shell.
 
 #include "asset/AssetDatabase.h"
+#include "asset/Autotile.h"
 #include "asset/SpriteSheet.h"
 #include "asset/TextureImportSettings.h"
 #include "asset/Tileset.h"
@@ -2472,6 +2473,15 @@ private:
     // is (sh - 1 - dyWorld) so the visual top of the palette becomes
     // the visual top of the painted region.
     bool StampBrush(SceneEditor::TilemapComponent& tm, int gx, int gy) {
+        // Autotile branch: place a single autotile cell and recompute
+        // masks for the cell + 4 cardinal neighbours so the seam
+        // pattern stays consistent with the painted region.
+        if (m_activeAutotile.IsValid()) {
+            if (SceneEditor::AutotileAsset* at =
+                    m_assetDb.GetAutotile(m_activeAutotile)) {
+                return PaintAutotileCell(tm, gx, gy, *at);
+            }
+        }
         const int texCols = TexCols(tm);
         if (texCols <= 0) return false;
         int c0, r0, c1, r1;
@@ -2499,6 +2509,16 @@ private:
     // pattern reads naturally from the anchor outward.
     bool FillRect(SceneEditor::TilemapComponent& tm,
                   int ax, int ay, int bx, int by) {
+        // Autotile branch: stamp every cell with the autotile's
+        // standalone tile (mask 0) first, then recompute every cell +
+        // its neighbours so the seam pattern reaches across the rect's
+        // entire border.
+        if (m_activeAutotile.IsValid()) {
+            if (SceneEditor::AutotileAsset* at =
+                    m_assetDb.GetAutotile(m_activeAutotile)) {
+                return PaintAutotileRect(tm, ax, ay, bx, by, *at);
+            }
+        }
         const int texCols = TexCols(tm);
         if (texCols <= 0) return false;
         const int x0 = std::min(ax, bx);
@@ -2521,6 +2541,89 @@ private:
                     tm.cells[{xx, yy}] = tile;
                     changed = true;
                 }
+            }
+        }
+        return changed;
+    }
+
+    // Read the mask for (gx, gy) by looking at its 4 cardinal
+    // neighbours. A neighbour counts if its tile index is part of the
+    // autotile's tileSet -- naive but matches the M4 paint flow.
+    int ComputeAutotileMask(const SceneEditor::TilemapComponent& tm,
+                            int gx, int gy,
+                            const SceneEditor::AutotileAsset& at) const {
+        auto matches = [&](int x, int y) {
+            auto it = tm.cells.find({x, y});
+            return it != tm.cells.end() &&
+                   at.tileSet.find(it->second) != at.tileSet.end();
+        };
+        int m = 0;
+        if (matches(gx,     gy + 1)) m |= 1;   // N (world Y up)
+        if (matches(gx + 1, gy    )) m |= 2;   // E
+        if (matches(gx,     gy - 1)) m |= 4;   // S
+        if (matches(gx - 1, gy    )) m |= 8;   // W
+        return m;
+    }
+
+    // Refresh the tile at (gx, gy) based on its neighbours. Only
+    // touches cells that are already part of the autotile group so
+    // non-autotile content next to the brush keeps its visual.
+    bool RefreshAutotileCell(SceneEditor::TilemapComponent& tm,
+                             int gx, int gy,
+                             const SceneEditor::AutotileAsset& at) {
+        auto it = tm.cells.find({gx, gy});
+        if (it == tm.cells.end()) return false;
+        if (at.tileSet.find(it->second) == at.tileSet.end()) return false;
+        const int m = ComputeAutotileMask(tm, gx, gy, at);
+        const int newTile = at.mask[size_t(m & 15)];
+        if (it->second == newTile) return false;
+        it->second = newTile;
+        return true;
+    }
+
+    bool PaintAutotileCell(SceneEditor::TilemapComponent& tm,
+                           int gx, int gy,
+                           const SceneEditor::AutotileAsset& at) {
+        // Drop a placeholder tile so RefreshAutotileCell recognises
+        // the cell as autotile, then refresh self + 4 neighbours.
+        bool changed = false;
+        auto it = tm.cells.find({gx, gy});
+        if (it == tm.cells.end() ||
+            at.tileSet.find(it->second) == at.tileSet.end()) {
+            tm.cells[{gx, gy}] = at.mask[0];
+            changed = true;
+        }
+        changed |= RefreshAutotileCell(tm, gx,     gy,     at);
+        changed |= RefreshAutotileCell(tm, gx,     gy + 1, at);
+        changed |= RefreshAutotileCell(tm, gx + 1, gy,     at);
+        changed |= RefreshAutotileCell(tm, gx,     gy - 1, at);
+        changed |= RefreshAutotileCell(tm, gx - 1, gy,     at);
+        return changed;
+    }
+
+    bool PaintAutotileRect(SceneEditor::TilemapComponent& tm,
+                           int ax, int ay, int bx, int by,
+                           const SceneEditor::AutotileAsset& at) {
+        const int x0 = std::min(ax, bx);
+        const int x1 = std::max(ax, bx);
+        const int y0 = std::min(ay, by);
+        const int y1 = std::max(ay, by);
+        bool changed = false;
+        for (int yy = y0; yy <= y1; ++yy) {
+            for (int xx = x0; xx <= x1; ++xx) {
+                auto it = tm.cells.find({xx, yy});
+                if (it == tm.cells.end() ||
+                    at.tileSet.find(it->second) == at.tileSet.end()) {
+                    tm.cells[{xx, yy}] = at.mask[0];
+                    changed = true;
+                }
+            }
+        }
+        // Recompute everything in the rect + a 1-cell apron so the
+        // border seams against existing autotile content.
+        for (int yy = y0 - 1; yy <= y1 + 1; ++yy) {
+            for (int xx = x0 - 1; xx <= x1 + 1; ++xx) {
+                changed |= RefreshAutotileCell(tm, xx, yy, at);
             }
         }
         return changed;
@@ -3389,6 +3492,31 @@ private:
         ImGui::Checkbox("Show collision", &m_showCollisionOverlay);
         ImGui::Separator();
 
+        // Autotile brush picker. Lists every .autotile asset in the
+        // project; clicking one turns the next Brush / Rect placement
+        // into an autotile paint that recomputes neighbour masks. The
+        // "(none)" button reverts to the regular stamp brush.
+        bool anyAutotile = false;
+        for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+            if (a.typeName != "Autotile") continue;
+            anyAutotile = true;
+            const bool sel = (a.guid == m_activeAutotile);
+            if (sel) ImGui::PushStyleColor(ImGuiCol_Button,
+                                            IM_COL32(220, 180, 70, 255));
+            if (ImGui::SmallButton(a.relPath.c_str())) {
+                m_activeAutotile = sel ? SceneEditor::AssetGuid{} : a.guid;
+                if (m_paintTool == PaintTool::None) m_paintTool = PaintTool::Brush;
+            }
+            if (sel) ImGui::PopStyleColor();
+            ImGui::SameLine();
+        }
+        if (anyAutotile) {
+            if (ImGui::SmallButton("none##autotile")) {
+                m_activeAutotile = SceneEditor::AssetGuid{};
+            }
+            ImGui::Separator();
+        }
+
         // Texture preview, scale-to-fit.
         const float texW  = float(tex->Width());
         const float texH  = float(tex->Height());
@@ -3673,6 +3801,9 @@ private:
     int                 m_stampCurCol        = 0;
     int                 m_stampCurRow        = 0;
     bool                m_stampDragging      = false;
+    // Active autotile brush. When valid, Brush + Rect paint flows
+    // recompute neighbour masks instead of placing the literal stamp.
+    SceneEditor::AssetGuid m_activeAutotile;
     // Rectangle drag in progress. The anchor is captured on mouse-down;
     // m_rectCur tracks the cursor each frame so the ghost outline
     // grows / shrinks with the drag.

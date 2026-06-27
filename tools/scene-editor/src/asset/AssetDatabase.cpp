@@ -1,6 +1,7 @@
 #include "AssetDatabase.h"
 
 #include "../project/Project.h"
+#include "Autotile.h"
 #include "TextureImportSettings.h"
 #include "Tileset.h"
 
@@ -77,6 +78,7 @@ void AssetDatabase::Close() {
     m_root.reset();
     m_textureCache.clear();
     m_tilesetCache.clear();
+    m_autotileCache.clear();
 }
 
 NaraGame::RHITexture* AssetDatabase::GetTexture(NaraGame::RHIDevice& device,
@@ -302,6 +304,37 @@ void AssetDatabase::EvictTileset(const AssetGuid& guid) {
     m_tilesetCache.erase(guid);
 }
 
+AutotileAsset* AssetDatabase::GetAutotile(const AssetGuid& guid) {
+    if (!guid.IsValid()) return nullptr;
+    if (auto it = m_autotileCache.find(guid); it != m_autotileCache.end()) {
+        return it->second.get();
+    }
+    const AssetEntry* entry = FindByGuid(guid);
+    if (!entry || entry->typeName != "Autotile") return nullptr;
+    const std::string abs = m_assetsRoot + "/" + entry->relPath;
+    auto at = std::make_unique<AutotileAsset>();
+    if (!at->LoadFromFile(abs)) {
+        m_autotileCache.emplace(guid, nullptr);
+        return nullptr;
+    }
+    AutotileAsset* raw = at.get();
+    m_autotileCache.emplace(guid, std::move(at));
+    return raw;
+}
+
+bool AssetDatabase::SaveAutotile(const AssetGuid& guid) {
+    AutotileAsset* at = GetAutotile(guid);
+    if (!at) return false;
+    const AssetEntry* entry = FindByGuid(guid);
+    if (!entry) return false;
+    const std::string abs = m_assetsRoot + "/" + entry->relPath;
+    return at->SaveToFile(abs);
+}
+
+void AssetDatabase::EvictAutotile(const AssetGuid& guid) {
+    m_autotileCache.erase(guid);
+}
+
 std::string AssetDatabase::ClassifyByExtension(const std::string& relPath) {
     const std::string ext = LowerExt(relPath);
     if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" ||
@@ -312,7 +345,7 @@ std::string AssetDatabase::ClassifyByExtension(const std::string& relPath) {
     if (ext == ".nscene") return "Scene";
     if (ext == ".nprefab") return "Prefab";
     if (ext == ".ntileset") return "Tileset";
-    if (ext == ".autotile") return "AutotileRule";
+    if (ext == ".autotile") return "Autotile";
     if (ext == ".sprite")  return "SpriteSheet";
     if (ext == ".hdr")     return "HdrEnvironment";
     if (ext == ".dds")     return "Texture";

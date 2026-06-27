@@ -19,6 +19,7 @@ namespace SceneEditor {
 
 class Project;
 class TilesetAsset;
+class AutotileAsset;
 
 // One catalogued asset. The same row drives the Project panel display,
 // inspector lookups, and the GUID -> data resolution that scene /
@@ -90,6 +91,11 @@ public:
     // Drop a tileset from the cache (forces re-read on next access).
     void EvictTileset(const AssetGuid& guid);
 
+    // Autotile cache, same shape as Tileset.
+    AutotileAsset* GetAutotile(const AssetGuid& guid);
+    bool           SaveAutotile(const AssetGuid& guid);
+    void           EvictAutotile(const AssetGuid& guid);
+
 private:
     void ScanDir(const std::string& dirAbs,
                  const std::string& relPrefix,
@@ -119,6 +125,8 @@ private:
     // Close like the texture cache.
     std::unordered_map<AssetGuid,
                        std::unique_ptr<TilesetAsset>>          m_tilesetCache;
+    std::unordered_map<AssetGuid,
+                       std::unique_ptr<AutotileAsset>>         m_autotileCache;
 };
 
 } // namespace SceneEditor
