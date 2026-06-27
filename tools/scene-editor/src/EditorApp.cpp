@@ -534,21 +534,46 @@ private:
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                 tex->GetNativeView()));
         ImGui::Image(texId, imgSize);
-        // Manual mode lays an InvisibleButton on top of the image so we
-        // own the left mouse without ImGui::Image stealing focus. Other
-        // modes leave the image as a passive preview.
-        if (m_spriteEditorMode == 2) {
+
+        // Decide which region's borders are currently editable. A
+        // selected sub-sprite wins; otherwise the whole texture's
+        // border (Single mode) is exposed. Multiple-mode without a
+        // selection leaves the borders read-only -- editing per-sprite
+        // borders only makes sense when one of them is picked.
+        const BorderRegion br =
+            GetActiveBorderRegion(imp, int(tex->Width()), int(tex->Height()));
+        const bool wantsInput = br.active || m_spriteEditorMode == 2;
+        if (wantsInput) {
             ImGui::SetCursorScreenPos(imgMin);
             ImGui::InvisibleButton("##spreview_hit", imgSize,
                                    ImGuiButtonFlags_MouseButtonLeft);
-            if (HandleManualSliceInput(imgMin, scale, imp, int(tex->Width()),
-                                       int(tex->Height()),
-                                       FileStem(entry->relPath))) {
-                dirty = true;
+            // Border-line drag has priority over the Manual create /
+            // move flow so a near-line click never lands on the rect
+            // underneath by accident.
+            bool consumedByBorder = false;
+            if (br.active) {
+                if (HandleBorderInput(imgMin, scale, br,
+                                      int(tex->Width()),
+                                      int(tex->Height()),
+                                      &consumedByBorder)) {
+                    dirty = true;
+                }
+            }
+            if (m_spriteEditorMode == 2 && !consumedByBorder &&
+                m_borderDrag == BorderDragSide::None) {
+                if (HandleManualSliceInput(imgMin, scale, imp,
+                                           int(tex->Width()),
+                                           int(tex->Height()),
+                                           FileStem(entry->relPath))) {
+                    dirty = true;
+                }
             }
         }
         ImDrawList* dl = ImGui::GetWindowDrawList();
         DrawSpritePreviewOverlay(dl, imgMin, scale, imp);
+        if (br.active) {
+            DrawBorderGuides(dl, imgMin, scale, br);
+        }
         // In-progress rubber-band rect while the user is drawing a new
         // sub-sprite. Snap to integer pixels so the live preview matches
         // what we eventually persist.
@@ -667,6 +692,166 @@ private:
     // a fresh rect from an empty area; Move = the user is dragging the
     // selected sub-sprite around.
     enum class ManualDrag { None, Create, Move };
+
+    // Which 9-slice border line the user is hovering / dragging on the
+    // preview. The four lines are positioned at srcX+L, srcX+srcW-R,
+    // srcY+T, srcY+srcH-B inside the active region.
+    enum class BorderDragSide { None, Left, Right, Top, Bottom };
+
+    // Pointer into either a selected SubSprite or the texture-level
+    // import settings, depending on what the user is currently
+    // editing. m_spriteEditorSel wins when valid; otherwise the whole
+    // texture's borders surface for Single-mode assets.
+    struct BorderRegion {
+        bool active = false;
+        int  srcX = 0, srcY = 0, srcW = 0, srcH = 0;
+        int* L = nullptr;
+        int* R = nullptr;
+        int* T = nullptr;
+        int* B = nullptr;
+    };
+
+    BorderRegion GetActiveBorderRegion(
+        SceneEditor::TextureImportSettings& imp,
+        int texW, int texH) {
+        BorderRegion r;
+        if (m_spriteEditorSel >= 0 &&
+            m_spriteEditorSel < int(imp.spriteSheet.sprites.size())) {
+            auto& s = imp.spriteSheet.sprites[size_t(m_spriteEditorSel)];
+            r.active = true;
+            r.srcX = s.x; r.srcY = s.y;
+            r.srcW = s.w; r.srcH = s.h;
+            r.L = &s.borderLeft;   r.R = &s.borderRight;
+            r.T = &s.borderTop;    r.B = &s.borderBottom;
+        } else if (imp.spriteMode ==
+                   SceneEditor::TextureImportSettings::SpriteMode::Single) {
+            r.active = true;
+            r.srcX = 0; r.srcY = 0;
+            r.srcW = texW; r.srcH = texH;
+            r.L = &imp.borderLeft;  r.R = &imp.borderRight;
+            r.T = &imp.borderTop;   r.B = &imp.borderBottom;
+        }
+        return r;
+    }
+
+    void DrawBorderGuides(ImDrawList* dl, const ImVec2& imgMin, float scale,
+                          const BorderRegion& br) const {
+        if (!br.active) return;
+        // Outline the active region in a faint cyan so the user sees
+        // which box the border lines belong to (especially helpful when
+        // editing a sub-sprite's border inside a larger texture).
+        const float x0 = imgMin.x + float(br.srcX) * scale;
+        const float y0 = imgMin.y + float(br.srcY) * scale;
+        const float x1 = imgMin.x + float(br.srcX + br.srcW) * scale;
+        const float y1 = imgMin.y + float(br.srcY + br.srcH) * scale;
+        dl->AddRect(ImVec2{x0, y0}, ImVec2{x1, y1},
+                    IM_COL32(80, 200, 220, 90), 0.0f, 0, 1.0f);
+
+        auto sideCol = [&](BorderDragSide s) {
+            const bool active = (m_borderDrag == s);
+            const bool hover  = (m_borderHover == s);
+            if (active) return IM_COL32(120, 240, 255, 255);
+            if (hover)  return IM_COL32( 90, 220, 255, 255);
+            return IM_COL32(60, 180, 220, 200);
+        };
+        auto thick = [&](BorderDragSide s) {
+            if (m_borderDrag == s)  return 3.0f;
+            if (m_borderHover == s) return 2.5f;
+            return 1.5f;
+        };
+
+        const float lx = imgMin.x + float(br.srcX + *br.L)            * scale;
+        const float rx = imgMin.x + float(br.srcX + br.srcW - *br.R)  * scale;
+        const float ty = imgMin.y + float(br.srcY + *br.T)            * scale;
+        const float by = imgMin.y + float(br.srcY + br.srcH - *br.B)  * scale;
+        dl->AddLine(ImVec2{lx, y0}, ImVec2{lx, y1},
+                    sideCol(BorderDragSide::Left),   thick(BorderDragSide::Left));
+        dl->AddLine(ImVec2{rx, y0}, ImVec2{rx, y1},
+                    sideCol(BorderDragSide::Right),  thick(BorderDragSide::Right));
+        dl->AddLine(ImVec2{x0, ty}, ImVec2{x1, ty},
+                    sideCol(BorderDragSide::Top),    thick(BorderDragSide::Top));
+        dl->AddLine(ImVec2{x0, by}, ImVec2{x1, by},
+                    sideCol(BorderDragSide::Bottom), thick(BorderDragSide::Bottom));
+    }
+
+    // Hit-test the four border lines + drive the drag. *consumed is set
+    // to true on any click that lands on a line so the Manual flow
+    // doesn't double-handle the same click.
+    bool HandleBorderInput(const ImVec2& imgMin, float scale,
+                           const BorderRegion& br, int texW, int texH,
+                           bool* consumed) {
+        if (!br.active) return false;
+        const ImVec2 mp = ImGui::GetMousePos();
+        const float lx = imgMin.x + float(br.srcX + *br.L)            * scale;
+        const float rx = imgMin.x + float(br.srcX + br.srcW - *br.R)  * scale;
+        const float ty = imgMin.y + float(br.srcY + *br.T)            * scale;
+        const float by = imgMin.y + float(br.srcY + br.srcH - *br.B)  * scale;
+        const float x0 = imgMin.x + float(br.srcX)                * scale;
+        const float y0 = imgMin.y + float(br.srcY)                * scale;
+        const float x1 = imgMin.x + float(br.srcX + br.srcW)      * scale;
+        const float y1 = imgMin.y + float(br.srcY + br.srcH)      * scale;
+        constexpr float kPick = 4.0f;   // hover tolerance in screen px
+
+        // Hover detection. We only consider the cursor "near" a line if
+        // it's also within the active region's perpendicular span, so
+        // far-away clicks don't latch onto the wrong axis.
+        BorderDragSide hover = BorderDragSide::None;
+        if (ImGui::IsItemHovered()) {
+            if (mp.y >= y0 - kPick && mp.y <= y1 + kPick) {
+                if (std::abs(mp.x - lx) < kPick) hover = BorderDragSide::Left;
+                else if (std::abs(mp.x - rx) < kPick) hover = BorderDragSide::Right;
+            }
+            if (hover == BorderDragSide::None &&
+                mp.x >= x0 - kPick && mp.x <= x1 + kPick) {
+                if (std::abs(mp.y - ty) < kPick) hover = BorderDragSide::Top;
+                else if (std::abs(mp.y - by) < kPick) hover = BorderDragSide::Bottom;
+            }
+        }
+        m_borderHover = hover;
+
+        if (m_borderDrag == BorderDragSide::None && hover != BorderDragSide::None &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            m_borderDrag = hover;
+            *consumed = true;
+        }
+
+        bool changed = false;
+        if (m_borderDrag != BorderDragSide::None &&
+            ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const int mpx = int(std::clamp((mp.x - imgMin.x) / scale,
+                                            0.0f, float(texW)));
+            const int mpy = int(std::clamp((mp.y - imgMin.y) / scale,
+                                            0.0f, float(texH)));
+            int next = 0;
+            switch (m_borderDrag) {
+                case BorderDragSide::Left:
+                    next = std::clamp(mpx - br.srcX, 0, br.srcW - *br.R);
+                    if (next != *br.L) { *br.L = next; changed = true; }
+                    break;
+                case BorderDragSide::Right:
+                    next = std::clamp(br.srcX + br.srcW - mpx,
+                                      0, br.srcW - *br.L);
+                    if (next != *br.R) { *br.R = next; changed = true; }
+                    break;
+                case BorderDragSide::Top:
+                    next = std::clamp(mpy - br.srcY, 0, br.srcH - *br.B);
+                    if (next != *br.T) { *br.T = next; changed = true; }
+                    break;
+                case BorderDragSide::Bottom:
+                    next = std::clamp(br.srcY + br.srcH - mpy,
+                                      0, br.srcH - *br.T);
+                    if (next != *br.B) { *br.B = next; changed = true; }
+                    break;
+                default: break;
+            }
+            *consumed = true;
+        }
+        if (m_borderDrag != BorderDragSide::None &&
+            ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            m_borderDrag = BorderDragSide::None;
+        }
+        return changed;
+    }
 
     // Drive the Manual slice mode's drag-create + drag-move flow. The
     // preview's InvisibleButton must already be the last item submitted
@@ -2375,6 +2560,10 @@ private:
     ManualDrag          m_manualDrag        = ManualDrag::None;
     int                 m_manualAnchorPx[2] = {0, 0};
     int                 m_manualCurPx[2]    = {0, 0};
+    // Border-line drag / hover. Lives separately from m_manualDrag so
+    // border editing works in every slice mode, not just Manual.
+    BorderDragSide      m_borderDrag        = BorderDragSide::None;
+    BorderDragSide      m_borderHover       = BorderDragSide::None;
     // New Project modal state.
     bool                m_openNewProjectModal = false;
     std::array<char, 256> m_newProjectName{};
