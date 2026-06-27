@@ -7,3 +7,5 @@
 !CMakeLists.txt
 !tileset-editor/
 !tileset-editor/**
+!scene-editor/
+!scene-editor/**
