@@ -181,6 +181,31 @@ static int LuaInputMouseWheel(lua_State* L) {
     return 1;
 }
 
+// time.delta / time.elapsed / time.frame_count / time.fps.
+// delta() + fps() route through ImGui's own per-frame stats
+// (ImGui already maintains a smoothed Framerate alongside the
+// raw DeltaTime); elapsed() + frame_count() come from the host's
+// own running totals (Tick(dt) bumps them once per editor frame).
+static int LuaTimeDelta(lua_State* L) {
+    lua_pushnumber(L, ImGui::GetIO().DeltaTime);
+    return 1;
+}
+static int LuaTimeElapsed(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    lua_pushnumber(L, host ? host->Elapsed() : 0.0);
+    return 1;
+}
+static int LuaTimeFrameCount(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    lua_pushinteger(L,
+        host ? lua_Integer(host->FrameCount()) : lua_Integer(0));
+    return 1;
+}
+static int LuaTimeFps(lua_State* L) {
+    lua_pushnumber(L, ImGui::GetIO().Framerate);
+    return 1;
+}
+
 // Same pattern again for SpriteRendererComponent. Entities without
 // a renderer are common (light-only / logic-only entities) so the
 // nullptr return is the expected "silent no-op" path.
@@ -629,6 +654,17 @@ ScriptHost::ScriptHost() {
     // missing upvalue from the stack.
     luaL_setfuncs(L, kInputApi, 0);
     lua_setglobal(L, "input");
+    static const luaL_Reg kTimeApi[] = {
+        {"delta",       LuaTimeDelta},
+        {"elapsed",     LuaTimeElapsed},
+        {"frame_count", LuaTimeFrameCount},
+        {"fps",         LuaTimeFps},
+        {nullptr,       nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kTimeApi, 1);
+    lua_setglobal(L, "time");
     if (luaL_dostring(L, kDefaultBootstrap) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
         AppendLine(std::string("[lua-error] bootstrap: ") +

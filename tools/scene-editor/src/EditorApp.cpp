@@ -446,6 +446,11 @@ private:
     // paused scene doesn't leak Update calls.
     void TickScripts(float dt) {
         if (!m_animPlaying) return;
+        // Bump the host's running totals so the Lua `time` API
+        // reads the right elapsed seconds + frame counter. Done
+        // unconditionally here so scripts that read time.* from
+        // their OnStart see consistent values on the first tick.
+        m_scriptHost.Tick(dt);
         std::vector<SceneEditor::EntityId> ids;
         ids.reserve(64);
         CollectAllEntities(m_scene.Roots(), ids);

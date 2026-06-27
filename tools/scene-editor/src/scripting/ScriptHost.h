@@ -87,6 +87,14 @@ public:
     void   BindScene(Scene* scene) { m_scene = scene; }
     Scene* BoundScene() const      { return m_scene; }
 
+    // EditorApp calls Tick once per editor frame (right before
+    // TickScripts) so the host can keep running totals the Lua
+    // `time` API exposes. dt is the same frame delta TickScripts
+    // forwards to OnUpdate.
+    void  Tick(float dt) { m_elapsed += dt; ++m_frameCount; }
+    double Elapsed()    const { return m_elapsed; }
+    long long FrameCount() const { return m_frameCount; }
+
 private:
     std::vector<std::string> m_outputLog;
     // Opaque lua_State* when NARAGAME_SCENE_EDITOR_HAS_LUA is
@@ -96,6 +104,10 @@ private:
     // Set by EditorApp at startup so the Lua `animator` API can
     // look up entities by name.
     Scene* m_scene = nullptr;
+    // Running totals the Lua `time` API surfaces. Tick() bumps
+    // them every editor frame; nothing else mutates them.
+    double    m_elapsed    = 0.0;
+    long long m_frameCount = 0;
 };
 
 } // namespace SceneEditor
