@@ -16,6 +16,11 @@ struct AnimatorState {
     std::string name;
     AssetGuid   animation;
     float       speed = 1.0f;
+    // Position of the node in the graph editor's local coordinate
+    // space. Defaults to (0, 0); the editor auto-fans the nodes out
+    // on first load when every state still sits at the origin.
+    float       nodeX = 0.0f;
+    float       nodeY = 0.0f;
 };
 
 // Bool parameter declared by the controller. AnimatorComponent stores

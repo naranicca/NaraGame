@@ -716,6 +716,154 @@ private:
         m_controllerEditorAsset    = guid;
         m_controllerEditorOpen     = true;
         m_controllerEditorActivate = true;
+        m_graphSelectedState       = -1;
+        m_graphDragState           = -1;
+    }
+
+    // 2D state-machine view. Returns true when a node moved or the
+    // auto-fan-out kicked in, so the caller marks the controller
+    // dirty + saves through to disk.
+    bool DrawControllerGraph(SceneEditor::AnimatorControllerAsset& ctrl) {
+        bool dirty = false;
+        // Auto-fan-out: when every state still sits at (0, 0) treat
+        // the controller as freshly authored and lay the nodes out in
+        // a grid so the user doesn't have to drag them out manually.
+        bool allZero = !ctrl.states.empty();
+        for (const auto& s : ctrl.states) {
+            if (s.nodeX != 0.0f || s.nodeY != 0.0f) {
+                allZero = false;
+                break;
+            }
+        }
+        if (allZero) {
+            for (int i = 0; i < int(ctrl.states.size()); ++i) {
+                ctrl.states[size_t(i)].nodeX = 20.0f + (i % 4) * 150.0f;
+                ctrl.states[size_t(i)].nodeY = 20.0f + (i / 4) *  70.0f;
+            }
+            dirty = true;
+        }
+
+        constexpr float kNodeW   = 130.0f;
+        constexpr float kNodeH   =  40.0f;
+        constexpr float kGraphH  = 280.0f;
+
+        const ImVec2 panelMin = ImGui::GetCursorScreenPos();
+        const ImVec2 size{ImGui::GetContentRegionAvail().x, kGraphH};
+        const ImVec2 panelMax{panelMin.x + size.x, panelMin.y + size.y};
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(panelMin, panelMax,
+                          IM_COL32(28, 30, 36, 255));
+        dl->AddRect(panelMin, panelMax,
+                    IM_COL32(70, 70, 80, 255));
+        ImGui::InvisibleButton("##graph_hit", size,
+                               ImGuiButtonFlags_MouseButtonLeft);
+        const bool hovered = ImGui::IsItemHovered();
+        const ImGuiIO& io  = ImGui::GetIO();
+        const ImVec2 mp    = io.MousePos;
+
+        auto NodeRect = [&](const SceneEditor::AnimatorState& s,
+                            ImVec2& a, ImVec2& b) {
+            a = ImVec2{panelMin.x + s.nodeX,
+                       panelMin.y + s.nodeY};
+            b = ImVec2{a.x + kNodeW, a.y + kNodeH};
+        };
+        auto NodeCentre = [&](const SceneEditor::AnimatorState& s) {
+            return ImVec2{panelMin.x + s.nodeX + kNodeW * 0.5f,
+                          panelMin.y + s.nodeY + kNodeH * 0.5f};
+        };
+
+        // Transitions first so node bodies overlay them.
+        for (const auto& tr : ctrl.transitions) {
+            if (tr.fromIdx < 0 || tr.fromIdx >= int(ctrl.states.size())) continue;
+            if (tr.toIdx   < 0 || tr.toIdx   >= int(ctrl.states.size())) continue;
+            const ImVec2 srcC = NodeCentre(ctrl.states[size_t(tr.fromIdx)]);
+            const ImVec2 dstC = NodeCentre(ctrl.states[size_t(tr.toIdx)]);
+            const float dx = dstC.x - srcC.x;
+            const float dy = dstC.y - srcC.y;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 1.0f) continue;
+            const float ux = dx / len;
+            const float uy = dy / len;
+            // Pull the arrow tip back by half the node size so it
+            // lands on the destination's edge instead of its centre.
+            const float pullBack = std::max(kNodeW, kNodeH) * 0.5f;
+            const ImVec2 tip{dstC.x - ux * pullBack,
+                             dstC.y - uy * pullBack};
+            dl->AddLine(srcC, tip,
+                        IM_COL32(190, 190, 200, 220), 1.5f);
+            const float ah = 10.0f;
+            const float aw = 5.0f;
+            const ImVec2 head1{tip.x - ux * ah - uy * aw,
+                               tip.y - uy * ah + ux * aw};
+            const ImVec2 head2{tip.x - ux * ah + uy * aw,
+                               tip.y - uy * ah - ux * aw};
+            dl->AddTriangleFilled(tip, head1, head2,
+                                  IM_COL32(190, 190, 200, 220));
+        }
+
+        // Mouse-down node hit-test runs before the per-state body so
+        // the drag state is set in time for the move logic below.
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            int hit = -1;
+            for (int i = int(ctrl.states.size()) - 1; i >= 0; --i) {
+                ImVec2 a, b;
+                NodeRect(ctrl.states[size_t(i)], a, b);
+                if (mp.x >= a.x && mp.x <= b.x &&
+                    mp.y >= a.y && mp.y <= b.y) { hit = i; break; }
+            }
+            m_graphSelectedState = hit;
+            m_graphDragState     = hit;
+        }
+        if (m_graphDragState >= 0 &&
+            !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            m_graphDragState = -1;
+        }
+        if (m_graphDragState >= 0 &&
+            m_graphDragState < int(ctrl.states.size())) {
+            auto& s = ctrl.states[size_t(m_graphDragState)];
+            if (io.MouseDelta.x != 0 || io.MouseDelta.y != 0) {
+                s.nodeX = std::max(0.0f, s.nodeX + io.MouseDelta.x);
+                s.nodeY = std::max(0.0f, s.nodeY + io.MouseDelta.y);
+                s.nodeX = std::min(s.nodeX,
+                                   std::max(0.0f, size.x - kNodeW));
+                s.nodeY = std::min(s.nodeY,
+                                   std::max(0.0f, size.y - kNodeH));
+                dirty = true;
+            }
+        }
+
+        // Draw nodes.
+        for (int i = 0; i < int(ctrl.states.size()); ++i) {
+            ImVec2 a, b;
+            NodeRect(ctrl.states[size_t(i)], a, b);
+            const bool isDefault = (i == ctrl.defaultState);
+            const bool isSelected = (i == m_graphSelectedState);
+            const ImU32 fill = isDefault
+                ? IM_COL32(60, 100, 70, 255)
+                : IM_COL32(60, 60, 80, 255);
+            dl->AddRectFilled(a, b, fill, 4.0f);
+            const ImU32 borderCol = isSelected
+                ? IM_COL32(255, 220, 60, 255)
+                : IM_COL32(180, 180, 180, 255);
+            dl->AddRect(a, b, borderCol, 4.0f, 0,
+                        isSelected ? 2.5f : 1.0f);
+            // Centre-ish text. Truncate by clip rect; ImGui handles
+            // the actual text wrap.
+            dl->AddText(ImVec2{a.x + 8.0f, a.y + 12.0f},
+                        IM_COL32(230, 230, 230, 255),
+                        ctrl.states[size_t(i)].name.c_str());
+            if (isDefault) {
+                dl->AddText(ImVec2{a.x + 8.0f, a.y - 14.0f},
+                            IM_COL32(150, 220, 170, 255),
+                            "[default]");
+            }
+        }
+
+        // Legend.
+        dl->AddText(ImVec2{panelMin.x + 8.0f, panelMax.y - 18.0f},
+                    IM_COL32(140, 140, 150, 255),
+                    "Drag nodes to reposition. Default state in green.");
+        return dirty;
     }
 
     // AnimatorController Editor. Three sections: States, Parameters,
@@ -771,6 +919,13 @@ private:
         } else {
             ImGui::TextDisabled("No states yet -- add one below.");
         }
+
+        // Graph view sits between the Default State combo and the
+        // detail-edit lists. Clicking a node selects it (and clears
+        // the selection on empty-space click). Dragging a node
+        // updates nodeX / nodeY in place and persists through the
+        // shared `dirty` flag.
+        if (DrawControllerGraph(*ctrl)) dirty = true;
 
         // -----------------------------------------------------------
         // States
@@ -4915,6 +5070,9 @@ private:
     bool                m_controllerEditorOpen     = false;
     bool                m_controllerEditorActivate = false;
     SceneEditor::AssetGuid m_controllerEditorAsset;
+    // Graph view selection + drag state. -1 = no selection / no drag.
+    int                 m_graphSelectedState = -1;
+    int                 m_graphDragState     = -1;
     int                 m_spriteEditorMode  = 0;    // 0=by size, 1=by count
     int                 m_spriteEditorCellW = 32;
     int                 m_spriteEditorCellH = 32;

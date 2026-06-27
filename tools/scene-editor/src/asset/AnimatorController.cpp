@@ -43,6 +43,8 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
                 st.name      = s.GetString("name");
                 st.animation = AssetGuid::FromString(s.GetString("animation"));
                 st.speed     = float(s.GetNumber("speed", 1.0));
+                st.nodeX     = float(s.GetNumber("nodeX", 0.0));
+                st.nodeY     = float(s.GetNumber("nodeY", 0.0));
                 states.push_back(std::move(st));
             }
         }
@@ -83,6 +85,8 @@ Value AnimatorControllerAsset::ToJson() const {
         o.Add("name",      Value::MakeString(s.name));
         o.Add("animation", Value::MakeString(s.animation.ToString()));
         o.Add("speed",     Value::MakeNumber(s.speed));
+        o.Add("nodeX",     Value::MakeNumber(s.nodeX));
+        o.Add("nodeY",     Value::MakeNumber(s.nodeY));
         sarr.Push(std::move(o));
     }
     root.Add("states", std::move(sarr));
