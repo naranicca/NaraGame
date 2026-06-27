@@ -645,6 +645,43 @@ static int LuaPrintRedirect(lua_State* L) {
     return 0;
 }
 
+// Game-dev math helpers that extend Lua's stdlib `math` table.
+// Authored as pure Lua so the bootstrap doubles as documentation +
+// new helpers cost zero C++ surface. User scripts can override
+// any of these by assigning a new function back into `math.*`.
+static const char* kMathHelpers =
+    "function math.lerp(a, b, t) return a + (b - a) * t end\n"
+    "function math.clamp(x, lo, hi)\n"
+    "  if x < lo then return lo end\n"
+    "  if x > hi then return hi end\n"
+    "  return x\n"
+    "end\n"
+    "function math.sign(x)\n"
+    "  if x > 0 then return 1 end\n"
+    "  if x < 0 then return -1 end\n"
+    "  return 0\n"
+    "end\n"
+    "function math.smoothstep(e0, e1, x)\n"
+    "  if e0 == e1 then return 0 end\n"
+    "  local t = math.clamp((x - e0) / (e1 - e0), 0, 1)\n"
+    "  return t * t * (3 - 2 * t)\n"
+    "end\n"
+    "function math.distance(x1, y1, x2, y2)\n"
+    "  local dx, dy = x2 - x1, y2 - y1\n"
+    "  return math.sqrt(dx * dx + dy * dy)\n"
+    "end\n"
+    "function math.length(x, y)\n"
+    "  return math.sqrt(x * x + y * y)\n"
+    "end\n"
+    "function math.normalize(x, y)\n"
+    "  local len = math.sqrt(x * x + y * y)\n"
+    "  if len < 1e-6 then return 0, 0 end\n"
+    "  return x / len, y / len\n"
+    "end\n"
+    "function math.dot(x1, y1, x2, y2)\n"
+    "  return x1 * x2 + y1 * y2\n"
+    "end\n";
+
 // Default OnAnimationEvent handler. Mirrors the M6c1 stub format so
 // the Console pane reads the same with or without a vendored Lua;
 // user scripts can later overwrite this global with their own
@@ -779,6 +816,12 @@ ScriptHost::ScriptHost() {
     if (luaL_dostring(L, kDefaultBootstrap) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
         AppendLine(std::string("[lua-error] bootstrap: ") +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+    if (luaL_dostring(L, kMathHelpers) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine(std::string("[lua-error] math helpers: ") +
                    (err ? err : "<no message>"));
         lua_pop(L, 1);
     }
