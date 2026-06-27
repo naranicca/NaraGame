@@ -20,6 +20,7 @@
 #include "scene/SpriteRendererComponent.h"
 #include "scene/TilemapComponent.h"
 #include "scene/TransformComponent.h"
+#include "scripting/ScriptHost.h"
 
 #include <NaraGame/renderer/rhi/RHIResources.h>
 
@@ -357,9 +358,14 @@ private:
     // so the tail (and Console rendering) stays bounded. Non-default
     // args get appended in a `[s="x" f=.. i=.. ...]` block so the
     // receiver can tell at a glance which payload reached them.
+    // The same event also routes through m_scriptHost so the
+    // scripting subsystem sees every dispatch -- M6c1 stubs the
+    // host to a separate output log; M6c2+ replaces it with the
+    // Lua bridge.
     void LogAnimationEvent(const std::string& entityName,
                            const std::string& animName,
                            const SceneEditor::AnimationEvent& ev) {
+        m_scriptHost.OnAnimationEvent(entityName, animName, ev);
         const std::string args = FormatAnimationEventArgs(ev);
         char buf[512];
         if (!args.empty()) {
@@ -6592,14 +6598,30 @@ private:
     void DrawConsolePanel() {
         ImGui::Begin("Console");
         // Toolbar.
-        if (ImGui::SmallButton("Clear")) m_eventLog.clear();
+        if (ImGui::SmallButton("Clear##events")) m_eventLog.clear();
         ImGui::SameLine();
         ImGui::TextDisabled("Animation events: %zu", m_eventLog.size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear##script")) {
+            m_scriptHost.ClearOutputLog();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Script output: %zu",
+                            m_scriptHost.OutputLog().size());
         ImGui::Separator();
-        // Show newest first so the latest event stays in view as
-        // playback churns.
-        ImGui::BeginChild("##eventlog", ImVec2(0, 0), false);
+        // Split the panel: event log on top, script output below.
+        // Both newest-first so freshly-fired entries stay in view.
+        const float avail = ImGui::GetContentRegionAvail().y;
+        const float halfH = avail * 0.5f;
+        ImGui::BeginChild("##eventlog", ImVec2(0, halfH), false);
         for (auto it = m_eventLog.rbegin(); it != m_eventLog.rend(); ++it) {
+            ImGui::TextUnformatted(it->c_str());
+        }
+        ImGui::EndChild();
+        ImGui::Separator();
+        ImGui::BeginChild("##scriptlog", ImVec2(0, 0), false);
+        const auto& sout = m_scriptHost.OutputLog();
+        for (auto it = sout.rbegin(); it != sout.rend(); ++it) {
             ImGui::TextUnformatted(it->c_str());
         }
         ImGui::EndChild();
@@ -7079,6 +7101,11 @@ private:
     // bound.
     std::vector<std::string> m_eventLog;
     static constexpr size_t  kEventLogMax = 64;
+    // Editor-side scripting subsystem. M6c1 ships the dispatch
+    // wiring + output log; the actual Lua bridge will land in a
+    // follow-up commit once the host has more event sources to
+    // route. The host outlives every Animation Editor session.
+    SceneEditor::ScriptHost  m_scriptHost;
 
     // Tilemap paint state. The active stamp is a rectangular region of
     // palette cells defined by (Anchor, Cur) in palette (column, row)
