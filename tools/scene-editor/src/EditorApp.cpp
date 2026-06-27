@@ -364,10 +364,20 @@ private:
     // scripting subsystem sees every dispatch -- M6c1 stubs the
     // host to a separate output log; M6c2+ replaces it with the
     // Lua bridge.
-    void LogAnimationEvent(const std::string& entityName,
+    void LogAnimationEvent(const SceneEditor::Entity& e,
                            const std::string& animName,
                            const SceneEditor::AnimationEvent& ev) {
-        m_scriptHost.OnAnimationEvent(entityName, animName, ev);
+        // Per-entity entry function takes priority; absent +
+        // missing fields both fall back to the global
+        // OnAnimationEvent inside the host.
+        std::string entryFn;
+        if (auto* sc =
+                e.GetComponent<SceneEditor::ScriptComponent>()) {
+            entryFn = sc->entryFunction;
+        }
+        const std::string& entityName = e.name;
+        m_scriptHost.OnAnimationEvent(entityName, animName, ev,
+                                      entryFn);
         const std::string args = FormatAnimationEventArgs(ev);
         char buf[512];
         if (!args.empty()) {
@@ -405,7 +415,7 @@ private:
         auto fire = [&](float lo, float hi) {
             for (const auto& ev : anim.events) {
                 if (ev.time >  lo && ev.time <= hi) {
-                    LogAnimationEvent(entName, animName, ev);
+                    LogAnimationEvent(e, animName, ev);
                 }
             }
         };

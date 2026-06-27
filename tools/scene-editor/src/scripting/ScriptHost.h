@@ -30,13 +30,17 @@ public:
     ScriptHost& operator=(const ScriptHost&) = delete;
 
     // Receives an AnimationEvent firing. With Lua enabled the host
-    // calls the global `OnAnimationEvent(entity, anim, event, s,
-    // f, i, b, vx, vy, r, g, bl, a)` Lua function; without Lua it
-    // falls back to the M6c1 stub formatter so the editor still
-    // shows dispatches in the Console pane.
+    // calls the global `<entryFunction>` Lua function when set +
+    // existing, otherwise falls back to the global
+    // `OnAnimationEvent(entity, anim, event, s, f, i, b, vx, vy,
+    // r, g, bl, a)`. Without Lua it falls back to the M6c1 stub
+    // formatter so the editor still shows dispatches in the
+    // Console pane. `entryFunction` defaults to empty -- callers
+    // that want the M6c2 behaviour can leave it off.
     void OnAnimationEvent(const std::string& entityName,
                           const std::string& animationName,
-                          const AnimationEvent& event);
+                          const AnimationEvent& event,
+                          const std::string& entryFunction = "");
 
     // Executes a Lua source file in the host's interpreter. Logs
     // load + runtime errors as `[lua-error] <file>: <message>`

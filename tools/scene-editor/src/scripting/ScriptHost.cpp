@@ -146,16 +146,31 @@ ScriptHost::~ScriptHost() {
 void ScriptHost::OnAnimationEvent(
     const std::string& entityName,
     const std::string& animationName,
-    const AnimationEvent& event) {
+    const AnimationEvent& event,
+    const std::string& entryFunction) {
     if (!m_lua) return;
     lua_State* L = static_cast<lua_State*>(m_lua);
-    lua_getglobal(L, "OnAnimationEvent");
-    if (!lua_isfunction(L, -1)) {
-        // Bootstrap should have installed one; tolerate a user
-        // script that nuked the global by quietly dropping the
-        // dispatch.
-        lua_pop(L, 1);
-        return;
+    // Prefer the per-entity entry function. If it isn't a valid
+    // function fall back to the global OnAnimationEvent so the
+    // bootstrap still catches the dispatch.
+    std::string usedName;
+    if (!entryFunction.empty()) {
+        lua_getglobal(L, entryFunction.c_str());
+        if (lua_isfunction(L, -1)) {
+            usedName = entryFunction;
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+    if (usedName.empty()) {
+        lua_getglobal(L, "OnAnimationEvent");
+        if (!lua_isfunction(L, -1)) {
+            // Tolerate a user script that nuked the global by
+            // quietly dropping the dispatch.
+            lua_pop(L, 1);
+            return;
+        }
+        usedName = "OnAnimationEvent";
     }
     lua_pushstring (L, entityName.c_str());
     lua_pushstring (L, animationName.c_str());
@@ -172,7 +187,7 @@ void ScriptHost::OnAnimationEvent(
     lua_pushnumber (L, event.colorArg.a);
     if (lua_pcall(L, 13, 0, 0) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
-        AppendLine(std::string("[lua-error] OnAnimationEvent: ") +
+        AppendLine("[lua-error] " + usedName + ": " +
                    (err ? err : "<no message>"));
         lua_pop(L, 1);
     }
@@ -205,7 +220,13 @@ bool ScriptHost::LoadString(const std::string&,
 void ScriptHost::OnAnimationEvent(
     const std::string& entityName,
     const std::string& animationName,
-    const AnimationEvent& event) {
+    const AnimationEvent& event,
+    const std::string& entryFunction) {
+    // Stub path: include the entry function in the prefix so the
+    // editor still tells the user which fn would have been called
+    // when Lua is eventually wired in.
+    const std::string fn = entryFunction.empty()
+        ? "OnAnimationEvent" : entryFunction;
     const bool hasArgs = !event.stringArg.empty() ||
                          event.floatArg != 0.0f  ||
                          event.intArg   != 0     ||
@@ -215,8 +236,9 @@ void ScriptHost::OnAnimationEvent(
     char buf[512];
     if (hasArgs) {
         std::snprintf(buf, sizeof(buf),
-                      "[script] %s.%s.%s(\"%s\", %.3f, %d, %s, "
+                      "[script:%s] %s.%s.%s(\"%s\", %.3f, %d, %s, "
                       "(%.2f,%.2f), (%.2f,%.2f,%.2f,%.2f))",
+                      fn.c_str(),
                       entityName.c_str(),
                       animationName.c_str(),
                       event.name.c_str(),
@@ -232,7 +254,8 @@ void ScriptHost::OnAnimationEvent(
                       double(event.colorArg.a));
     } else {
         std::snprintf(buf, sizeof(buf),
-                      "[script] %s.%s.%s()",
+                      "[script:%s] %s.%s.%s()",
+                      fn.c_str(),
                       entityName.c_str(),
                       animationName.c_str(),
                       event.name.c_str());
