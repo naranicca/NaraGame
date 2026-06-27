@@ -41,10 +41,15 @@ struct TextureDesc {
     // RT textures; they start at undefined contents until first drawn into.
     bool renderTarget = false;
     // When true the texture has 6 array layers laid out as cube faces
-    // (+X, -X, +Y, -Y, +Z, -Z in that order) and the SRV is a TextureCube.
-    // `pixels` is treated as 6 sequential face buffers, each
+    // (+X, -X, +Y, -Y, +Z, -Z in that order) and the SRV is a TextureCube
+    // (or TextureCubeArray when arrayLayers > 1). `pixels` is treated as
+    // arrayLayers * 6 sequential face buffers, each
     // (width * height * bytesPerPixel) long. width must equal height.
     bool isCube = false;
+    // Logical layer count. For 2D arrays this is the array size; for
+    // cubes it's the number of cubes (so the D3D11 backend asks for
+    // ArraySize = 6 * arrayLayers). 1 keeps the texture single-layer.
+    uint32_t arrayLayers = 1;
 };
 
 class RHITexture {

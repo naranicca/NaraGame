@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <d3dcompiler.h>
+#include <vector>
 
 namespace NaraGame {
 
@@ -73,12 +74,15 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
     const bool isDepth = (desc.format == TextureFormat::Depth24);
     const bool isHDR   = (desc.format == TextureFormat::RGBA16F);
     const bool isCube  = desc.isCube;
+    const uint32_t layers = (desc.arrayLayers == 0) ? 1u : desc.arrayLayers;
+    // Cube arrays: ArraySize counts every face across every cube.
+    const uint32_t arraySize = isCube ? (6u * layers) : layers;
 
     D3D11_TEXTURE2D_DESC td{};
     td.Width = desc.width;
     td.Height = desc.height;
     td.MipLevels = 1;
-    td.ArraySize = isCube ? 6u : 1u;
+    td.ArraySize = arraySize;
     td.MiscFlags = isCube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0u;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
@@ -98,23 +102,25 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
         if (desc.renderTarget) td.BindFlags |= D3D11_BIND_RENDER_TARGET;
     }
 
-    // Cubemap upload: 6 contiguous face buffers in desc.pixels, laid out
-    // +X, -X, +Y, -Y, +Z, -Z. Each face is desc.width * desc.height
-    // pixels at (isHDR ? 8 : 4) bytes per pixel.
+    // Upload layout: arraySize sequential subresources, each
+    // (width * height * bytesPerPixel) bytes. For cubes the order is
+    // (cube0 +X -X +Y -Y +Z -Z, cube1 +X..., ...). For 2D arrays it's
+    // (layer0, layer1, ...).
     const uint32_t bytesPerPixel = isHDR ? 8u : 4u;
     const uint32_t pitch         = desc.width * bytesPerPixel;
-    const uint32_t faceBytes     = pitch * desc.height;
+    const uint32_t sliceBytes    = pitch * desc.height;
 
-    D3D11_SUBRESOURCE_DATA init{};
-    init.pSysMem     = desc.pixels;
-    init.SysMemPitch = pitch;
+    D3D11_SUBRESOURCE_DATA singleInit{};
+    singleInit.pSysMem     = desc.pixels;
+    singleInit.SysMemPitch = pitch;
 
-    D3D11_SUBRESOURCE_DATA cubeInit[6]{};
-    if (isCube) {
-        for (uint32_t f = 0; f < 6; ++f) {
-            cubeInit[f].pSysMem =
-                static_cast<const uint8_t*>(desc.pixels) + size_t(f) * faceBytes;
-            cubeInit[f].SysMemPitch = pitch;
+    std::vector<D3D11_SUBRESOURCE_DATA> arrayInit;
+    if (arraySize > 1) {
+        arrayInit.resize(arraySize);
+        for (uint32_t i = 0; i < arraySize; ++i) {
+            arrayInit[i].pSysMem =
+                static_cast<const uint8_t*>(desc.pixels) + size_t(i) * sliceBytes;
+            arrayInit[i].SysMemPitch = pitch;
         }
     }
 
@@ -123,7 +129,7 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
     // (the latter expects pre-converted half-float data).
     const D3D11_SUBRESOURCE_DATA* initPtr = nullptr;
     if (desc.pixels && !desc.renderTarget && !isDepth) {
-        initPtr = isCube ? cubeInit : &init;
+        initPtr = (arraySize > 1) ? arrayInit.data() : &singleInit;
     }
 
     HRESULT hr =
@@ -156,7 +162,23 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
         return;
     }
 
-    if (isCube) {
+    if (isCube && layers > 1) {
+        // Cube array SRV: the shader declares TextureCubeArray and
+        // samples float4(dir, cubeIndex). NumCubes counts logical cubes
+        // (each one wraps 6 faces).
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = td.Format;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
+        sd.TextureCubeArray.MipLevels       = 1;
+        sd.TextureCubeArray.MostDetailedMip = 0;
+        sd.TextureCubeArray.First2DArrayFace = 0;
+        sd.TextureCubeArray.NumCubes         = layers;
+        hr = device->CreateShaderResourceView(m_texture.Get(), &sd,
+                                              m_srv.GetAddressOf());
+        if (FAILED(hr))
+            NARAGAME_ERROR("CreateShaderResourceView(cube array) failed (0x%08lX)",
+                           static_cast<unsigned long>(hr));
+    } else if (isCube) {
         // Cubemap SRV so the shader can declare `TextureCube` and sample
         // by 3D direction. Mip levels = 1 to match the texture, matching
         // the single-level upload above.

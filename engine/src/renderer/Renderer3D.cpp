@@ -136,13 +136,12 @@ Texture2D    normalTex   : register(t4);
 // by the (perturbed) world normal -- no atan2/acos -- since cube sampling
 // is hardware accelerated.
 TextureCube  skyEnvTex          : register(t5);
-// Prefiltered env atlas at t6: six 256x128 strips stacked vertically,
-// each pre-convolved with a GGX lobe at roughness = strip/5. Sampled
-// twice and lerped by frac(roughness * 5) for a smooth roughness
-// response.
-Texture2D    prefilteredEnvTex  : register(t6);
+// Prefiltered env at t6: a 6-cube TextureCubeArray with one cube per
+// GGX roughness level. Sampled by float4(direction, levelIndex) and
+// linearly blended between adjacent levels by frac(roughness * 5).
+TextureCubeArray prefilteredEnvTex : register(t6);
 // BRDF LUT at t7: R = scale, G = bias. Indexed by (NdotV, roughness).
-Texture2D    brdfLutTex         : register(t7);
+Texture2D        brdfLutTex        : register(t7);
 
 // Wrap a unit vector to equirectangular UVs. u = azimuth around +Y,
 // v = elevation from +Y (0 = straight up, 1 = straight down).
@@ -152,14 +151,13 @@ float2 DirToEquirect(float3 dir) {
     return float2(u, v);
 }
 
-// Sample the prefiltered env atlas at the strip for `level` (0..5) and
-// remap the equirectangular v into the strip's vertical slice.
-float3 SamplePrefilteredStrip(float3 dir, int level) {
-    float2 uv = DirToEquirect(dir);
-    // Six 128-tall strips packed vertically -> each strip covers 1/6 of
-    // the atlas in v, offset by level/6.
-    uv.y = (float(level) + uv.y) * (1.0 / 6.0);
-    return prefilteredEnvTex.SampleLevel(sampLinear, uv, 0).rgb;
+// Sample the prefiltered cube array at the cube for roughness `level`
+// (0..5). float4(dir, level) is the standard TextureCubeArray.Sample
+// signature: dir picks the face/UV per cube, the integer-ish 4th
+// component picks which cube.
+float3 SamplePrefilteredCube(float3 dir, int level) {
+    return prefilteredEnvTex.SampleLevel(sampLinear,
+                                         float4(dir, float(level)), 0).rgb;
 }
 
 // 5x5 box PCF in a cascade's shadow map. Templated over the texture by
@@ -309,12 +307,12 @@ float4 PSMain(VSOut input) : SV_TARGET {
     float3 diffuseIbl = kdIbl * base.rgb * envDiffuse;
 
     float3 R       = reflect(-V, N);
-    float  mipPos  = saturate(roughness) * 5.0;  // 6 strips: 0..5
+    float  mipPos  = saturate(roughness) * 5.0;  // 6 cubes: 0..5
     int    mipLo  = (int)floor(mipPos);
     int    mipHi  = min(mipLo + 1, 5);
     float  mipT   = mipPos - float(mipLo);
-    float3 envLo  = SamplePrefilteredStrip(R, mipLo);
-    float3 envHi  = SamplePrefilteredStrip(R, mipHi);
+    float3 envLo  = SamplePrefilteredCube(R, mipLo);
+    float3 envHi  = SamplePrefilteredCube(R, mipHi);
     float3 envSpec = lerp(envLo, envHi, mipT);
     float2 brdf   = brdfLutTex.Sample(sampLinear,
                                        float2(NdV, roughness)).rg;
@@ -865,68 +863,77 @@ void Renderer3D::BakeIblFromSource(const float* srcPixels, int srcW, int srcH) {
     sky.pixels = cubeHalf.data();
     m_skyEnvTex = m_device->CreateTexture(sky);
 
-    // Prefiltered atlas stays as a 2D equirect texture for now: the
-    // existing strip-by-roughness UV math doesn't translate to a cube
-    // without a TextureCubeArray binding, and the bake output below
-    // already matches that shader path. Promoting it is a follow-up.
-    constexpr int kSkyW = 256;
-    constexpr int kSkyH = 128;
-
-    // Prefiltered atlas: six 256x128 strips, GGX-convolved at the
-    // corresponding roughness level. 32 importance samples / pixel.
-    constexpr int kPrefLevels  = 6;
-    constexpr int kPrefSamples = 32;
-    const int prefTotalH = kSkyH * kPrefLevels;
-    std::vector<uint16_t> prefHalf(size_t(kSkyW) * size_t(prefTotalH) * 4);
+    // Prefiltered env: a TextureCubeArray with one cube per GGX roughness
+    // level. 6 cubes x 6 faces x 64x64 = 9216 face pixels per level; with
+    // 32 Hammersley samples per pixel that's the same order of magnitude
+    // as the old 2D equirect prefilter but with hardware cube sampling
+    // in the shader. The pixel shader lerps between two adjacent levels
+    // by frac(roughness * 5) for a smooth roughness response.
+    constexpr int kPrefLevels   = 6;
+    constexpr int kPrefFace     = 64;
+    constexpr int kPrefSamples  = 32;
+    const size_t facePixels     = size_t(kPrefFace) * size_t(kPrefFace) * 4;
+    std::vector<uint16_t> prefHalf(facePixels * 6 * kPrefLevels);
     for (int level = 0; level < kPrefLevels; ++level) {
         const float roughness = float(level) / float(kPrefLevels - 1);
-        const int rowStart = level * kSkyH;
-        for (int y = 0; y < kSkyH; ++y) {
-            const float v = float(y) / float(kSkyH - 1);
-            const float elev = v * kIblPi;
-            const float sinE = std::sin(elev);
-            const float cosE = std::cos(elev);
-            for (int x = 0; x < kSkyW; ++x) {
-                const float u = float(x) / float(kSkyW);
-                const float az = (u - 0.5f) * 2.0f * kIblPi;
-                const Vec3 N = {sinE * std::sin(az), cosE, sinE * std::cos(az)};
-                Vec3 sum{0.0f, 0.0f, 0.0f};
-                float weight = 0.0f;
-                for (int s = 0; s < kPrefSamples; ++s) {
-                    const Vec2f xi = Hammersley(uint32_t(s),
-                                                uint32_t(kPrefSamples));
-                    const Vec3 H = ImportanceSampleGGX(xi, N, roughness);
-                    const float NdotH = N.x * H.x + N.y * H.y + N.z * H.z;
-                    const Vec3 L = {2.0f * NdotH * H.x - N.x,
-                                    2.0f * NdotH * H.y - N.y,
-                                    2.0f * NdotH * H.z - N.z};
-                    const float NdotL = std::max(0.0f,
-                                                 N.x * L.x + N.y * L.y + N.z * L.z);
-                    if (NdotL > 0.0f) {
-                        const Vec3 c = SampleSkyBilinearFloat(srcPixels,
-                                                              srcW, srcH, L);
-                        sum.x += c.x * NdotL;
-                        sum.y += c.y * NdotL;
-                        sum.z += c.z * NdotL;
-                        weight += NdotL;
+        const size_t cubeBase = size_t(level) * 6 * facePixels;
+        for (int face = 0; face < 6; ++face) {
+            const size_t faceBase = cubeBase + size_t(face) * facePixels;
+            for (int y = 0; y < kPrefFace; ++y) {
+                const float t = (2.0f * (float(y) + 0.5f) / float(kPrefFace)) - 1.0f;
+                for (int x = 0; x < kPrefFace; ++x) {
+                    const float s = (2.0f * (float(x) + 0.5f) / float(kPrefFace)) - 1.0f;
+                    Vec3 N;
+                    switch (face) {
+                        case 0: N = { 1.0f,  -t, -s }; break;  // +X
+                        case 1: N = {-1.0f,  -t,  s }; break;  // -X
+                        case 2: N = {   s, 1.0f,   t }; break;  // +Y
+                        case 3: N = {   s,-1.0f,  -t }; break;  // -Y
+                        case 4: N = {   s,   -t, 1.0f}; break;  // +Z
+                        default:N = {  -s,   -t,-1.0f}; break;  // -Z
                     }
+                    const float dl = std::sqrt(N.x * N.x + N.y * N.y + N.z * N.z);
+                    N.x /= dl; N.y /= dl; N.z /= dl;
+                    Vec3 sum{0.0f, 0.0f, 0.0f};
+                    float weight = 0.0f;
+                    for (int si = 0; si < kPrefSamples; ++si) {
+                        const Vec2f xi = Hammersley(uint32_t(si),
+                                                    uint32_t(kPrefSamples));
+                        const Vec3 H = ImportanceSampleGGX(xi, N, roughness);
+                        const float NdotH = N.x * H.x + N.y * H.y + N.z * H.z;
+                        const Vec3 L = {2.0f * NdotH * H.x - N.x,
+                                        2.0f * NdotH * H.y - N.y,
+                                        2.0f * NdotH * H.z - N.z};
+                        const float NdotL = std::max(0.0f,
+                                                     N.x * L.x + N.y * L.y + N.z * L.z);
+                        if (NdotL > 0.0f) {
+                            const Vec3 c = SampleSkyBilinearFloat(srcPixels,
+                                                                  srcW, srcH, L);
+                            sum.x += c.x * NdotL;
+                            sum.y += c.y * NdotL;
+                            sum.z += c.z * NdotL;
+                            weight += NdotL;
+                        }
+                    }
+                    if (weight > 0.0f) {
+                        sum.x /= weight; sum.y /= weight; sum.z /= weight;
+                    }
+                    const size_t i = faceBase + (size_t(y) * kPrefFace + size_t(x)) * 4;
+                    prefHalf[i + 0] = FloatToHalf(sum.x);
+                    prefHalf[i + 1] = FloatToHalf(sum.y);
+                    prefHalf[i + 2] = FloatToHalf(sum.z);
+                    prefHalf[i + 3] = FloatToHalf(1.0f);
                 }
-                if (weight > 0.0f) {
-                    sum.x /= weight; sum.y /= weight; sum.z /= weight;
-                }
-                const size_t i = (size_t(rowStart + y) * kSkyW + size_t(x)) * 4;
-                prefHalf[i + 0] = FloatToHalf(sum.x);
-                prefHalf[i + 1] = FloatToHalf(sum.y);
-                prefHalf[i + 2] = FloatToHalf(sum.z);
-                prefHalf[i + 3] = FloatToHalf(1.0f);
             }
         }
     }
     TextureDesc pref;
-    pref.width  = kSkyW;
-    pref.height = prefTotalH;
-    pref.format = TextureFormat::RGBA16F;
-    pref.filter = TextureFilter::Linear;
+    pref.width       = kPrefFace;
+    pref.height      = kPrefFace;
+    pref.format      = TextureFormat::RGBA16F;
+    pref.filter      = TextureFilter::Linear;
+    pref.isCube      = true;
+    pref.arrayLayers = uint32_t(kPrefLevels);
     pref.pixels = prefHalf.data();
     m_prefilteredEnvTex = m_device->CreateTexture(pref);
 }
