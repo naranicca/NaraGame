@@ -66,6 +66,9 @@ set_target_properties(scene-editor PROPERTIES FOLDER "tools")
 # ---------------------------------------------------------------------------
 set(LUA_DIR ${CMAKE_SOURCE_DIR}/third_party/lua)
 if(EXISTS ${LUA_DIR}/lua.h)
+    # The root project declares CXX only; enable C here so the Lua
+    # sources find the right toolchain without disturbing the rest.
+    enable_language(C)
     set(LUA_SOURCES
         ${LUA_DIR}/lapi.c
         ${LUA_DIR}/lauxlib.c

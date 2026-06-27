@@ -46,3 +46,8 @@ citybuilder.save
 flappy_high.txt
 invaders_save.cfg
 
+# Vendored Lua 5.4 sources (each dev grabs these locally per
+# third_party/lua/README.md). Keep the README + this rule tracked.
+third_party/lua/*
+!third_party/lua/README.md
+
