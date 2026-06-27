@@ -1,5 +1,6 @@
 #include "Component.h"
 
+#include "SpriteRendererComponent.h"
 #include "TransformComponent.h"
 
 namespace SceneEditor {
@@ -35,6 +36,8 @@ void RegisterBuiltinComponents() {
     if (r.Has(TransformComponent::StaticTypeName())) return;  // idempotent
     r.Register(TransformComponent::StaticTypeName(),
                [] { return std::make_unique<TransformComponent>(); });
+    r.Register(SpriteRendererComponent::StaticTypeName(),
+               [] { return std::make_unique<SpriteRendererComponent>(); });
 }
 
 } // namespace SceneEditor

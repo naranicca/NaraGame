@@ -10,6 +10,11 @@
 #include <unordered_map>
 #include <vector>
 
+namespace NaraGame {
+class RHIDevice;
+class RHITexture;
+}
+
 namespace SceneEditor {
 
 class Project;
@@ -55,6 +60,13 @@ public:
 
     const std::string& AssetsRoot() const { return m_assetsRoot; }
 
+    // Lazy texture cache. First call decodes the file from disk via the
+    // engine's PNG/JPG path and uploads it as an RHI texture; later
+    // calls reuse the cached pointer. Returns nullptr if the guid is
+    // unknown, classifies as a non-texture, or fails to decode.
+    NaraGame::RHITexture* GetTexture(NaraGame::RHIDevice& device,
+                                     const AssetGuid& guid);
+
 private:
     void ScanDir(const std::string& dirAbs,
                  const std::string& relPrefix,
@@ -74,6 +86,12 @@ private:
     std::unordered_map<std::string, size_t>      m_byPath;
     std::unordered_map<AssetGuid, size_t>        m_byGuid;
     std::unique_ptr<AssetTreeNode>               m_root;
+
+    // Owned GPU textures, keyed by asset guid. Cleared on Close so a
+    // project swap releases the GPU memory; a follow-up commit will
+    // route this through a proper hot-reload watch.
+    std::unordered_map<AssetGuid,
+                       std::unique_ptr<NaraGame::RHITexture>> m_textureCache;
 };
 
 } // namespace SceneEditor

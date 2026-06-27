@@ -10,7 +10,10 @@
 #include "scene/Component.h"
 #include "scene/Entity.h"
 #include "scene/Scene.h"
+#include "scene/SpriteRendererComponent.h"
 #include "scene/TransformComponent.h"
+
+#include <NaraGame/renderer/rhi/RHIResources.h>
 
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
@@ -575,12 +578,37 @@ private:
 
         // --- Components -------------------------------------------------
         for (auto& comp : e->components) {
-            DrawComponentEditor(comp.get());
+            DrawComponentEditor(*e, comp.get());
+        }
+        // Add Component button. Lists every registered factory we don't
+        // already have on this entity (Transform always present, so it
+        // never re-offers itself).
+        if (ImGui::Button("Add Component...")) {
+            ImGui::OpenPopup("##add_component");
+        }
+        if (ImGui::BeginPopup("##add_component")) {
+            for (const std::string& type :
+                 SceneEditor::ComponentRegistry::Get().TypeNames()) {
+                const bool already = std::any_of(
+                    e->components.begin(), e->components.end(),
+                    [&](const auto& c) { return type == c->TypeName(); });
+                if (already) continue;
+                if (ImGui::MenuItem(type.c_str())) {
+                    if (auto comp = SceneEditor::ComponentRegistry::Get()
+                                        .Create(type)) {
+                        e->components.push_back(std::move(comp));
+                        m_scene.MarkDirty();
+                        UpdateWindowTitle();
+                    }
+                }
+            }
+            ImGui::EndPopup();
         }
         ImGui::End();
     }
 
-    void DrawComponentEditor(SceneEditor::Component* comp) {
+    void DrawComponentEditor(SceneEditor::Entity& entity,
+                             SceneEditor::Component* comp) {
         if (!comp) return;
         const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen |
                                          ImGuiTreeNodeFlags_Framed;
@@ -588,26 +616,107 @@ private:
         // Type-specific editor. New component types add a case here (or
         // grow a virtual DrawInspector once the surface stabilises).
         if (auto* t = dynamic_cast<SceneEditor::TransformComponent*>(comp)) {
-            float pos[3]   = { t->position.x, t->position.y, t->position.z };
-            float scale[3] = { t->scale.x,    t->scale.y,    t->scale.z };
-            bool changed = false;
-            if (ImGui::DragFloat3("Position", pos, 0.05f)) {
-                t->position = { pos[0], pos[1], pos[2] };
-                changed = true;
-            }
-            if (ImGui::DragFloat("Rotation Z", &t->rotation, 0.5f, -3600.0f, 3600.0f, "%.2f deg")) {
-                changed = true;
-            }
-            if (ImGui::DragFloat3("Scale", scale, 0.01f, -1000.0f, 1000.0f)) {
-                t->scale = { scale[0], scale[1], scale[2] };
-                changed = true;
-            }
-            if (changed) {
-                m_scene.MarkDirty();
-                UpdateWindowTitle();
-            }
+            DrawTransformEditor(*t);
+        } else if (auto* s = dynamic_cast<SceneEditor::SpriteRendererComponent*>(comp)) {
+            DrawSpriteRendererEditor(entity, *s);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
+        }
+    }
+
+    void DrawTransformEditor(SceneEditor::TransformComponent& t) {
+        float pos[3]   = { t.position.x, t.position.y, t.position.z };
+        float scale[3] = { t.scale.x,    t.scale.y,    t.scale.z };
+        bool changed = false;
+        if (ImGui::DragFloat3("Position", pos, 0.05f)) {
+            t.position = { pos[0], pos[1], pos[2] };
+            changed = true;
+        }
+        if (ImGui::DragFloat("Rotation Z", &t.rotation, 0.5f,
+                             -3600.0f, 3600.0f, "%.2f deg")) {
+            changed = true;
+        }
+        if (ImGui::DragFloat3("Scale", scale, 0.01f, -1000.0f, 1000.0f)) {
+            t.scale = { scale[0], scale[1], scale[2] };
+            changed = true;
+        }
+        if (changed) {
+            m_scene.MarkDirty();
+            UpdateWindowTitle();
+        }
+    }
+
+    void DrawSpriteRendererEditor(SceneEditor::Entity& entity,
+                                  SceneEditor::SpriteRendererComponent& s) {
+        bool changed = false;
+        // Sprite picker -- dropdown over every Texture asset in the
+        // project. Drag-and-drop from the Project panel is M2c3; this is
+        // the keyboard/mouse fallback that ships now.
+        std::string current = "(none)";
+        if (s.sprite.IsValid()) {
+            if (const auto* e = m_assetDb.FindByGuid(s.sprite)) {
+                current = e->relPath;
+            } else {
+                current = s.sprite.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Sprite", current.c_str())) {
+            if (ImGui::Selectable("(none)", !s.sprite.IsValid())) {
+                s.sprite = SceneEditor::AssetGuid{};
+                changed = true;
+            }
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "Texture") continue;
+                const bool sel = (a.guid == s.sprite);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    s.sprite = a.guid;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        float col[4] = { s.color.r, s.color.g, s.color.b, s.color.a };
+        if (ImGui::ColorEdit4("Tint", col)) {
+            s.color = { col[0], col[1], col[2], col[3] };
+            changed = true;
+        }
+        changed |= ImGui::Checkbox("Flip X", &s.flipX);
+        changed |= ImGui::Checkbox("Flip Y", &s.flipY);
+        const char* modes[] = { "Simple", "Sliced", "Tiled" };
+        int idx = int(s.drawMode);
+        if (ImGui::Combo("Draw Mode", &idx, modes, 3)) {
+            s.drawMode = static_cast<SceneEditor::SpriteDrawMode>(idx);
+            changed = true;
+        }
+        if (s.drawMode != SceneEditor::SpriteDrawMode::Simple) {
+            float sz[2] = { s.size.x, s.size.y };
+            if (ImGui::DragFloat2("Size", sz, 0.05f, 0.0f, 1024.0f)) {
+                s.size = { sz[0], sz[1] };
+                changed = true;
+            }
+        }
+        char layerBuf[64];
+        std::snprintf(layerBuf, sizeof(layerBuf), "%s",
+                      s.sortingLayer.c_str());
+        if (ImGui::InputText("Sorting Layer", layerBuf, sizeof(layerBuf))) {
+            s.sortingLayer = layerBuf;
+            changed = true;
+        }
+        if (ImGui::DragInt("Order in Layer", &s.orderInLayer, 0.2f,
+                           -1000, 1000)) {
+            changed = true;
+        }
+        if (ImGui::SmallButton("Remove##sprite")) {
+            // Lazy remove: find and erase by raw pointer comparison.
+            for (auto it = entity.components.begin();
+                 it != entity.components.end(); ++it) {
+                if (it->get() == &s) { entity.components.erase(it); break; }
+            }
+            changed = true;
+        }
+        if (changed) {
+            m_scene.MarkDirty();
+            UpdateWindowTitle();
         }
     }
 
@@ -826,36 +935,92 @@ private:
     }
 
     void DrawEntities(ImDrawList* dl, const ImVec2& panelMin,
-                      const ImVec2& panelSize) const {
+                      const ImVec2& panelSize) {
         std::vector<SceneEditor::EntityId> ids;
         CollectAllEntities(m_scene.Roots(), ids);
         for (SceneEditor::EntityId id : ids) {
             const auto* e = m_scene.Get(id);
             if (!e || !e->enabled) continue;
+            const auto* spr = e->GetComponent<SceneEditor::SpriteRendererComponent>();
             const ImVec2 wp = EntityWorldPos(*e);
             const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
-            // Marker: 0.6-world-unit square. Selected entities get a
-            // brighter outline + dot so they pop against the grid.
-            const float half = 0.3f * m_viewCam.zoom;
-            const ImVec2 a{c.x - half, c.y - half};
-            const ImVec2 b{c.x + half, c.y + half};
             const bool sel = (id == m_selection);
-            dl->AddRectFilled(a, b,
-                              sel ? IM_COL32(220, 180, 70, 255)
-                                  : IM_COL32(110, 160, 220, 255),
-                              4.0f);
-            dl->AddRect(a, b,
-                        sel ? IM_COL32(255, 255, 200, 255)
-                            : IM_COL32(40, 40, 50, 255),
-                        4.0f, 0, sel ? 2.0f : 1.0f);
-            // Centre dot helps line markers up against the grid lines.
-            dl->AddCircleFilled(c, 2.0f, IM_COL32(20, 20, 20, 255));
-            // Name label below the marker.
-            const float ts = ImGui::GetFontSize();
-            dl->AddText(ImVec2{c.x + half + 4.0f, c.y - ts * 0.5f},
-                        IM_COL32(220, 220, 220, 255),
-                        e->name.c_str());
+            if (spr && spr->sprite.IsValid()) {
+                DrawSpriteEntity(dl, *e, *spr, c, sel);
+            } else {
+                DrawMarkerEntity(dl, *e, c, sel);
+            }
         }
+    }
+
+    void DrawMarkerEntity(ImDrawList* dl, const SceneEditor::Entity& e,
+                          const ImVec2& c, bool selected) const {
+        const float half = 0.3f * m_viewCam.zoom;
+        const ImVec2 a{c.x - half, c.y - half};
+        const ImVec2 b{c.x + half, c.y + half};
+        dl->AddRectFilled(a, b,
+                          selected ? IM_COL32(220, 180, 70, 255)
+                                   : IM_COL32(110, 160, 220, 255),
+                          4.0f);
+        dl->AddRect(a, b,
+                    selected ? IM_COL32(255, 255, 200, 255)
+                             : IM_COL32(40, 40, 50, 255),
+                    4.0f, 0, selected ? 2.0f : 1.0f);
+        dl->AddCircleFilled(c, 2.0f, IM_COL32(20, 20, 20, 255));
+        const float ts = ImGui::GetFontSize();
+        dl->AddText(ImVec2{c.x + half + 4.0f, c.y - ts * 0.5f},
+                    IM_COL32(220, 220, 220, 255),
+                    e.name.c_str());
+    }
+
+    void DrawSpriteEntity(ImDrawList* dl,
+                          const SceneEditor::Entity& e,
+                          const SceneEditor::SpriteRendererComponent& spr,
+                          const ImVec2& c, bool selected) {
+        // Lazy load through the asset DB. If the texture isn't there
+        // yet -- or the file failed to decode -- fall back to the
+        // marker so the user still sees the entity.
+        NaraGame::RHITexture* tex =
+            m_assetDb.GetTexture(GetDevice(), spr.sprite);
+        if (!tex) {
+            DrawMarkerEntity(dl, e, c, selected);
+            return;
+        }
+        // Sprite asset import settings (pixels-per-unit, pivot) land in
+        // M3 with the Sprite Editor; for M2c1 we hard-code a sensible
+        // default: 100 px / unit, centred pivot. The world-space size of
+        // the quad is therefore (textureWidth, textureHeight) / 100.
+        constexpr float kDefaultPpu = 100.0f;
+        const float wWorld = float(tex->Width())  / kDefaultPpu;
+        const float hWorld = float(tex->Height()) / kDefaultPpu;
+        const float halfW  = wWorld * 0.5f * m_viewCam.zoom;
+        const float halfH  = hWorld * 0.5f * m_viewCam.zoom;
+        const ImVec2 a{c.x - halfW, c.y - halfH};
+        const ImVec2 b{c.x + halfW, c.y + halfH};
+
+        // UV flip via swapped corners. Sprite tint multiplies the texture.
+        const ImVec2 uv0{spr.flipX ? 1.0f : 0.0f,
+                         spr.flipY ? 1.0f : 0.0f};
+        const ImVec2 uv1{spr.flipX ? 0.0f : 1.0f,
+                         spr.flipY ? 0.0f : 1.0f};
+        const ImU32 tint = IM_COL32(
+            uint8_t(std::clamp(spr.color.r, 0.0f, 1.0f) * 255.0f),
+            uint8_t(std::clamp(spr.color.g, 0.0f, 1.0f) * 255.0f),
+            uint8_t(std::clamp(spr.color.b, 0.0f, 1.0f) * 255.0f),
+            uint8_t(std::clamp(spr.color.a, 0.0f, 1.0f) * 255.0f));
+        const ImTextureID texId =
+            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                tex->GetNativeView()));
+        dl->AddImage(texId, a, b, uv0, uv1, tint);
+
+        // Selection outline + label on top.
+        if (selected) {
+            dl->AddRect(a, b, IM_COL32(255, 220, 60, 255), 0.0f, 0, 2.0f);
+        }
+        const float ts = ImGui::GetFontSize();
+        dl->AddText(ImVec2{a.x, b.y + 2.0f},
+                    IM_COL32(220, 220, 220, 255),
+                    e.name.c_str());
     }
 
     void DrawConsolePanel() {

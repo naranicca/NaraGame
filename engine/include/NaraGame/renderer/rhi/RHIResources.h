@@ -65,6 +65,16 @@ public:
     // already hold this texture's address stay valid across the swap.
     // Backends that don't implement live updates return false.
     virtual bool UpdatePixels(const void* /*pixels*/) { return false; }
+
+    // Backend-native shader-resource handle for runtime tooling that
+    // needs to sample the texture outside the engine's own draw path
+    // (editor previews via ImGui, debug overlays). The caller is
+    // expected to know which backend it's on and cast accordingly:
+    //   D3D11  -> ID3D11ShaderResourceView*
+    //   Vulkan -> VkImageView (cast to void*)
+    // Default returns nullptr so a backend that hasn't surfaced this
+    // yet still compiles and just disables the tooling that needs it.
+    virtual void* GetNativeView() const { return nullptr; }
 };
 
 // ---------------------------------------------------------------------------

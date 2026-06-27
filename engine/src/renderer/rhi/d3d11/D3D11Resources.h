@@ -43,6 +43,7 @@ public:
     bool UpdatePixels(const void* pixels) override;
 
     ID3D11ShaderResourceView* SRV() const { return m_srv.Get(); }
+    void* GetNativeView() const override { return m_srv.Get(); }
     // Non-null only when the texture was created with renderTarget = true.
     ID3D11RenderTargetView* RTV() const { return m_rtv.Get(); }
     // Non-null only for depth-format textures; shadow-map RTs use this

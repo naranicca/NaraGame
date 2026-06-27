@@ -2,8 +2,12 @@
 
 #include "../project/Project.h"
 
+#include <NaraGame/assets/Image.h>
 #include <NaraGame/assets/MiniJson.h>
+#include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/core/Log.h>
+#include <NaraGame/renderer/rhi/RHIDevice.h>
+#include <NaraGame/renderer/rhi/RHIResources.h>
 
 #include <algorithm>
 #include <cctype>
@@ -69,6 +73,32 @@ void AssetDatabase::Close() {
     m_byPath.clear();
     m_byGuid.clear();
     m_root.reset();
+    m_textureCache.clear();
+}
+
+NaraGame::RHITexture* AssetDatabase::GetTexture(NaraGame::RHIDevice& device,
+                                                const AssetGuid& guid) {
+    if (!guid.IsValid()) return nullptr;
+    if (auto it = m_textureCache.find(guid); it != m_textureCache.end()) {
+        return it->second.get();
+    }
+    const AssetEntry* entry = FindByGuid(guid);
+    if (!entry || entry->typeName != "Texture") return nullptr;
+    const std::string abs = m_assetsRoot + "/" + entry->relPath;
+    NaraGame::Image img = NaraGame::LoadImageFile(abs);
+    if (!img.Valid()) {
+        NARAGAME_WARN("AssetDatabase: '%s' failed to decode as a texture",
+                      entry->relPath.c_str());
+        // Park an empty entry so we don't retry every frame.
+        m_textureCache.emplace(guid, nullptr);
+        return nullptr;
+    }
+    auto tex = NaraGame::CreateTexture(device, img,
+                                       NaraGame::TextureFilter::Linear);
+    if (!tex) return nullptr;
+    NaraGame::RHITexture* raw = tex.get();
+    m_textureCache.emplace(guid, std::move(tex));
+    return raw;
 }
 
 void AssetDatabase::Rescan() {

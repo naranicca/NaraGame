@@ -41,6 +41,7 @@ add_executable(scene-editor
     src/project/Project.cpp
     src/scene/Component.cpp
     src/scene/Scene.cpp
+    src/scene/SpriteRendererComponent.cpp
     src/scene/TransformComponent.cpp)
 target_include_directories(scene-editor PRIVATE src)
 target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui)
