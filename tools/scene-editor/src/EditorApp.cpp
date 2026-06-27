@@ -546,6 +546,29 @@ private:
         }
     }
 
+    void DoNewController() {
+        const std::string animDir =
+            m_project.IsOpen() ? (m_project.AssetsDir() + "/Animations")
+                               : std::string{};
+        if (!animDir.empty()) {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            fs::create_directories(fs::path(animDir), ec);
+        }
+        const std::string path = PickFileDialog(
+            m_hwnd, CLSID_FileSaveDialog, L"New Animator Controller",
+            L"NaraGame Controller (*.ncontroller)",
+            L"*.ncontroller", L"ncontroller",
+            animDir);
+        if (path.empty()) return;
+        SceneEditor::AnimatorControllerAsset ctrl;
+        if (!ctrl.SaveToFile(path)) return;
+        m_assetDb.Rescan();
+        if (const auto* entry = m_assetDb.FindByPath(RelToAssets(path))) {
+            OpenControllerEditor(entry->guid);
+        }
+    }
+
     void DoNewAnimation() {
         const std::string animDir =
             m_project.IsOpen() ? (m_project.AssetsDir() + "/Animations")
@@ -646,6 +669,9 @@ private:
                 DoNewTileset();
             if (ImGui::MenuItem("New Animation...", nullptr, false, projOpen))
                 DoNewAnimation();
+            if (ImGui::MenuItem("New Animator Controller...",
+                                nullptr, false, projOpen))
+                DoNewController();
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) Close();
             ImGui::EndMenu();
