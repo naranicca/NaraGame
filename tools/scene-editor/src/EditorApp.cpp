@@ -281,6 +281,7 @@ public:
 
         DrawMainMenuBar();
         HandleGlobalShortcuts();
+        TickScriptFileWatcher(ImGui::GetIO().DeltaTime);
         TickScripts (ImGui::GetIO().DeltaTime);
         TickAnimators(ImGui::GetIO().DeltaTime);
         DrawHierarchyPanel();
@@ -474,6 +475,39 @@ private:
     void NotifyAllScriptsForDestroy() {
         for (SceneEditor::EntityId rootId : m_scene.Roots()) {
             NotifyScriptDestroyForEntity(rootId);
+        }
+    }
+
+    // Polls disk mtimes on every Script-typed asset + reloads
+    // the ones that changed since we last looked. Runs
+    // independently of m_animPlaying so an external edit during
+    // a paused scene still propagates the moment the user
+    // unpauses. First observation just seeds the cache so the
+    // initial project-open sweep doesn't double-load every file
+    // the M6c3 auto-loader already ran.
+    void TickScriptFileWatcher(float dt) {
+        if (!m_project.IsOpen()) return;
+        m_scriptWatchAccum += dt;
+        if (m_scriptWatchAccum < kScriptWatchInterval) return;
+        m_scriptWatchAccum = 0.0f;
+        for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+            if (a.typeName != "Script") continue;
+            const std::string abs =
+                m_assetDb.AssetsRoot() + "/" + a.relPath;
+            std::error_code ec;
+            auto mtime = std::filesystem::last_write_time(abs, ec);
+            if (ec) continue;
+            auto it = m_scriptMTimes.find(abs);
+            if (it == m_scriptMTimes.end()) {
+                m_scriptMTimes[abs] = mtime;
+                continue;
+            }
+            if (it->second != mtime) {
+                it->second = mtime;
+                m_scriptHost.AppendLine(
+                    "[watcher] reloading " + a.relPath);
+                m_scriptHost.LoadFile(abs, a.relPath);
+            }
         }
     }
 
@@ -963,6 +997,7 @@ private:
         NotifyAllScriptsForDestroy();
         m_project.Close();
         m_assetDb.Close();
+        m_scriptMTimes.clear();
         m_scene = SceneEditor::Scene();
         m_currentScenePath.clear();
         m_selection = SceneEditor::kInvalidEntityId;
@@ -7488,6 +7523,16 @@ private:
     // follow-up commit once the host has more event sources to
     // route. The host outlives every Animation Editor session.
     SceneEditor::ScriptHost  m_scriptHost;
+
+    // Polling file watcher for .lua assets. Every kScriptWatchInterval
+    // seconds the editor walks every Script-typed AssetEntry +
+    // re-loads the file when its last_write_time bumped. M6c3's
+    // Edit > Reload Scripts is the manual escape hatch; this is
+    // the "VS Code saved while the editor was running" path.
+    float                    m_scriptWatchAccum   = 0.0f;
+    static constexpr float   kScriptWatchInterval = 1.0f;
+    std::unordered_map<std::string, std::filesystem::file_time_type>
+                             m_scriptMTimes;
 
     // Minimal in-editor text editor for .lua scripts. Opens via
     // double-click on a Script-typed Project row; the buffer is
