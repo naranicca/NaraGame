@@ -37,6 +37,7 @@ endif()
 add_executable(scene-editor
     src/EditorApp.cpp
     src/asset/Animation.cpp
+    src/asset/AnimatorController.cpp
     src/asset/AssetDatabase.cpp
     src/asset/AssetGuid.cpp
     src/asset/Autotile.cpp

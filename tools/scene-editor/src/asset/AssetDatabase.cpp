@@ -2,6 +2,7 @@
 
 #include "../project/Project.h"
 #include "Animation.h"
+#include "AnimatorController.h"
 #include "Autotile.h"
 #include "TextureImportSettings.h"
 #include "Tileset.h"
@@ -81,6 +82,7 @@ void AssetDatabase::Close() {
     m_tilesetCache.clear();
     m_autotileCache.clear();
     m_animationCache.clear();
+    m_controllerCache.clear();
 }
 
 NaraGame::RHITexture* AssetDatabase::GetTexture(NaraGame::RHIDevice& device,
@@ -368,6 +370,38 @@ void AssetDatabase::EvictAnimation(const AssetGuid& guid) {
     m_animationCache.erase(guid);
 }
 
+AnimatorControllerAsset* AssetDatabase::GetAnimatorController(
+    const AssetGuid& guid) {
+    if (!guid.IsValid()) return nullptr;
+    if (auto it = m_controllerCache.find(guid); it != m_controllerCache.end()) {
+        return it->second.get();
+    }
+    const AssetEntry* entry = FindByGuid(guid);
+    if (!entry || entry->typeName != "AnimatorController") return nullptr;
+    const std::string abs = m_assetsRoot + "/" + entry->relPath;
+    auto ac = std::make_unique<AnimatorControllerAsset>();
+    if (!ac->LoadFromFile(abs)) {
+        m_controllerCache.emplace(guid, nullptr);
+        return nullptr;
+    }
+    AnimatorControllerAsset* raw = ac.get();
+    m_controllerCache.emplace(guid, std::move(ac));
+    return raw;
+}
+
+bool AssetDatabase::SaveAnimatorController(const AssetGuid& guid) {
+    AnimatorControllerAsset* ac = GetAnimatorController(guid);
+    if (!ac) return false;
+    const AssetEntry* entry = FindByGuid(guid);
+    if (!entry) return false;
+    const std::string abs = m_assetsRoot + "/" + entry->relPath;
+    return ac->SaveToFile(abs);
+}
+
+void AssetDatabase::EvictAnimatorController(const AssetGuid& guid) {
+    m_controllerCache.erase(guid);
+}
+
 std::string AssetDatabase::ClassifyByExtension(const std::string& relPath) {
     const std::string ext = LowerExt(relPath);
     if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" ||
@@ -380,6 +414,7 @@ std::string AssetDatabase::ClassifyByExtension(const std::string& relPath) {
     if (ext == ".ntileset") return "Tileset";
     if (ext == ".autotile") return "Autotile";
     if (ext == ".nanim")    return "Animation";
+    if (ext == ".ncontroller") return "AnimatorController";
     if (ext == ".sprite")  return "SpriteSheet";
     if (ext == ".hdr")     return "HdrEnvironment";
     if (ext == ".dds")     return "Texture";

@@ -21,6 +21,7 @@ class Project;
 class TilesetAsset;
 class AutotileAsset;
 class AnimationAsset;
+class AnimatorControllerAsset;
 
 // One catalogued asset. The same row drives the Project panel display,
 // inspector lookups, and the GUID -> data resolution that scene /
@@ -102,6 +103,11 @@ public:
     bool            SaveAnimation(const AssetGuid& guid);
     void            EvictAnimation(const AssetGuid& guid);
 
+    // AnimatorController cache.
+    AnimatorControllerAsset* GetAnimatorController(const AssetGuid& guid);
+    bool                     SaveAnimatorController(const AssetGuid& guid);
+    void                     EvictAnimatorController(const AssetGuid& guid);
+
 private:
     void ScanDir(const std::string& dirAbs,
                  const std::string& relPrefix,
@@ -135,6 +141,9 @@ private:
                        std::unique_ptr<AutotileAsset>>         m_autotileCache;
     std::unordered_map<AssetGuid,
                        std::unique_ptr<AnimationAsset>>        m_animationCache;
+    std::unordered_map<AssetGuid,
+                       std::unique_ptr<AnimatorControllerAsset>>
+                                                                m_controllerCache;
 };
 
 } // namespace SceneEditor

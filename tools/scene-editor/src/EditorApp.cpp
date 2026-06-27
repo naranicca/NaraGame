@@ -7,6 +7,7 @@
 
 #include "asset/AssetDatabase.h"
 #include "asset/Animation.h"
+#include "asset/AnimatorController.h"
 #include "asset/Autotile.h"
 #include "asset/SpriteSheet.h"
 #include "asset/TextureImportSettings.h"
@@ -324,6 +325,14 @@ private:
             if (!e || !e->enabled) continue;
             auto* an = e->GetComponent<SceneEditor::AnimatorComponent>();
             if (!an || !an->isPlaying) continue;
+
+            // Controller branch wins over the standalone animation
+            // field. The component's animation guid stays as a
+            // fallback for entities that don't use a state machine.
+            if (an->controller.IsValid()) {
+                TickControllerAnimator(*an, dt, *e);
+                continue;
+            }
             SceneEditor::AnimationAsset* anim =
                 m_assetDb.GetAnimation(an->animation);
             if (!anim || anim->frames.empty()) continue;
@@ -337,6 +346,63 @@ private:
                     spr->subSprite = fr->sprite;
                 }
             }
+        }
+    }
+
+    // Drive an AnimatorComponent through its controller. Picks the
+    // initial state on the first tick, advances the current state's
+    // animation, samples it onto the SpriteRenderer, and then walks
+    // the transition list once per frame.
+    void TickControllerAnimator(SceneEditor::AnimatorComponent& an,
+                                float dt,
+                                SceneEditor::Entity& e) {
+        SceneEditor::AnimatorControllerAsset* ctrl =
+            m_assetDb.GetAnimatorController(an.controller);
+        if (!ctrl || ctrl->states.empty()) return;
+
+        // Initialise on first run / out-of-range state. paramValues
+        // is also bootstrapped from the controller's declared
+        // defaults the first time we see this animator.
+        if (an.currentState < 0 ||
+            an.currentState >= int(ctrl->states.size())) {
+            an.currentState = std::clamp(ctrl->defaultState, 0,
+                                         int(ctrl->states.size()) - 1);
+            an.currentTime  = 0.0f;
+            for (const auto& p : ctrl->parameters) {
+                if (an.paramValues.find(p.name) == an.paramValues.end()) {
+                    an.paramValues[p.name] = p.defaultValue;
+                }
+            }
+        }
+
+        const SceneEditor::AnimatorState& st = ctrl->states[size_t(an.currentState)];
+        SceneEditor::AnimationAsset* anim = m_assetDb.GetAnimation(st.animation);
+        if (anim && !anim->frames.empty()) {
+            an.currentTime += dt * st.speed;
+            if (const SceneEditor::AnimationFrame* fr =
+                    anim->Sample(an.currentTime)) {
+                if (auto* spr =
+                        e.GetComponent<SceneEditor::SpriteRendererComponent>()) {
+                    if (spr->subSprite != fr->sprite) {
+                        spr->subSprite = fr->sprite;
+                    }
+                }
+            }
+        }
+
+        // Transition evaluation in declaration order. A transition
+        // fires when its `fromIdx` matches the current state (or is
+        // -1 = any), its parameter is known, and its value matches
+        // the expected bool.
+        for (const SceneEditor::AnimatorTransition& tr : ctrl->transitions) {
+            if (tr.fromIdx >= 0 && tr.fromIdx != an.currentState) continue;
+            auto it = an.paramValues.find(tr.param);
+            if (it == an.paramValues.end()) continue;
+            if (it->second != tr.expected) continue;
+            if (tr.toIdx < 0 || tr.toIdx >= int(ctrl->states.size())) continue;
+            an.currentState = tr.toIdx;
+            an.currentTime  = 0.0f;
+            break;
         }
     }
 
@@ -2163,7 +2229,67 @@ private:
         if (ImGui::SmallButton("Restart")) {
             UndoSnapshot();
             an.currentTime = 0.0f;
+            an.currentState = -1;
             changed = true;
+        }
+
+        // --- Controller ---------------------------------------------
+        ImGui::Separator();
+        std::string ctrlLabel = "(none)";
+        if (an.controller.IsValid()) {
+            if (const auto* e = m_assetDb.FindByGuid(an.controller)) {
+                ctrlLabel = e->relPath;
+            } else {
+                ctrlLabel = an.controller.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Controller", ctrlLabel.c_str())) {
+            if (ImGui::Selectable("(none)", !an.controller.IsValid())) {
+                UndoSnapshot();
+                an.controller   = SceneEditor::AssetGuid{};
+                an.currentState = -1;
+                changed = true;
+            }
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "AnimatorController") continue;
+                const bool sel = (a.guid == an.controller);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    UndoSnapshot();
+                    an.controller   = a.guid;
+                    an.currentState = -1;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (an.controller.IsValid()) {
+            if (SceneEditor::AnimatorControllerAsset* ctrl =
+                    m_assetDb.GetAnimatorController(an.controller)) {
+                if (an.currentState >= 0 &&
+                    an.currentState < int(ctrl->states.size())) {
+                    ImGui::TextDisabled("Current state: %s",
+                        ctrl->states[size_t(an.currentState)].name.c_str());
+                } else {
+                    ImGui::TextDisabled("Current state: (uninitialised)");
+                }
+                // Parameter toggles. The animator backs each toggle
+                // with paramValues[name]; missing entries fall back
+                // to the controller's declared default so a fresh
+                // animator still picks up the right starting state.
+                if (!ctrl->parameters.empty()) {
+                    ImGui::Text("Parameters");
+                    for (const auto& p : ctrl->parameters) {
+                        bool draft = p.defaultValue;
+                        auto it = an.paramValues.find(p.name);
+                        if (it != an.paramValues.end()) draft = it->second;
+                        if (ImGui::Checkbox(p.name.c_str(), &draft)) {
+                            UndoSnapshot();
+                            an.paramValues[p.name] = draft;
+                            changed = true;
+                        }
+                    }
+                }
+            }
         }
         if (changed) {
             m_scene.MarkDirty();

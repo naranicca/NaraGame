@@ -5,6 +5,9 @@
 
 #include <NaraGame/assets/MiniJson.h>
 
+#include <string>
+#include <unordered_map>
+
 namespace SceneEditor {
 
 // Plays an AnimationAsset against a companion SpriteRendererComponent.
@@ -19,6 +22,14 @@ public:
     AssetGuid animation;
     float     currentTime = 0.0f;
     bool      isPlaying   = true;
+
+    // Optional .ncontroller reference. When set, the runtime ignores
+    // `animation` and plays the controller's currentState animation
+    // instead. paramValues drives the controller's transitions; the
+    // editor's inspector exposes a toggle for each parameter.
+    AssetGuid controller;
+    int       currentState = -1;   // -1 = "not initialised yet"
+    std::unordered_map<std::string, bool> paramValues;
 
     static const char* StaticTypeName() { return "Animator"; }
     const char* TypeName() const override { return StaticTypeName(); }
