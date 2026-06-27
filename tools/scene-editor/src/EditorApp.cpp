@@ -718,6 +718,8 @@ private:
         m_controllerEditorActivate = true;
         m_graphSelectedState       = -1;
         m_graphDragState           = -1;
+        m_graphPendingFrom         = -1;
+        m_graphContextNode         = -1;
     }
 
     // 2D state-machine view. Returns true when a node moved or the
@@ -801,18 +803,52 @@ private:
                                   IM_COL32(190, 190, 200, 220));
         }
 
-        // Mouse-down node hit-test runs before the per-state body so
-        // the drag state is set in time for the move logic below.
-        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            int hit = -1;
+        auto HitNode = [&]() {
             for (int i = int(ctrl.states.size()) - 1; i >= 0; --i) {
                 ImVec2 a, b;
                 NodeRect(ctrl.states[size_t(i)], a, b);
                 if (mp.x >= a.x && mp.x <= b.x &&
-                    mp.y >= a.y && mp.y <= b.y) { hit = i; break; }
+                    mp.y >= a.y && mp.y <= b.y) {
+                    return i;
+                }
             }
-            m_graphSelectedState = hit;
-            m_graphDragState     = hit;
+            return -1;
+        };
+
+        // Mouse-down node hit-test runs before the per-state body so
+        // the drag state is set in time for the move logic below.
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            const int hit = HitNode();
+            if (m_graphPendingFrom >= 0) {
+                // Pending transition: hit on a real (different) state
+                // commits the edge; any other click cancels.
+                if (hit >= 0 && hit != m_graphPendingFrom &&
+                    m_graphPendingFrom < int(ctrl.states.size())) {
+                    SceneEditor::AnimatorTransition tr;
+                    tr.fromIdx  = m_graphPendingFrom;
+                    tr.toIdx    = hit;
+                    tr.expected = true;
+                    ctrl.transitions.push_back(std::move(tr));
+                    dirty = true;
+                }
+                m_graphPendingFrom = -1;
+            } else {
+                m_graphSelectedState = hit;
+                m_graphDragState     = hit;
+            }
+        }
+        // Right-click opens a node context menu.
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            const int hit = HitNode();
+            if (hit >= 0) {
+                m_graphContextNode = hit;
+                ImGui::OpenPopup("##graph_node_ctx");
+            }
+        }
+        // Escape cancels the pending transition.
+        if (m_graphPendingFrom >= 0 &&
+            ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            m_graphPendingFrom = -1;
         }
         if (m_graphDragState >= 0 &&
             !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -859,10 +895,66 @@ private:
             }
         }
 
+        // Rubber-band + source highlight while waiting for the user
+        // to click a target state.
+        if (m_graphPendingFrom >= 0 &&
+            m_graphPendingFrom < int(ctrl.states.size())) {
+            const auto& src = ctrl.states[size_t(m_graphPendingFrom)];
+            ImVec2 a, b;
+            NodeRect(src, a, b);
+            dl->AddRect(a, b, IM_COL32(255, 120, 120, 255),
+                        4.0f, 0, 3.0f);
+            const ImVec2 srcC = NodeCentre(src);
+            dl->AddLine(srcC, mp,
+                        IM_COL32(255, 220, 60, 220), 2.0f);
+        }
+
+        // Context menu. Lives outside the node iteration so the popup
+        // can survive across frames + the user's mouse move.
+        if (ImGui::BeginPopup("##graph_node_ctx")) {
+            const int n = m_graphContextNode;
+            if (ImGui::MenuItem("Add Transition From Here")) {
+                m_graphPendingFrom = n;
+            }
+            if (ImGui::MenuItem("Make Default")) {
+                if (n >= 0 && n < int(ctrl.states.size())) {
+                    ctrl.defaultState = n;
+                    dirty = true;
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete State")) {
+                if (n >= 0 && n < int(ctrl.states.size())) {
+                    ctrl.states.erase(ctrl.states.begin() + n);
+                    if (ctrl.defaultState == n) ctrl.defaultState = 0;
+                    else if (ctrl.defaultState > n) ctrl.defaultState--;
+                    ctrl.transitions.erase(
+                        std::remove_if(ctrl.transitions.begin(),
+                                       ctrl.transitions.end(),
+                                       [&](const auto& t) {
+                                           return t.fromIdx == n ||
+                                                  t.toIdx   == n;
+                                       }),
+                        ctrl.transitions.end());
+                    for (auto& t : ctrl.transitions) {
+                        if (t.fromIdx > n) t.fromIdx--;
+                        if (t.toIdx   > n) t.toIdx--;
+                    }
+                    if (m_graphSelectedState == n) m_graphSelectedState = -1;
+                    if (m_graphDragState     == n) m_graphDragState     = -1;
+                    if (m_graphPendingFrom   == n) m_graphPendingFrom   = -1;
+                    dirty = true;
+                }
+            }
+            ImGui::EndPopup();
+        }
+
         // Legend.
+        const char* legend = (m_graphPendingFrom >= 0)
+            ? "Click a state to add a transition from the highlighted node. Esc cancels."
+            : "Drag to reposition. Right-click a node for transitions / delete.";
         dl->AddText(ImVec2{panelMin.x + 8.0f, panelMax.y - 18.0f},
-                    IM_COL32(140, 140, 150, 255),
-                    "Drag nodes to reposition. Default state in green.");
+                    IM_COL32(140, 140, 150, 255), legend);
         return dirty;
     }
 
@@ -5073,6 +5165,12 @@ private:
     // Graph view selection + drag state. -1 = no selection / no drag.
     int                 m_graphSelectedState = -1;
     int                 m_graphDragState     = -1;
+    // Interactive transition authoring. m_graphPendingFrom holds the
+    // source state index while we wait for the user to click a
+    // target; m_graphContextNode caches whichever node fired the
+    // right-click context menu.
+    int                 m_graphPendingFrom   = -1;
+    int                 m_graphContextNode   = -1;
     int                 m_spriteEditorMode  = 0;    // 0=by size, 1=by count
     int                 m_spriteEditorCellW = 32;
     int                 m_spriteEditorCellH = 32;
