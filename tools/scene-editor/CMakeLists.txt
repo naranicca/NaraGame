@@ -36,6 +36,8 @@ endif()
 
 add_executable(scene-editor
     src/EditorApp.cpp
+    src/asset/AssetDatabase.cpp
+    src/asset/AssetGuid.cpp
     src/project/Project.cpp
     src/scene/Component.cpp
     src/scene/Scene.cpp

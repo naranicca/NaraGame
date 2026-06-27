@@ -5,6 +5,7 @@
 // adds Entity / Transform / Scene save+load + Hierarchy / Inspector
 // panels on top of the project shell.
 
+#include "asset/AssetDatabase.h"
 #include "project/Project.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
@@ -219,6 +220,7 @@ public:
             SceneEditor::Project p;
             if (p.Open(m_startupProjectPath)) {
                 m_project = std::move(p);
+                m_assetDb.Open(m_project);
                 UpdateWindowTitle();
             }
         }
@@ -302,12 +304,14 @@ private:
         SceneEditor::Project p;
         if (!p.Open(folder)) return;
         m_project = std::move(p);
+        m_assetDb.Open(m_project);
         UpdateWindowTitle();
     }
 
     void DoCloseProject() {
         if (!m_project.IsOpen()) return;
         m_project.Close();
+        m_assetDb.Close();
         m_scene = SceneEditor::Scene();
         m_currentScenePath.clear();
         m_selection = SceneEditor::kInvalidEntityId;
@@ -449,6 +453,7 @@ private:
             SceneEditor::Project p;
             if (p.Create(root, name)) {
                 m_project = std::move(p);
+                m_assetDb.Open(m_project);
                 UpdateWindowTitle();
                 ImGui::CloseCurrentPopup();
             } else {
@@ -631,15 +636,61 @@ private:
             if (ImGui::Button("New Project..."))  StartNewProjectFlow();
             ImGui::SameLine();
             if (ImGui::Button("Open Project...")) DoOpenProject();
-        } else {
-            ImGui::Text("Name:    %s", m_project.Name().c_str());
-            ImGui::Text("Version: %s", m_project.Version().c_str());
-            ImGui::TextWrapped("Root:    %s", m_project.RootDir().c_str());
-            ImGui::Separator();
-            ImGui::TextDisabled("Asset browser + thumbnails will land "
-                                "here (M1 commit 4).");
+            ImGui::End();
+            return;
+        }
+        if (ImGui::Button("Refresh")) m_assetDb.Rescan();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu assets in '%s'",
+                            m_assetDb.Entries().size(),
+                            m_project.Name().c_str());
+        ImGui::Separator();
+        if (const SceneEditor::AssetTreeNode* root = m_assetDb.RootNode()) {
+            DrawAssetTreeNode(*root, /*topLevel=*/true);
         }
         ImGui::End();
+    }
+
+    void DrawAssetTreeNode(const SceneEditor::AssetTreeNode& node,
+                           bool topLevel) {
+        if (node.isFolder) {
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
+                                       ImGuiTreeNodeFlags_OpenOnArrow |
+                                       ImGuiTreeNodeFlags_OpenOnDoubleClick;
+            if (topLevel) flags |= ImGuiTreeNodeFlags_DefaultOpen;
+            const bool open = ImGui::TreeNodeEx(node.name.c_str(), flags,
+                                                "%s/", node.name.c_str());
+            if (open) {
+                for (const auto& c : node.children) DrawAssetTreeNode(*c, false);
+                ImGui::TreePop();
+            }
+            return;
+        }
+        // File: show name + the classified type label, selectable for
+        // future drag-drop / inspector wiring. Hover tooltip shows the
+        // stable GUID for debugging asset references.
+        const SceneEditor::AssetEntry* e =
+            (node.entryIndex < m_assetDb.Entries().size())
+                ? &m_assetDb.Entries()[node.entryIndex]
+                : nullptr;
+        const bool selected = (e && m_selectedAsset == e->guid);
+        ImGui::TreeNodeEx(node.name.c_str(),
+                          ImGuiTreeNodeFlags_Leaf |
+                          ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                          ImGuiTreeNodeFlags_SpanAvailWidth |
+                          (selected ? ImGuiTreeNodeFlags_Selected : 0),
+                          "%s", node.name.c_str());
+        if (ImGui::IsItemClicked() && e) m_selectedAsset = e->guid;
+        if (e) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("  [%s]", e->typeName.c_str());
+            if (ImGui::IsItemHovered() ||
+                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("guid %s\npath  Assets/%s",
+                                  e->guid.ToString().c_str(),
+                                  e->relPath.c_str());
+            }
+        }
     }
 
     // --- Dockspace layout ------------------------------------------------
@@ -687,6 +738,9 @@ private:
     SceneEditor::Scene    m_scene;
     std::string           m_currentScenePath;
     SceneEditor::EntityId m_selection = SceneEditor::kInvalidEntityId;
+
+    SceneEditor::AssetDatabase m_assetDb;
+    SceneEditor::AssetGuid     m_selectedAsset;
 
     // New Project modal state.
     bool                m_openNewProjectModal = false;
