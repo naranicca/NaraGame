@@ -1411,6 +1411,36 @@ private:
             changed = true;
         }
         if (ImGui::IsItemActivated()) UndoSnapshot();
+
+        // Sorting layer + order, mirroring the SpriteRenderer inspector
+        // so the unified sort pass can place tilemaps anywhere in the
+        // stack.
+        const auto& layers = m_project.SortingLayers();
+        const bool currentInList = std::find(layers.begin(), layers.end(),
+                                              tm.sortingLayer) != layers.end();
+        if (ImGui::BeginCombo("Sorting Layer", tm.sortingLayer.c_str())) {
+            if (!currentInList && !tm.sortingLayer.empty()) {
+                if (ImGui::Selectable((tm.sortingLayer + "  (orphan)").c_str(),
+                                      true)) {
+                    // No-op; clicking the orphan keeps it.
+                }
+                ImGui::Separator();
+            }
+            for (const std::string& l : layers) {
+                const bool sel = (l == tm.sortingLayer);
+                if (ImGui::Selectable(l.c_str(), sel)) {
+                    UndoSnapshot();
+                    tm.sortingLayer = l;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::DragInt("Order in Layer", &tm.orderInLayer, 0.2f,
+                           -1000, 1000)) {
+            changed = true;
+        }
+        if (ImGui::IsItemActivated()) UndoSnapshot();
         ImGui::TextDisabled("Painted cells: %zu", tm.cells.size());
         if (changed) {
             m_scene.MarkDirty();
@@ -2451,61 +2481,68 @@ private:
         std::vector<SceneEditor::EntityId> ids;
         CollectAllEntities(m_scene.Roots(), ids);
 
-        // Tilemap pass first so the grid lays down as background under
-        // every sprite. Layer-aware sorting between tilemaps + sprites
-        // is a follow-up; for M4c1 tilemaps simply draw before any
-        // SpriteRenderer in the same scene.
-        for (SceneEditor::EntityId id : ids) {
-            const auto* e = m_scene.Get(id);
-            if (!e || !e->enabled) continue;
-            const auto* tm = e->GetComponent<SceneEditor::TilemapComponent>();
-            if (tm && tm->tileset.IsValid()) {
-                DrawTilemapEntity(dl, *e, *tm, panelMin, panelSize,
-                                  id == m_selection);
-            }
-        }
-
-        // Split sprite-bearing entities from marker-only ones. Sprites
-        // sort by (layer, orderInLayer, sceneTraversalOrder) so the
-        // user's layer + order choices take precedence. Markers are
-        // editor-only visuals -- draw them after every sprite so the
-        // user can always click them even when stacked under sprites.
+        // Unified sort over every visible component. A single entity
+        // with both a SpriteRenderer and a Tilemap shows up twice with
+        // independent sort keys, so the user can layer them however
+        // they want. Markers are editor-only visuals -- they're not in
+        // the sorted list and draw after everything so they stay
+        // clickable.
+        enum class Kind { Sprite, Tilemap };
         struct SortKey {
-            int layerPrio;
-            int order;
+            Kind   kind;
+            int    layerPrio;
+            int    order;
             size_t traversal;
             SceneEditor::EntityId id;
         };
-        std::vector<SortKey> sprites;
+        std::vector<SortKey> drawList;
         std::vector<SceneEditor::EntityId> markers;
-        sprites.reserve(ids.size());
+        drawList.reserve(ids.size() * 2);
         for (size_t i = 0; i < ids.size(); ++i) {
             const auto* e = m_scene.Get(ids[i]);
             if (!e || !e->enabled) continue;
+            const auto* tm  = e->GetComponent<SceneEditor::TilemapComponent>();
             const auto* spr = e->GetComponent<SceneEditor::SpriteRendererComponent>();
-            if (spr && spr->sprite.IsValid()) {
-                sprites.push_back({
+            const bool hasTm  = tm  && tm->tileset.IsValid();
+            const bool hasSpr = spr && spr->sprite.IsValid();
+            if (hasTm) {
+                drawList.push_back({
+                    Kind::Tilemap,
+                    m_project.LayerPriority(tm->sortingLayer),
+                    tm->orderInLayer, i, ids[i]});
+            }
+            if (hasSpr) {
+                drawList.push_back({
+                    Kind::Sprite,
                     m_project.LayerPriority(spr->sortingLayer),
                     spr->orderInLayer, i, ids[i]});
-            } else {
-                markers.push_back(ids[i]);
             }
+            if (!hasTm && !hasSpr) markers.push_back(ids[i]);
         }
-        std::sort(sprites.begin(), sprites.end(),
+        std::sort(drawList.begin(), drawList.end(),
                   [](const SortKey& a, const SortKey& b) {
                       if (a.layerPrio != b.layerPrio) return a.layerPrio < b.layerPrio;
                       if (a.order     != b.order)     return a.order     < b.order;
                       return a.traversal < b.traversal;
                   });
 
-        for (const SortKey& k : sprites) {
+        for (const SortKey& k : drawList) {
             const auto* e = m_scene.Get(k.id);
             if (!e) continue;
-            const auto* spr = e->GetComponent<SceneEditor::SpriteRendererComponent>();
             const ImVec2 wp = EntityWorldPos(*e);
             const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
             const bool sel = (k.id == m_selection);
-            DrawSpriteEntity(dl, *e, *spr, c, sel);
+            if (k.kind == Kind::Tilemap) {
+                if (const auto* tm =
+                        e->GetComponent<SceneEditor::TilemapComponent>()) {
+                    DrawTilemapEntity(dl, *e, *tm, panelMin, panelSize, sel);
+                }
+            } else {
+                if (const auto* spr =
+                        e->GetComponent<SceneEditor::SpriteRendererComponent>()) {
+                    DrawSpriteEntity(dl, *e, *spr, c, sel);
+                }
+            }
         }
         for (SceneEditor::EntityId id : markers) {
             const auto* e = m_scene.Get(id);

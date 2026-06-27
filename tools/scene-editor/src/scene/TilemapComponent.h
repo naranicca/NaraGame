@@ -30,6 +30,13 @@ public:
     // row-major inside the source texture (0 = top-left source cell).
     std::map<std::pair<int, int>, int> cells;
 
+    // Same sortingLayer / orderInLayer pair that SpriteRendererComponent
+    // uses. The viewport merges tilemaps + sprite renderers into one
+    // sorted draw list so a Foreground tilemap can sit on top of a
+    // Default sprite, and vice versa.
+    std::string sortingLayer = "Default";
+    int         orderInLayer = 0;
+
     static const char* StaticTypeName() { return "Tilemap"; }
     const char* TypeName() const override { return StaticTypeName(); }
 
