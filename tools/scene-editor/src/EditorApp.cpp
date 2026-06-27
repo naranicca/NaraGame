@@ -2115,7 +2115,10 @@ private:
                 // Event markers: one dot per event in the top-right
                 // corner of the sub-rect that fires the event.
                 // Multiple events on the same frame stack downward so
-                // every dot stays visible.
+                // every dot stays visible. The drawn positions are
+                // cached for the overlay hit-test below.
+                struct EvtDot { int idx; ImVec2 centre; float radius; };
+                std::vector<EvtDot> dots;
                 if (haveImp && !an->events.empty() && !an->frames.empty()) {
                     std::unordered_map<std::string, int> perSpriteCount;
                     for (size_t ei = 0; ei < an->events.size(); ++ei) {
@@ -2154,6 +2157,57 @@ private:
                         pdl->AddCircle(c, r,
                                        IM_COL32(20, 20, 30, 255),
                                        0, 1.5f);
+                        dots.push_back({int(ei), c, r});
+                    }
+                }
+
+                // Invisible overlay catches clicks + hovers over the
+                // image so the dots can act as buttons. ImGui::Image
+                // doesn't consume input, so we re-anchor the cursor +
+                // drop an InvisibleButton at the same place.
+                if (!dots.empty()) {
+                    ImGui::SetCursorScreenPos(imgMin);
+                    ImGui::InvisibleButton("##animevt_overlay", imgSize,
+                                           ImGuiButtonFlags_MouseButtonLeft);
+                    if (ImGui::IsItemHovered()) {
+                        const ImVec2 mp = ImGui::GetMousePos();
+                        int hovered = -1;
+                        // Generous hit radius (1.6x) so dots are
+                        // forgiving to click without overlapping each
+                        // other in tight stacks.
+                        for (const EvtDot& d : dots) {
+                            const float dx = mp.x - d.centre.x;
+                            const float dy = mp.y - d.centre.y;
+                            const float rr = d.radius * 1.6f;
+                            if (dx * dx + dy * dy <= rr * rr) {
+                                hovered = d.idx;
+                                break;
+                            }
+                        }
+                        if (hovered >= 0) {
+                            const auto& ev =
+                                an->events[size_t(hovered)];
+                            const bool hasArgs =
+                                !ev.stringArg.empty() ||
+                                ev.floatArg != 0.0f ||
+                                ev.intArg   != 0;
+                            if (hasArgs) {
+                                ImGui::SetTooltip(
+                                    "\"%s\" @ %.3fs\n[\"%s\" %.3f %d]",
+                                    ev.name.c_str(), ev.time,
+                                    ev.stringArg.c_str(),
+                                    double(ev.floatArg), ev.intArg);
+                            } else {
+                                ImGui::SetTooltip("\"%s\" @ %.3fs",
+                                                  ev.name.c_str(), ev.time);
+                            }
+                            if (ImGui::IsMouseClicked(
+                                    ImGuiMouseButton_Left)) {
+                                m_animEditorSelEvent  = hovered;
+                                m_animEditorScrubTime = ev.time;
+                                m_animEditorAutoplay  = false;
+                            }
+                        }
                     }
                 }
             }
