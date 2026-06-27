@@ -2011,6 +2011,7 @@ private:
         m_animEditorActivate   = true;
         m_animEditorScrubTime  = 0.0f;
         m_animEditorSelEvent   = -1;
+        m_animEditorEventFilter[0] = '\0';
     }
 
     // Animation Editor window. Top: texture + loop. Middle: frame
@@ -2157,12 +2158,21 @@ private:
         // milestone.
         ImGui::Separator();
         ImGui::Text("Events (%zu)", an->events.size());
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint(
+            "##eventfilter", "Filter events...",
+            m_animEditorEventFilter,
+            sizeof(m_animEditorEventFilter));
         int  removeEvAt = -1;
         if (m_animEditorSelEvent >= int(an->events.size())) {
             m_animEditorSelEvent = -1;
         }
         for (size_t i = 0; i < an->events.size(); ++i) {
             SceneEditor::AnimationEvent& ev = an->events[i];
+            if (!ParamNameMatchesFilter(
+                    ev.name, m_animEditorEventFilter)) {
+                continue;
+            }
             ImGui::PushID(int(60000 + i));
             const bool selRow = (m_animEditorSelEvent == int(i));
             // Jump-to button. Selects the row + parks the scrubber on
@@ -6235,6 +6245,12 @@ private:
     // The scrubber marker and the matching row jump to its time when
     // clicked; -1 = no event selected.
     int                 m_animEditorSelEvent  = -1;
+    // Substring filter for the Events list. Empty buffer shows
+    // every row; otherwise the row loop hides events whose names
+    // don't contain the buffer (case-insensitive). The scrubber +
+    // preview-dot markers stay unfiltered so the user still sees
+    // every event's firing position at a glance.
+    char                m_animEditorEventFilter[64] = "";
     // Parameter filters used by the controller editor + the per-
     // entity Animator inspector. Both treat an empty buffer as
     // "show every parameter" and otherwise match the parameter name
