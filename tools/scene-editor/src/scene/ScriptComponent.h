@@ -26,6 +26,12 @@ class ScriptComponent final : public Component {
 public:
     AssetGuid   script;
     std::string entryFunction;  // e.g. "OnFootstep_Player", empty = default
+    // Runtime-only flag. EditorApp::TickScripts fires OnStart
+    // exactly once per entity per editor session; the bool flips
+    // true the moment the first OnStart dispatches so subsequent
+    // ticks only run OnUpdate. Not serialised -- always boots
+    // false when a scene loads.
+    bool        started = false;
 
     static const char* StaticTypeName() { return "Script"; }
     const char* TypeName() const override { return StaticTypeName(); }

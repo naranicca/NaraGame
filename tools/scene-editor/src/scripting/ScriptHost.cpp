@@ -264,6 +264,59 @@ ScriptHost::ScriptHost() {
     }
 }
 
+// Tries the `<entryFunction>_<suffix>` global first when an entry
+// function is set, then falls back to the bare `On<suffix>`
+// global. Returns the actual name placed on top of the Lua stack
+// (caller is responsible for popping or pcall'ing); returns empty
+// when neither candidate is a function (caller must pop the
+// trailing nil itself).
+static std::string PushLifecycleHook(lua_State* L,
+                                     const std::string& entryFunction,
+                                     const char* suffix) {
+    if (!entryFunction.empty()) {
+        const std::string entryName = entryFunction + "_" + suffix;
+        lua_getglobal(L, entryName.c_str());
+        if (lua_isfunction(L, -1)) return entryName;
+        lua_pop(L, 1);
+    }
+    const std::string fallback = std::string("On") + suffix;
+    lua_getglobal(L, fallback.c_str());
+    if (lua_isfunction(L, -1)) return fallback;
+    return std::string{};
+}
+
+void ScriptHost::CallOnStart(const std::string& entityName,
+                             const std::string& entryFunction) {
+    if (!m_lua) return;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    std::string fn = PushLifecycleHook(L, entryFunction, "Start");
+    if (fn.empty()) { lua_pop(L, 1); return; }
+    lua_pushstring(L, entityName.c_str());
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + fn + ": " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+}
+
+void ScriptHost::CallOnUpdate(const std::string& entityName,
+                              float dt,
+                              const std::string& entryFunction) {
+    if (!m_lua) return;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    std::string fn = PushLifecycleHook(L, entryFunction, "Update");
+    if (fn.empty()) { lua_pop(L, 1); return; }
+    lua_pushstring(L, entityName.c_str());
+    lua_pushnumber(L, dt);
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + fn + ": " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+}
+
 bool ScriptHost::LoadFile(const std::string& absolutePath,
                           const std::string& displayName) {
     if (!m_lua) return false;
@@ -375,6 +428,11 @@ void ScriptHost::OnAnimationEvent(
 
 ScriptHost::ScriptHost()  = default;
 ScriptHost::~ScriptHost() = default;
+
+void ScriptHost::CallOnStart(const std::string&,
+                             const std::string&) { /* stub no-op */ }
+void ScriptHost::CallOnUpdate(const std::string&, float,
+                              const std::string&) { /* stub no-op */ }
 
 bool ScriptHost::LoadFile(const std::string&,
                           const std::string& displayName) {

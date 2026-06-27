@@ -44,6 +44,18 @@ public:
                           const AnimationEvent& event,
                           const std::string& entryFunction = "");
 
+    // Per-entity lifecycle hooks. The host first tries the
+    // entry-function-prefixed name (e.g. entryFunction "Player"
+    // produces "Player_Start" / "Player_Update"); when that
+    // doesn't exist + entryFunction is non-empty, it falls back
+    // to the bare globals `OnStart` / `OnUpdate`. An empty
+    // entryFunction skips straight to the bare globals.
+    void CallOnStart (const std::string& entityName,
+                      const std::string& entryFunction = "");
+    void CallOnUpdate(const std::string& entityName,
+                      float dt,
+                      const std::string& entryFunction = "");
+
     // Executes a Lua source file in the host's interpreter. Logs
     // load + runtime errors as `[lua-error] <file>: <message>`
     // entries in the output buffer. `displayName` only affects

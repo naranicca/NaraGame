@@ -280,6 +280,7 @@ public:
 
         DrawMainMenuBar();
         HandleGlobalShortcuts();
+        TickScripts (ImGui::GetIO().DeltaTime);
         TickAnimators(ImGui::GetIO().DeltaTime);
         DrawHierarchyPanel();
         DrawInspectorPanel();
@@ -437,6 +438,30 @@ private:
     }
 
     // Advance every AnimatorComponent by `dt` seconds (when the global
+    // Walks every entity that carries a ScriptComponent + fires
+    // its lifecycle hooks. OnStart runs exactly once per editor
+    // session (guarded by the runtime `started` flag on
+    // ScriptComponent); OnUpdate runs every frame the global play
+    // toggle is on. Tickless when m_animPlaying is false so a
+    // paused scene doesn't leak Update calls.
+    void TickScripts(float dt) {
+        if (!m_animPlaying) return;
+        std::vector<SceneEditor::EntityId> ids;
+        ids.reserve(64);
+        CollectAllEntities(m_scene.Roots(), ids);
+        for (SceneEditor::EntityId id : ids) {
+            SceneEditor::Entity* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* sc = e->GetComponent<SceneEditor::ScriptComponent>();
+            if (!sc) continue;
+            if (!sc->started) {
+                m_scriptHost.CallOnStart(e->name, sc->entryFunction);
+                sc->started = true;
+            }
+            m_scriptHost.CallOnUpdate(e->name, dt, sc->entryFunction);
+        }
+    }
+
     // play toggle is on) and push the sampled frame's sub-sprite name
     // into the entity's SpriteRenderer. Tickless when m_animPlaying is
     // false so the viewport snaps to whatever frame was last sampled.
