@@ -250,6 +250,7 @@ public:
                 UpdateWindowTitle();
             }
         }
+        NotifyAllScriptsForDestroy();
         if (!m_startupScenePath.empty() && m_scene.Load(m_startupScenePath)) {
             m_currentScenePath = m_startupScenePath;
             UpdateWindowTitle();
@@ -438,6 +439,36 @@ private:
     }
 
     // Advance every AnimatorComponent by `dt` seconds (when the global
+    // Fires OnDestroy on a single entity (when it has a
+    // ScriptComponent that already started) + recurses into its
+    // children before they get destroyed. Mirrors the destroy
+    // order Scene::DestroyEntity itself uses so scripts see
+    // children torn down before their parents.
+    void NotifyScriptDestroyForEntity(SceneEditor::EntityId id) {
+        SceneEditor::Entity* e = m_scene.Get(id);
+        if (!e) return;
+        for (SceneEditor::EntityId childId : e->children) {
+            NotifyScriptDestroyForEntity(childId);
+        }
+        if (auto* sc =
+                e->GetComponent<SceneEditor::ScriptComponent>()) {
+            if (sc->started) {
+                m_scriptHost.CallOnDestroy(e->name, sc->entryFunction);
+                sc->started = false;
+            }
+        }
+    }
+
+    // Fires OnDestroy on every entity currently in the scene that
+    // has a started ScriptComponent. Used right before any path
+    // that wipes the scene wholesale (open, new, close project,
+    // undo / redo's full-scene Deserialize).
+    void NotifyAllScriptsForDestroy() {
+        for (SceneEditor::EntityId rootId : m_scene.Roots()) {
+            NotifyScriptDestroyForEntity(rootId);
+        }
+    }
+
     // Walks every entity that carries a ScriptComponent + fires
     // its lifecycle hooks. OnStart runs exactly once per editor
     // session (guarded by the runtime `started` flag on
@@ -821,6 +852,7 @@ private:
         if (m_redoStack.size() > kUndoStackMax) {
             m_redoStack.erase(m_redoStack.begin());
         }
+        NotifyAllScriptsForDestroy();
         m_scene.DeserializeFromString(m_undoStack.back());
         m_undoStack.pop_back();
         m_scene.MarkDirty();
@@ -833,6 +865,7 @@ private:
         if (m_undoStack.size() > kUndoStackMax) {
             m_undoStack.erase(m_undoStack.begin());
         }
+        NotifyAllScriptsForDestroy();
         m_scene.DeserializeFromString(m_redoStack.back());
         m_redoStack.pop_back();
         m_scene.MarkDirty();
@@ -906,6 +939,7 @@ private:
 
     void DoCloseProject() {
         if (!m_project.IsOpen()) return;
+        NotifyAllScriptsForDestroy();
         m_project.Close();
         m_assetDb.Close();
         m_scene = SceneEditor::Scene();
@@ -923,6 +957,7 @@ private:
     }
 
     void DoNewScene() {
+        NotifyAllScriptsForDestroy();
         m_scene = SceneEditor::Scene();
         m_scene.SetName("Untitled");
         m_currentScenePath.clear();
@@ -937,6 +972,7 @@ private:
             L"NaraGame Scene (*.nscene)", L"*.nscene", L"nscene",
             ScenesDir());
         if (path.empty()) return;
+        NotifyAllScriptsForDestroy();
         if (m_scene.Load(path)) {
             m_currentScenePath = path;
             m_selection = SceneEditor::kInvalidEntityId;
@@ -4446,6 +4482,7 @@ private:
             }
             if (ImGui::MenuItem("Delete")) {
                 UndoSnapshot();
+                NotifyScriptDestroyForEntity(id);
                 m_scene.DestroyEntity(id);
                 if (m_selection == id) m_selection = SceneEditor::kInvalidEntityId;
                 UpdateWindowTitle();
