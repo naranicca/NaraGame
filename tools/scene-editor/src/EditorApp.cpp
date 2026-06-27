@@ -1916,6 +1916,11 @@ private:
                        entCenter.y - (gyc       * cellWorldH) * zoom};
         };
 
+        // Brush ghost grows to the full stamp footprint so the user
+        // sees exactly which world cells will be written. Rect uses the
+        // in-progress drag rectangle; everything else is single-cell.
+        const int stampSw = std::abs(m_stampCurCol - m_stampAnchorCol) + 1;
+        const int stampSh = std::abs(m_stampCurRow - m_stampAnchorRow) + 1;
         ImDrawList* dl = ImGui::GetWindowDrawList();
         if (hovered) {
             if (m_paintTool == PaintTool::Rect && m_rectActive) {
@@ -1926,11 +1931,19 @@ private:
                 ImVec2 a, b, ignored;
                 CellScreenRect(gx0, gy0, a, ignored);
                 CellScreenRect(gx1, gy1, ignored, b);
-                // Flip y to screen-space (a should be top-left).
                 const ImVec2 pMin{std::min(a.x, b.x), std::min(a.y, b.y)};
                 const ImVec2 pMax{std::max(a.x, b.x), std::max(a.y, b.y)};
                 dl->AddRectFilled(pMin, pMax, ghostFill);
                 dl->AddRect(pMin, pMax, ghostLine, 0.0f, 0, 2.0f);
+            } else if (m_paintTool == PaintTool::Brush &&
+                       (stampSw > 1 || stampSh > 1)) {
+                ImVec2 a, ignored1, ignored2, b;
+                CellScreenRect(gx,                 gy,                 a,        ignored1);
+                CellScreenRect(gx + stampSw - 1,   gy + stampSh - 1,   ignored2, b);
+                const ImVec2 pMin{std::min(a.x, b.x), std::min(a.y, b.y)};
+                const ImVec2 pMax{std::max(a.x, b.x), std::max(a.y, b.y)};
+                dl->AddRectFilled(pMin, pMax, ghostFill);
+                dl->AddRect(pMin, pMax, ghostLine, 0.0f, 0, 1.5f);
             } else {
                 ImVec2 a, b;
                 CellScreenRect(gx, gy, a, b);
@@ -1946,21 +1959,22 @@ private:
         const bool released = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
 
         switch (m_paintTool) {
-            case PaintTool::Brush:
-            case PaintTool::Eraser: {
-                // Per-cell drag paint. Per-frame mutation so drag
-                // strokes cover every crossed cell.
+            case PaintTool::Brush: {
+                // Per-frame stamp placement so drag strokes cover every
+                // crossed cell. The whole stamp lands at the cursor's
+                // bottom-left, so a 2x2 stamp at (gx, gy) writes the
+                // 2x2 region (gx..gx+1, gy..gy+1).
                 if (hovered && down) {
-                    if (m_paintTool == PaintTool::Brush) {
-                        auto it = tm->cells.find({gx, gy});
-                        if (it == tm->cells.end() ||
-                            it->second != m_paintTileIndex) {
-                            tm->cells[{gx, gy}] = m_paintTileIndex;
-                            changed = true;
-                        }
-                    } else {
-                        if (tm->cells.erase({gx, gy}) > 0) changed = true;
-                    }
+                    changed = StampBrush(*tm, gx, gy);
+                }
+                break;
+            }
+            case PaintTool::Eraser: {
+                // Eraser stays per-cell on purpose -- a stamp-sized
+                // eraser is rarely what users want when cleaning up
+                // single mis-painted tiles.
+                if (hovered && down) {
+                    if (tm->cells.erase({gx, gy}) > 0) changed = true;
                 }
                 break;
             }
@@ -2029,25 +2043,77 @@ private:
         return changed;
     }
 
-    // Fill (or erase) every cell in the rect from (ax, ay) to (bx, by).
-    // Inclusive on both endpoints; coords don't need to be ordered.
+    // Stamp dimensions + source-tile lookup. Palette Y is top-down
+    // (row 0 = top of source texture); world Y is up so the bottom row
+    // of the stamp is the palette's bottom row.
+    void StampBounds(int& c0, int& r0, int& c1, int& r1) const {
+        c0 = std::min(m_stampAnchorCol, m_stampCurCol);
+        r0 = std::min(m_stampAnchorRow, m_stampCurRow);
+        c1 = std::max(m_stampAnchorCol, m_stampCurCol);
+        r1 = std::max(m_stampAnchorRow, m_stampCurRow);
+    }
+
+    int TexCols(const SceneEditor::TilemapComponent& tm) {
+        if (tm.cellPixelW <= 0) return 0;
+        NaraGame::RHITexture* tex =
+            m_assetDb.GetTexture(GetDevice(), tm.tileset);
+        if (!tex) return 0;
+        return int(tex->Width()) / tm.cellPixelW;
+    }
+
+    // Place the stamp with its bottom-left at (gx, gy). dxWorld grows
+    // right, dyWorld grows up; the palette row that ends up at dyWorld
+    // is (sh - 1 - dyWorld) so the visual top of the palette becomes
+    // the visual top of the painted region.
+    bool StampBrush(SceneEditor::TilemapComponent& tm, int gx, int gy) {
+        const int texCols = TexCols(tm);
+        if (texCols <= 0) return false;
+        int c0, r0, c1, r1;
+        StampBounds(c0, r0, c1, r1);
+        const int sw = c1 - c0 + 1;
+        const int sh = r1 - r0 + 1;
+        bool changed = false;
+        for (int dyWorld = 0; dyWorld < sh; ++dyWorld) {
+            const int srcRow = r0 + (sh - 1 - dyWorld);
+            for (int dx = 0; dx < sw; ++dx) {
+                const int tile = srcRow * texCols + (c0 + dx);
+                const std::pair<int,int> key{gx + dx, gy + dyWorld};
+                auto it = tm.cells.find(key);
+                if (it == tm.cells.end() || it->second != tile) {
+                    tm.cells[key] = tile;
+                    changed = true;
+                }
+            }
+        }
+        return changed;
+    }
+
+    // Fill the inclusive rect (ax, ay)-(bx, by) by tiling the stamp.
+    // Anchor cell (x0, y0) gets the stamp's bottom-left tile so the
+    // pattern reads naturally from the anchor outward.
     bool FillRect(SceneEditor::TilemapComponent& tm,
                   int ax, int ay, int bx, int by) {
+        const int texCols = TexCols(tm);
+        if (texCols <= 0) return false;
         const int x0 = std::min(ax, bx);
         const int x1 = std::max(ax, bx);
         const int y0 = std::min(ay, by);
         const int y1 = std::max(ay, by);
+        int c0, r0, c1, r1;
+        StampBounds(c0, r0, c1, r1);
+        const int sw = c1 - c0 + 1;
+        const int sh = r1 - r0 + 1;
         bool changed = false;
         for (int yy = y0; yy <= y1; ++yy) {
             for (int xx = x0; xx <= x1; ++xx) {
-                if (m_paintTool == PaintTool::Rect &&
-                    m_paintTileIndex >= 0) {
-                    auto it = tm.cells.find({xx, yy});
-                    if (it == tm.cells.end() ||
-                        it->second != m_paintTileIndex) {
-                        tm.cells[{xx, yy}] = m_paintTileIndex;
-                        changed = true;
-                    }
+                const int dx       = ((xx - x0) % sw + sw) % sw;
+                const int dyWorld  = ((yy - y0) % sh + sh) % sh;
+                const int srcRow   = r0 + (sh - 1 - dyWorld);
+                const int tile     = srcRow * texCols + (c0 + dx);
+                auto it = tm.cells.find({xx, yy});
+                if (it == tm.cells.end() || it->second != tile) {
+                    tm.cells[{xx, yy}] = tile;
+                    changed = true;
                 }
             }
         }
@@ -2837,17 +2903,52 @@ private:
                 tex->GetNativeView()));
         ImGui::Image(texId, imgSize);
 
-        // Capture mouse on top of the image.
+        const float cellPxScreenW = float(tm->cellPixelW) * scale;
+        const float cellPxScreenH = float(tm->cellPixelH) * scale;
+
+        // Capture mouse on top of the image. We own the left button so
+        // we can drive a click-to-pick + drag-to-grow stamp selection.
         ImGui::SetCursorScreenPos(imgMin);
         ImGui::InvisibleButton("##palette_hit", imgSize,
                                ImGuiButtonFlags_MouseButtonLeft);
-        const bool clicked = ImGui::IsItemClicked();
+        const bool hovered  = ImGui::IsItemHovered();
+        const bool clicked  = hovered &&
+                              ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        const bool released = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+        const ImVec2 mp = ImGui::GetMousePos();
+        const int mouseCol = std::clamp(
+            int((mp.x - imgMin.x) / std::max(0.0001f, cellPxScreenW)),
+            0, texCols - 1);
+        const int mouseRow = std::clamp(
+            int((mp.y - imgMin.y) / std::max(0.0001f, cellPxScreenH)),
+            0, texRows - 1);
 
-        // Grid overlay + active cell highlight.
+        if (clicked) {
+            m_stampAnchorCol = mouseCol;
+            m_stampAnchorRow = mouseRow;
+            m_stampCurCol    = mouseCol;
+            m_stampCurRow    = mouseRow;
+            m_stampDragging  = true;
+            if (m_paintTool == PaintTool::None) {
+                m_paintTool = PaintTool::Brush;
+            }
+        } else if (m_stampDragging &&
+                   ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            m_stampCurCol = mouseCol;
+            m_stampCurRow = mouseRow;
+        }
+        if (released) m_stampDragging = false;
+        // Keep m_paintTileIndex in sync with the stamp's top-left cell
+        // so Bucket (and external readers) still have a single index.
+        const int stampC0 = std::min(m_stampAnchorCol, m_stampCurCol);
+        const int stampR0 = std::min(m_stampAnchorRow, m_stampCurRow);
+        const int stampC1 = std::max(m_stampAnchorCol, m_stampCurCol);
+        const int stampR1 = std::max(m_stampAnchorRow, m_stampCurRow);
+        m_paintTileIndex = stampR0 * texCols + stampC0;
+
+        // Grid overlay + stamp rect highlight.
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImU32 gridCol = IM_COL32(255, 255, 255, 60);
-        const float cellPxScreenW = float(tm->cellPixelW) * scale;
-        const float cellPxScreenH = float(tm->cellPixelH) * scale;
         for (int r = 0; r <= texRows; ++r) {
             const float y = imgMin.y + r * cellPxScreenH;
             dl->AddLine(ImVec2{imgMin.x,             y},
@@ -2858,33 +2959,13 @@ private:
             dl->AddLine(ImVec2{x, imgMin.y},
                         ImVec2{x, imgMin.y + imgSize.y}, gridCol, 1.0f);
         }
-        if (m_paintTileIndex >= 0 &&
-            m_paintTileIndex < texCols * texRows) {
-            const int col = m_paintTileIndex % texCols;
-            const int row = m_paintTileIndex / texCols;
-            const ImVec2 a{imgMin.x +  col      * cellPxScreenW,
-                           imgMin.y +  row      * cellPxScreenH};
-            const ImVec2 b{imgMin.x + (col + 1) * cellPxScreenW,
-                           imgMin.y + (row + 1) * cellPxScreenH};
-            dl->AddRect(a, b, IM_COL32(255, 220, 60, 255),
-                        0.0f, 0, 2.0f);
-        }
+        const ImVec2 selA{imgMin.x +  stampC0      * cellPxScreenW,
+                          imgMin.y +  stampR0      * cellPxScreenH};
+        const ImVec2 selB{imgMin.x + (stampC1 + 1) * cellPxScreenW,
+                          imgMin.y + (stampR1 + 1) * cellPxScreenH};
+        dl->AddRectFilled(selA, selB, IM_COL32(255, 220, 60, 35));
+        dl->AddRect(selA, selB, IM_COL32(255, 220, 60, 255), 0.0f, 0, 2.0f);
 
-        if (clicked) {
-            const ImVec2 mp = ImGui::GetMousePos();
-            const int px = int((mp.x - imgMin.x) / scale);
-            const int py = int((mp.y - imgMin.y) / scale);
-            const int col = px / tm->cellPixelW;
-            const int row = py / tm->cellPixelH;
-            if (col >= 0 && col < texCols && row >= 0 && row < texRows) {
-                m_paintTileIndex = row * texCols + col;
-                // Auto-switch to Brush so a fresh palette selection
-                // skips the extra "click Brush" step.
-                if (m_paintTool == PaintTool::None) {
-                    m_paintTool = PaintTool::Brush;
-                }
-            }
-        }
         ImGui::End();
     }
 
@@ -3056,12 +3137,20 @@ private:
     // border editing works in every slice mode, not just Manual.
     BorderDragSide      m_borderDrag        = BorderDragSide::None;
     BorderDragSide      m_borderHover       = BorderDragSide::None;
-    // Tilemap paint state. m_paintTileIndex survives selection changes
-    // so the user keeps their brush when switching maps that share a
-    // tileset.
+    // Tilemap paint state. The active stamp is a rectangular region of
+    // palette cells defined by (Anchor, Cur) in palette (column, row)
+    // coordinates. A single click leaves Anchor == Cur so the stamp is
+    // 1x1, matching the M4c2/M4c3 behaviour. Drag in the palette grows
+    // it. m_paintTileIndex stays in sync with the top-left palette cell
+    // so Bucket (which doesn't tile) still has a single tile to use.
     enum class PaintTool { None, Brush, Eraser, Bucket, Rect };
-    PaintTool           m_paintTool         = PaintTool::None;
-    int                 m_paintTileIndex    = 0;
+    PaintTool           m_paintTool          = PaintTool::None;
+    int                 m_paintTileIndex     = 0;
+    int                 m_stampAnchorCol     = 0;
+    int                 m_stampAnchorRow     = 0;
+    int                 m_stampCurCol        = 0;
+    int                 m_stampCurRow        = 0;
+    bool                m_stampDragging      = false;
     // Rectangle drag in progress. The anchor is captured on mouse-down;
     // m_rectCur tracks the cursor each frame so the ghost outline
     // grows / shrinks with the drag.
