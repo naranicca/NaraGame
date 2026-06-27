@@ -34,6 +34,9 @@ if(MSVC)
     target_compile_options(imgui PRIVATE /W3)
 endif()
 
-add_executable(scene-editor src/EditorApp.cpp)
+add_executable(scene-editor
+    src/EditorApp.cpp
+    src/project/Project.cpp)
+target_include_directories(scene-editor PRIVATE src)
 target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui)
 set_target_properties(scene-editor PROPERTIES FOLDER "tools")

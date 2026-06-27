@@ -1,9 +1,10 @@
-#include "MiniJson.h"
+#include "NaraGame/assets/MiniJson.h"
 
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
 #include <stdexcept>
 
 namespace NaraGame {
@@ -221,6 +222,113 @@ Value Parse(const std::string& source, std::string* outError) {
         if (outError) *outError = p.Error();
         return Value{};
     }
+}
+
+namespace {
+
+// Append a JSON string literal (including the surrounding quotes and
+// the standard escape sequences). UTF-8 bytes pass through verbatim --
+// modern parsers accept that, and our content is editor-authored
+// (Korean comments) so we'd rather stay readable than \uXXXX-encode.
+void WriteString(const std::string& s, std::string& out) {
+    out.push_back('"');
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+        }
+    }
+    out.push_back('"');
+}
+
+void WriteNumber(double n, std::string& out) {
+    // Shortest round-trippable form: integer values stay integers, the
+    // rest go through %.17g which is the IEEE 754 double precision
+    // upper bound. Trim trailing zeros so the file stays readable.
+    if (n == static_cast<double>(static_cast<long long>(n))) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%lld",
+                      static_cast<long long>(n));
+        out += buf;
+        return;
+    }
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%.17g", n);
+    out += buf;
+}
+
+void WriteIndent(std::string& out, int depth) {
+    for (int i = 0; i < depth; ++i) out += "  ";
+}
+
+void WriteValue(const Value& v, std::string& out, int depth, bool pretty) {
+    switch (v.type) {
+        case Value::Type::Null:
+            out += "null";
+            return;
+        case Value::Type::Bool:
+            out += v.boolValue ? "true" : "false";
+            return;
+        case Value::Type::Number:
+            WriteNumber(v.numberValue, out);
+            return;
+        case Value::Type::String:
+            WriteString(v.stringValue, out);
+            return;
+        case Value::Type::ArrayT: {
+            if (v.arrayValue.empty()) { out += "[]"; return; }
+            out += '[';
+            if (pretty) out += '\n';
+            for (size_t i = 0; i < v.arrayValue.size(); ++i) {
+                if (pretty) WriteIndent(out, depth + 1);
+                WriteValue(v.arrayValue[i], out, depth + 1, pretty);
+                if (i + 1 < v.arrayValue.size()) out += ',';
+                if (pretty) out += '\n';
+            }
+            if (pretty) WriteIndent(out, depth);
+            out += ']';
+            return;
+        }
+        case Value::Type::ObjectT: {
+            if (v.objectKeys.empty()) { out += "{}"; return; }
+            out += '{';
+            if (pretty) out += '\n';
+            for (size_t i = 0; i < v.objectKeys.size(); ++i) {
+                if (pretty) WriteIndent(out, depth + 1);
+                WriteString(v.objectKeys[i], out);
+                out += pretty ? ": " : ":";
+                WriteValue(v.objectValues[i], out, depth + 1, pretty);
+                if (i + 1 < v.objectKeys.size()) out += ',';
+                if (pretty) out += '\n';
+            }
+            if (pretty) WriteIndent(out, depth);
+            out += '}';
+            return;
+        }
+    }
+}
+
+} // namespace
+
+std::string Write(const Value& root, bool pretty) {
+    std::string out;
+    out.reserve(256);
+    WriteValue(root, out, 0, pretty);
+    if (pretty) out += '\n';
+    return out;
 }
 
 } // namespace MiniJson

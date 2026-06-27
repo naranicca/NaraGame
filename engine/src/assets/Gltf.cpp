@@ -6,7 +6,7 @@
 #include "NaraGame/renderer/rhi/RHIDevice.h"
 #include "NaraGame/renderer/rhi/RHIResources.h"
 
-#include "MiniJson.h"
+#include "NaraGame/assets/MiniJson.h"
 
 #include <cmath>
 #include <cstdint>

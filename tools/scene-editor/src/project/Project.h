@@ -1,0 +1,62 @@
+#pragma once
+
+#include <string>
+#include <vector>
+
+namespace SceneEditor {
+
+// In-memory project state. Maps to a `ProjectSettings/project.json`
+// alongside the standard Assets/ Library/ folder tree the editor expects.
+// One Project is open at a time; the editor swaps the active Project
+// when the user picks File > New / Open / Close.
+class Project {
+public:
+    Project() = default;
+
+    // Create a fresh project at `rootDir`. The directory must either not
+    // exist yet, or exist and be empty -- we refuse to write into an
+    // arbitrary folder so a typo doesn't carpet-bomb the user's home.
+    // On success the project folder tree is created and project.json is
+    // written; the Project instance is left in the open state.
+    bool Create(const std::string& rootDir, const std::string& name);
+
+    // Open the project rooted at `rootDir` -- the directory that
+    // contains ProjectSettings/project.json. Reads the JSON; populates
+    // name + version. Missing folders (Assets/, Library/, ...) get
+    // created on the fly so opening a half-broken project still leaves
+    // a complete tree on disk.
+    bool Open(const std::string& rootDir);
+
+    // Write the in-memory state back to project.json.
+    bool Save() const;
+
+    // Drop the project; the editor returns to the "no project open" state.
+    void Close();
+
+    bool IsOpen() const { return !m_rootDir.empty(); }
+
+    const std::string& RootDir() const { return m_rootDir; }
+    const std::string& Name()    const { return m_name; }
+    const std::string& Version() const { return m_version; }
+
+    // Conventional paths inside the project. All come back with forward
+    // slashes regardless of platform.
+    std::string AssetsDir()       const;
+    std::string LibraryDir()      const;
+    std::string SettingsDir()     const;
+    std::string ProjectJsonPath() const;
+
+    // Asset subfolders (one per asset kind the editor knows about).
+    static std::vector<std::string> AssetSubfolders();
+
+private:
+    bool EnsureFolderTree() const;
+    bool WriteProjectJson() const;
+    bool ReadProjectJson();
+
+    std::string m_rootDir;
+    std::string m_name;
+    std::string m_version = "0.1.0";
+};
+
+} // namespace SceneEditor
