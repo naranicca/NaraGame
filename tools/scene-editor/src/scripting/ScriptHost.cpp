@@ -3,6 +3,7 @@
 #include "../scene/AnimatorComponent.h"
 #include "../scene/Entity.h"
 #include "../scene/Scene.h"
+#include "../scene/SpriteRendererComponent.h"
 #include "../scene/TransformComponent.h"
 
 #include <cstdio>
@@ -65,6 +66,132 @@ static TransformComponent* FindTransform(ScriptHost* host,
     Entity* e = host->BoundScene()->FindByName(entityName);
     if (!e) return nullptr;
     return e->GetComponent<TransformComponent>();
+}
+
+// Same pattern again for SpriteRendererComponent. Entities without
+// a renderer are common (light-only / logic-only entities) so the
+// nullptr return is the expected "silent no-op" path.
+static SpriteRendererComponent* FindSpriteRenderer(
+        ScriptHost* host, const char* entityName) {
+    if (!host || !host->BoundScene() || !entityName) return nullptr;
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) return nullptr;
+    return e->GetComponent<SpriteRendererComponent>();
+}
+
+// sprite.set_color / get_color / set_alpha / get_alpha /
+// set_sub_sprite / get_sub_sprite / set_flip_x / get_flip_x /
+// set_flip_y / get_flip_y / set_size / get_size / set_order /
+// get_order. Sprite GUID swaps + drawMode + sortingLayer stay
+// editor-side for now -- the inspector handles those cleanly and
+// runtime scripts rarely need to touch them.
+static int LuaSpriteSetColor(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    if (!s) return 0;
+    s->color = NaraGame::Color{
+        float(luaL_checknumber(L, 2)),
+        float(luaL_checknumber(L, 3)),
+        float(luaL_checknumber(L, 4)),
+        float(luaL_checknumber(L, 5))};
+    return 0;
+}
+static int LuaSpriteGetColor(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    if (!s) {
+        lua_pushnumber(L, 1); lua_pushnumber(L, 1);
+        lua_pushnumber(L, 1); lua_pushnumber(L, 1);
+        return 4;
+    }
+    lua_pushnumber(L, s->color.r);
+    lua_pushnumber(L, s->color.g);
+    lua_pushnumber(L, s->color.b);
+    lua_pushnumber(L, s->color.a);
+    return 4;
+}
+// Convenience getters / setters for the alpha channel -- the
+// "fade in / fade out" pattern doesn't need to round-trip rgb.
+static int LuaSpriteSetAlpha(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    if (!s) return 0;
+    s->color.a = float(luaL_checknumber(L, 2));
+    return 0;
+}
+static int LuaSpriteGetAlpha(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    lua_pushnumber(L, s ? s->color.a : 1.0f);
+    return 1;
+}
+static int LuaSpriteSetSubSprite(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    if (!s) return 0;
+    s->subSprite = luaL_checkstring(L, 2);
+    return 0;
+}
+static int LuaSpriteGetSubSprite(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    lua_pushstring(L, s ? s->subSprite.c_str() : "");
+    return 1;
+}
+static int LuaSpriteSetFlipX(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    if (!s) return 0;
+    s->flipX = lua_toboolean(L, 2) != 0;
+    return 0;
+}
+static int LuaSpriteGetFlipX(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    lua_pushboolean(L, s && s->flipX);
+    return 1;
+}
+static int LuaSpriteSetFlipY(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    if (!s) return 0;
+    s->flipY = lua_toboolean(L, 2) != 0;
+    return 0;
+}
+static int LuaSpriteGetFlipY(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    lua_pushboolean(L, s && s->flipY);
+    return 1;
+}
+static int LuaSpriteSetSize(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    if (!s) return 0;
+    s->size.x = float(luaL_checknumber(L, 2));
+    s->size.y = float(luaL_checknumber(L, 3));
+    return 0;
+}
+static int LuaSpriteGetSize(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    if (!s) { lua_pushnumber(L, 1); lua_pushnumber(L, 1); return 2; }
+    lua_pushnumber(L, s->size.x);
+    lua_pushnumber(L, s->size.y);
+    return 2;
+}
+static int LuaSpriteSetOrder(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    if (!s) return 0;
+    s->orderInLayer = int(luaL_checkinteger(L, 2));
+    return 0;
+}
+static int LuaSpriteGetOrder(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L),
+                                  luaL_checkstring(L, 1));
+    lua_pushinteger(L, s ? s->orderInLayer : 0);
+    return 1;
 }
 
 // transform.set_position / get_position / set_rotation /
@@ -350,6 +477,27 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kTransformApi, 1);
     lua_setglobal(L, "transform");
+    static const luaL_Reg kSpriteApi[] = {
+        {"set_color",      LuaSpriteSetColor},
+        {"get_color",      LuaSpriteGetColor},
+        {"set_alpha",      LuaSpriteSetAlpha},
+        {"get_alpha",      LuaSpriteGetAlpha},
+        {"set_sub_sprite", LuaSpriteSetSubSprite},
+        {"get_sub_sprite", LuaSpriteGetSubSprite},
+        {"set_flip_x",     LuaSpriteSetFlipX},
+        {"get_flip_x",     LuaSpriteGetFlipX},
+        {"set_flip_y",     LuaSpriteSetFlipY},
+        {"get_flip_y",     LuaSpriteGetFlipY},
+        {"set_size",       LuaSpriteSetSize},
+        {"get_size",       LuaSpriteGetSize},
+        {"set_order",      LuaSpriteSetOrder},
+        {"get_order",      LuaSpriteGetOrder},
+        {nullptr,          nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kSpriteApi, 1);
+    lua_setglobal(L, "sprite");
     if (luaL_dostring(L, kDefaultBootstrap) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
         AppendLine(std::string("[lua-error] bootstrap: ") +
