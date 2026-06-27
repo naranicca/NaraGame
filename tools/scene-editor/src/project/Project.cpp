@@ -42,7 +42,8 @@ bool WriteFileText(const std::string& path, const std::string& content) {
 } // namespace
 
 std::vector<std::string> Project::AssetSubfolders() {
-    return { "Sprites", "Tilesets", "Scripts", "Scenes", "Prefabs", "Materials" };
+    return { "Sprites", "Tilesets", "Scripts", "Scenes", "Prefabs",
+             "Materials", "Animations" };
 }
 
 std::vector<std::string> Project::DefaultSortingLayers() {
