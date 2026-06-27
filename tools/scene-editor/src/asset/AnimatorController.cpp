@@ -86,10 +86,12 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
                 // Backward-compat: legacy "expected" bool maps to
                 // valueBool, op stays Equals so M5c4 controllers keep
                 // their behaviour.
-                tr.valueBool  = t.GetBool ("valueBool",
-                                           t.GetBool("expected", true));
-                tr.valueFloat = float(t.GetNumber("valueFloat", 0.0));
-                tr.valueInt   = t.GetInt ("valueInt", 0);
+                tr.valueBool   = t.GetBool ("valueBool",
+                                            t.GetBool("expected", true));
+                tr.valueFloat  = float(t.GetNumber("valueFloat", 0.0));
+                tr.valueInt    = t.GetInt ("valueInt", 0);
+                tr.hasExitTime = t.GetBool ("hasExitTime", false);
+                tr.exitTime    = float(t.GetNumber("exitTime", 0.0));
                 transitions.push_back(std::move(tr));
             }
         }
@@ -141,10 +143,12 @@ Value AnimatorControllerAsset::ToJson() const {
             case AnimatorTransition::Op::GreaterEqual: opname = "GreaterEqual"; break;
             default: break;
         }
-        o.Add("op",         Value::MakeString(opname));
-        o.Add("valueBool",  Value::MakeBool(t.valueBool));
-        o.Add("valueFloat", Value::MakeNumber(t.valueFloat));
-        o.Add("valueInt",   Value::MakeNumber(t.valueInt));
+        o.Add("op",          Value::MakeString(opname));
+        o.Add("valueBool",   Value::MakeBool(t.valueBool));
+        o.Add("valueFloat",  Value::MakeNumber(t.valueFloat));
+        o.Add("valueInt",    Value::MakeNumber(t.valueInt));
+        o.Add("hasExitTime", Value::MakeBool(t.hasExitTime));
+        o.Add("exitTime",    Value::MakeNumber(t.exitTime));
         tarr.Push(std::move(o));
     }
     root.Add("transitions", std::move(tarr));

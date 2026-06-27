@@ -52,6 +52,14 @@ struct AnimatorTransition {
     bool        valueBool  = true;
     float       valueFloat = 0.0f;
     int         valueInt   = 0;
+    // When `hasExitTime` is true, the transition only fires after the
+    // source animation has played past `exitTime` of its total
+    // duration (0..1 normalised). Pairs naturally with an empty
+    // `param` field for "auto-progress to the next state" patterns,
+    // and with a real condition for "wait at least this long before
+    // re-evaluating" patterns.
+    bool        hasExitTime = false;
+    float       exitTime    = 0.0f;
 };
 
 // .ncontroller asset: a small animation state machine. The runtime

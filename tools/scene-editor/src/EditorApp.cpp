@@ -416,12 +416,33 @@ private:
         // the parameter's type.
         for (const SceneEditor::AnimatorTransition& tr : ctrl->transitions) {
             if (tr.fromIdx >= 0 && tr.fromIdx != an.currentState) continue;
+            if (tr.toIdx < 0 || tr.toIdx >= int(ctrl->states.size())) continue;
+            // Exit-time gate: when the transition is timed, hold off
+            // firing until the active animation has played past the
+            // normalised threshold. Without an animation duration we
+            // can't evaluate the gate, so timed transitions silently
+            // wait.
+            if (tr.hasExitTime) {
+                if (!anim || anim->frames.empty()) continue;
+                const float total = anim->TotalDuration();
+                if (total <= 0.0f) continue;
+                if (an.currentTime < tr.exitTime * total) continue;
+            }
+            // Empty param + hasExitTime is the pure auto-progress
+            // pattern -- fires when the gate passes regardless of
+            // parameters. Empty param + no exit time is a misconfig;
+            // skip it the same way the M5c4 path did.
+            if (tr.param.empty()) {
+                if (!tr.hasExitTime) continue;
+                an.currentState = tr.toIdx;
+                an.currentTime  = 0.0f;
+                break;
+            }
             const SceneEditor::AnimatorParameter* decl = nullptr;
             for (const auto& p : ctrl->parameters) {
                 if (p.name == tr.param) { decl = &p; break; }
             }
             if (!decl) continue;
-            if (tr.toIdx < 0 || tr.toIdx >= int(ctrl->states.size())) continue;
             using PT = SceneEditor::AnimatorParameter::Type;
             using OP = SceneEditor::AnimatorTransition::Op;
             auto cmp = [&](auto v, auto target) {
@@ -1189,6 +1210,18 @@ private:
                 }
             }
             ImGui::SameLine();
+            bool exitDraft = tr.hasExitTime;
+            if (ImGui::Checkbox("exit", &exitDraft)) {
+                tr.hasExitTime = exitDraft;
+                dirty = true;
+            }
+            if (tr.hasExitTime) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(120.0f);
+                if (ImGui::SliderFloat("##gexitt", &tr.exitTime,
+                                        0.0f, 1.0f, "%.2f")) dirty = true;
+            }
+            ImGui::SameLine();
             if (ImGui::SmallButton("Delete")) {
                 ctrl.transitions.erase(ctrl.transitions.begin() +
                                        m_graphSelectedTransition);
@@ -1535,6 +1568,21 @@ private:
                     tr.valueBool = draft;
                     dirty = true;
                 }
+            }
+            ImGui::SameLine();
+            // Exit-time gate: when checked, the slider sets the
+            // normalised threshold (0..1) the source animation has to
+            // play past before the transition is allowed to fire.
+            bool exitDraft = tr.hasExitTime;
+            if (ImGui::Checkbox("exit", &exitDraft)) {
+                tr.hasExitTime = exitDraft;
+                dirty = true;
+            }
+            if (tr.hasExitTime) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(120.0f);
+                if (ImGui::SliderFloat("##exitt", &tr.exitTime,
+                                        0.0f, 1.0f, "%.2f")) dirty = true;
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("Up") && i > 0) moveTrUp = i;
