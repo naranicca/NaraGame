@@ -1894,45 +1894,164 @@ private:
         const int    gx   = int(std::floor(rx / cellWorldW));
         const int    gy   = int(std::floor(ry / cellWorldH));
 
-        // Ghost overlay: shows the cell that would be painted/erased.
+        // Ghost overlay. Each tool gets its own colour so the user can
+        // tell at a glance which tool is armed. The Rect tool draws an
+        // outline across every cell inside the in-progress drag region
+        // (instead of just the hovered cell) so the destination shape
+        // is visible before release.
+        const bool isErase  = (m_paintTool == PaintTool::Eraser);
+        const ImU32 ghostFill = isErase
+            ? IM_COL32(240, 120, 120,  50)
+            : IM_COL32(120, 240, 120,  50);
+        const ImU32 ghostLine = isErase
+            ? IM_COL32(240, 120, 120, 255)
+            : IM_COL32(120, 240, 120, 255);
+
+        const ImVec2 entCenter = WorldToScreen(ep, panelMin, panelSize);
+        const float  zoom      = m_viewCam.zoom;
+        auto CellScreenRect = [&](int gxc, int gyc, ImVec2& a, ImVec2& b) {
+            a = ImVec2{entCenter.x + (gxc       * cellWorldW) * zoom,
+                       entCenter.y - ((gyc + 1) * cellWorldH) * zoom};
+            b = ImVec2{entCenter.x + ((gxc + 1) * cellWorldW) * zoom,
+                       entCenter.y - (gyc       * cellWorldH) * zoom};
+        };
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
         if (hovered) {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            const ImVec2 c = WorldToScreen(ep, panelMin, panelSize);
-            const float  z = m_viewCam.zoom;
-            const ImVec2 a{c.x + (gx * cellWorldW)     * z,
-                           c.y - ((gy + 1) * cellWorldH) * z};
-            const ImVec2 b{c.x + ((gx + 1) * cellWorldW) * z,
-                           c.y - (gy       * cellWorldH) * z};
-            const ImU32 ghostFill = (m_paintTool == PaintTool::Brush)
-                ? IM_COL32(120, 240, 120,  50)
-                : IM_COL32(240, 120, 120,  50);
-            const ImU32 ghostLine = (m_paintTool == PaintTool::Brush)
-                ? IM_COL32(120, 240, 120, 255)
-                : IM_COL32(240, 120, 120, 255);
-            dl->AddRectFilled(a, b, ghostFill);
-            dl->AddRect(a, b, ghostLine, 0.0f, 0, 1.5f);
+            if (m_paintTool == PaintTool::Rect && m_rectActive) {
+                const int gx0 = std::min(m_rectAnchorGx, m_rectCurGx);
+                const int gx1 = std::max(m_rectAnchorGx, m_rectCurGx);
+                const int gy0 = std::min(m_rectAnchorGy, m_rectCurGy);
+                const int gy1 = std::max(m_rectAnchorGy, m_rectCurGy);
+                ImVec2 a, b, ignored;
+                CellScreenRect(gx0, gy0, a, ignored);
+                CellScreenRect(gx1, gy1, ignored, b);
+                // Flip y to screen-space (a should be top-left).
+                const ImVec2 pMin{std::min(a.x, b.x), std::min(a.y, b.y)};
+                const ImVec2 pMax{std::max(a.x, b.x), std::max(a.y, b.y)};
+                dl->AddRectFilled(pMin, pMax, ghostFill);
+                dl->AddRect(pMin, pMax, ghostLine, 0.0f, 0, 2.0f);
+            } else {
+                ImVec2 a, b;
+                CellScreenRect(gx, gy, a, b);
+                dl->AddRectFilled(a, b, ghostFill);
+                dl->AddRect(a, b, ghostLine, 0.0f, 0, 1.5f);
+            }
         }
 
         bool changed = false;
-        if (hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            if (m_paintTool == PaintTool::Brush) {
-                auto it = tm->cells.find({gx, gy});
-                if (it == tm->cells.end() ||
-                    it->second != m_paintTileIndex) {
-                    tm->cells[{gx, gy}] = m_paintTileIndex;
-                    changed = true;
+        const bool clicked = hovered &&
+                             ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        const bool down    = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        const bool released = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+
+        switch (m_paintTool) {
+            case PaintTool::Brush:
+            case PaintTool::Eraser: {
+                // Per-cell drag paint. Per-frame mutation so drag
+                // strokes cover every crossed cell.
+                if (hovered && down) {
+                    if (m_paintTool == PaintTool::Brush) {
+                        auto it = tm->cells.find({gx, gy});
+                        if (it == tm->cells.end() ||
+                            it->second != m_paintTileIndex) {
+                            tm->cells[{gx, gy}] = m_paintTileIndex;
+                            changed = true;
+                        }
+                    } else {
+                        if (tm->cells.erase({gx, gy}) > 0) changed = true;
+                    }
                 }
-            } else {  // Eraser
-                if (tm->cells.erase({gx, gy}) > 0) {
-                    changed = true;
+                break;
+            }
+            case PaintTool::Bucket: {
+                if (clicked) {
+                    changed = BucketFill(*tm, gx, gy);
+                }
+                break;
+            }
+            case PaintTool::Rect: {
+                if (clicked) {
+                    m_rectActive   = true;
+                    m_rectAnchorGx = gx;
+                    m_rectAnchorGy = gy;
+                    m_rectCurGx    = gx;
+                    m_rectCurGy    = gy;
+                } else if (down && m_rectActive) {
+                    m_rectCurGx = gx;
+                    m_rectCurGy = gy;
+                }
+                if (released && m_rectActive) {
+                    changed = FillRect(*tm,
+                                       m_rectAnchorGx, m_rectAnchorGy,
+                                       m_rectCurGx,    m_rectCurGy);
+                    m_rectActive = false;
+                }
+                break;
+            }
+            default: break;
+        }
+        // A drag cancelled by the cursor leaving the viewport should
+        // still drop the rect state on release.
+        if (released && m_rectActive) {
+            m_rectActive = false;
+        }
+
+        if (changed) m_scene.MarkDirty();
+        if (released) UpdateWindowTitle();
+        return true;
+    }
+
+    // Flood-fill bounded by "cells with the same tile as (gx, gy)".
+    // Returns true if at least one cell was rewritten. Empty source
+    // cells short-circuit so a stray click on background doesn't try
+    // to fill the unbounded plane.
+    bool BucketFill(SceneEditor::TilemapComponent& tm, int gx, int gy) {
+        auto src = tm.cells.find({gx, gy});
+        if (src == tm.cells.end()) return false;
+        const int srcTile = src->second;
+        if (srcTile == m_paintTileIndex) return false;
+        std::vector<std::pair<int, int>> stack;
+        stack.push_back({gx, gy});
+        bool changed = false;
+        while (!stack.empty()) {
+            const auto pos = stack.back();
+            stack.pop_back();
+            auto it = tm.cells.find(pos);
+            if (it == tm.cells.end() || it->second != srcTile) continue;
+            it->second = m_paintTileIndex;
+            changed = true;
+            stack.push_back({pos.first - 1, pos.second});
+            stack.push_back({pos.first + 1, pos.second});
+            stack.push_back({pos.first,     pos.second - 1});
+            stack.push_back({pos.first,     pos.second + 1});
+        }
+        return changed;
+    }
+
+    // Fill (or erase) every cell in the rect from (ax, ay) to (bx, by).
+    // Inclusive on both endpoints; coords don't need to be ordered.
+    bool FillRect(SceneEditor::TilemapComponent& tm,
+                  int ax, int ay, int bx, int by) {
+        const int x0 = std::min(ax, bx);
+        const int x1 = std::max(ax, bx);
+        const int y0 = std::min(ay, by);
+        const int y1 = std::max(ay, by);
+        bool changed = false;
+        for (int yy = y0; yy <= y1; ++yy) {
+            for (int xx = x0; xx <= x1; ++xx) {
+                if (m_paintTool == PaintTool::Rect &&
+                    m_paintTileIndex >= 0) {
+                    auto it = tm.cells.find({xx, yy});
+                    if (it == tm.cells.end() ||
+                        it->second != m_paintTileIndex) {
+                        tm.cells[{xx, yy}] = m_paintTileIndex;
+                        changed = true;
+                    }
                 }
             }
         }
-        if (changed) m_scene.MarkDirty();
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            UpdateWindowTitle();
-        }
-        return true;
+        return changed;
     }
 
     void HandleViewportInput(bool hovered, bool active,
@@ -2697,6 +2816,10 @@ private:
         ImGui::SameLine();
         toolBtn("Eraser", PaintTool::Eraser);
         ImGui::SameLine();
+        toolBtn("Bucket", PaintTool::Bucket);
+        ImGui::SameLine();
+        toolBtn("Rect",   PaintTool::Rect);
+        ImGui::SameLine();
         ImGui::TextDisabled("active tile: %d", m_paintTileIndex);
         ImGui::Separator();
 
@@ -2936,9 +3059,17 @@ private:
     // Tilemap paint state. m_paintTileIndex survives selection changes
     // so the user keeps their brush when switching maps that share a
     // tileset.
-    enum class PaintTool { None, Brush, Eraser };
+    enum class PaintTool { None, Brush, Eraser, Bucket, Rect };
     PaintTool           m_paintTool         = PaintTool::None;
     int                 m_paintTileIndex    = 0;
+    // Rectangle drag in progress. The anchor is captured on mouse-down;
+    // m_rectCur tracks the cursor each frame so the ghost outline
+    // grows / shrinks with the drag.
+    bool                m_rectActive        = false;
+    int                 m_rectAnchorGx      = 0;
+    int                 m_rectAnchorGy      = 0;
+    int                 m_rectCurGx         = 0;
+    int                 m_rectCurGy         = 0;
     // New Project modal state.
     bool                m_openNewProjectModal = false;
     std::array<char, 256> m_newProjectName{};
