@@ -20,6 +20,7 @@ namespace SceneEditor {
 class Project;
 class TilesetAsset;
 class AutotileAsset;
+class AnimationAsset;
 
 // One catalogued asset. The same row drives the Project panel display,
 // inspector lookups, and the GUID -> data resolution that scene /
@@ -96,6 +97,11 @@ public:
     bool           SaveAutotile(const AssetGuid& guid);
     void           EvictAutotile(const AssetGuid& guid);
 
+    // Animation cache.
+    AnimationAsset* GetAnimation(const AssetGuid& guid);
+    bool            SaveAnimation(const AssetGuid& guid);
+    void            EvictAnimation(const AssetGuid& guid);
+
 private:
     void ScanDir(const std::string& dirAbs,
                  const std::string& relPrefix,
@@ -127,6 +133,8 @@ private:
                        std::unique_ptr<TilesetAsset>>          m_tilesetCache;
     std::unordered_map<AssetGuid,
                        std::unique_ptr<AutotileAsset>>         m_autotileCache;
+    std::unordered_map<AssetGuid,
+                       std::unique_ptr<AnimationAsset>>        m_animationCache;
 };
 
 } // namespace SceneEditor

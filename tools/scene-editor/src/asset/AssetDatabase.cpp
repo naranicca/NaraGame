@@ -1,6 +1,7 @@
 #include "AssetDatabase.h"
 
 #include "../project/Project.h"
+#include "Animation.h"
 #include "Autotile.h"
 #include "TextureImportSettings.h"
 #include "Tileset.h"
@@ -79,6 +80,7 @@ void AssetDatabase::Close() {
     m_textureCache.clear();
     m_tilesetCache.clear();
     m_autotileCache.clear();
+    m_animationCache.clear();
 }
 
 NaraGame::RHITexture* AssetDatabase::GetTexture(NaraGame::RHIDevice& device,
@@ -335,6 +337,37 @@ void AssetDatabase::EvictAutotile(const AssetGuid& guid) {
     m_autotileCache.erase(guid);
 }
 
+AnimationAsset* AssetDatabase::GetAnimation(const AssetGuid& guid) {
+    if (!guid.IsValid()) return nullptr;
+    if (auto it = m_animationCache.find(guid); it != m_animationCache.end()) {
+        return it->second.get();
+    }
+    const AssetEntry* entry = FindByGuid(guid);
+    if (!entry || entry->typeName != "Animation") return nullptr;
+    const std::string abs = m_assetsRoot + "/" + entry->relPath;
+    auto an = std::make_unique<AnimationAsset>();
+    if (!an->LoadFromFile(abs)) {
+        m_animationCache.emplace(guid, nullptr);
+        return nullptr;
+    }
+    AnimationAsset* raw = an.get();
+    m_animationCache.emplace(guid, std::move(an));
+    return raw;
+}
+
+bool AssetDatabase::SaveAnimation(const AssetGuid& guid) {
+    AnimationAsset* an = GetAnimation(guid);
+    if (!an) return false;
+    const AssetEntry* entry = FindByGuid(guid);
+    if (!entry) return false;
+    const std::string abs = m_assetsRoot + "/" + entry->relPath;
+    return an->SaveToFile(abs);
+}
+
+void AssetDatabase::EvictAnimation(const AssetGuid& guid) {
+    m_animationCache.erase(guid);
+}
+
 std::string AssetDatabase::ClassifyByExtension(const std::string& relPath) {
     const std::string ext = LowerExt(relPath);
     if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" ||
@@ -346,6 +379,7 @@ std::string AssetDatabase::ClassifyByExtension(const std::string& relPath) {
     if (ext == ".nprefab") return "Prefab";
     if (ext == ".ntileset") return "Tileset";
     if (ext == ".autotile") return "Autotile";
+    if (ext == ".nanim")    return "Animation";
     if (ext == ".sprite")  return "SpriteSheet";
     if (ext == ".hdr")     return "HdrEnvironment";
     if (ext == ".dds")     return "Texture";

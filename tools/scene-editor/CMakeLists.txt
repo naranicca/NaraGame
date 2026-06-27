@@ -36,6 +36,7 @@ endif()
 
 add_executable(scene-editor
     src/EditorApp.cpp
+    src/asset/Animation.cpp
     src/asset/AssetDatabase.cpp
     src/asset/AssetGuid.cpp
     src/asset/Autotile.cpp
@@ -43,6 +44,7 @@ add_executable(scene-editor
     src/asset/TextureImportSettings.cpp
     src/asset/Tileset.cpp
     src/project/Project.cpp
+    src/scene/AnimatorComponent.cpp
     src/scene/Component.cpp
     src/scene/Scene.cpp
     src/scene/SpriteRendererComponent.cpp

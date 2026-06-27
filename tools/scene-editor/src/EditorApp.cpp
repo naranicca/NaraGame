@@ -6,11 +6,13 @@
 // panels on top of the project shell.
 
 #include "asset/AssetDatabase.h"
+#include "asset/Animation.h"
 #include "asset/Autotile.h"
 #include "asset/SpriteSheet.h"
 #include "asset/TextureImportSettings.h"
 #include "asset/Tileset.h"
 #include "project/Project.h"
+#include "scene/AnimatorComponent.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
 #include "scene/Scene.h"
@@ -265,6 +267,7 @@ public:
 
         DrawMainMenuBar();
         HandleGlobalShortcuts();
+        TickAnimators(ImGui::GetIO().DeltaTime);
         DrawHierarchyPanel();
         DrawInspectorPanel();
         DrawViewportPanel();
@@ -302,6 +305,36 @@ private:
             if (m_scene.IsDirty()) title += "*";
         }
         SetWindowTitle(m_hwnd, title);
+    }
+
+    // Advance every AnimatorComponent by `dt` seconds (when the global
+    // play toggle is on) and push the sampled frame's sub-sprite name
+    // into the entity's SpriteRenderer. Tickless when m_animPlaying is
+    // false so the viewport snaps to whatever frame was last sampled.
+    void TickAnimators(float dt) {
+        if (!m_animPlaying) return;
+        std::vector<SceneEditor::EntityId> ids;
+        ids.reserve(64);
+        CollectAllEntities(m_scene.Roots(), ids);
+        for (SceneEditor::EntityId id : ids) {
+            SceneEditor::Entity* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* an = e->GetComponent<SceneEditor::AnimatorComponent>();
+            if (!an || !an->isPlaying) continue;
+            SceneEditor::AnimationAsset* anim =
+                m_assetDb.GetAnimation(an->animation);
+            if (!anim || anim->frames.empty()) continue;
+            an->currentTime += dt;
+            const SceneEditor::AnimationFrame* fr =
+                anim->Sample(an->currentTime);
+            if (!fr) continue;
+            if (auto* spr =
+                    e->GetComponent<SceneEditor::SpriteRendererComponent>()) {
+                if (spr->subSprite != fr->sprite) {
+                    spr->subSprite = fr->sprite;
+                }
+            }
+        }
     }
 
     // Editor-wide keyboard shortcuts. ImGui-driven so input that landed
@@ -1813,9 +1846,92 @@ private:
             DrawSpriteRendererEditor(entity, *s);
         } else if (auto* tm = dynamic_cast<SceneEditor::TilemapComponent*>(comp)) {
             DrawTilemapEditor(entity, *tm);
+        } else if (auto* an = dynamic_cast<SceneEditor::AnimatorComponent*>(comp)) {
+            DrawAnimatorEditor(entity, *an);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
         }
+    }
+
+    void DrawAnimatorEditor(SceneEditor::Entity& entity,
+                            SceneEditor::AnimatorComponent& an) {
+        bool changed = false;
+        // Animation combo over every .nanim asset in the project.
+        std::string current = "(none)";
+        if (an.animation.IsValid()) {
+            if (const auto* e = m_assetDb.FindByGuid(an.animation)) {
+                current = e->relPath;
+            } else {
+                current = an.animation.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Animation", current.c_str())) {
+            if (ImGui::Selectable("(none)", !an.animation.IsValid())) {
+                UndoSnapshot();
+                an.animation = SceneEditor::AssetGuid{};
+                an.currentTime = 0.0f;
+                changed = true;
+            }
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "Animation") continue;
+                const bool sel = (a.guid == an.animation);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    UndoSnapshot();
+                    an.animation = a.guid;
+                    an.currentTime = 0.0f;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p =
+                    ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                if (p->DataSize == sizeof(SceneEditor::AssetGuid)) {
+                    SceneEditor::AssetGuid guid;
+                    std::memcpy(&guid, p->Data, sizeof(guid));
+                    if (const auto* e = m_assetDb.FindByGuid(guid)) {
+                        if (e->typeName == "Animation") {
+                            UndoSnapshot();
+                            an.animation = guid;
+                            an.currentTime = 0.0f;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+        {
+            bool draft = an.isPlaying;
+            if (ImGui::Checkbox("Playing", &draft)) {
+                UndoSnapshot();
+                an.isPlaying = draft;
+                changed = true;
+            }
+        }
+        // Read-out so the user can see playback advancing live.
+        if (SceneEditor::AnimationAsset* anim =
+                m_assetDb.GetAnimation(an.animation)) {
+            const float total = anim->TotalDuration();
+            ImGui::TextDisabled("time %.2fs / %.2fs  (%zu frames)",
+                                an.currentTime, total, anim->frames.size());
+            if (const SceneEditor::AnimationFrame* fr =
+                    anim->Sample(an.currentTime)) {
+                ImGui::TextDisabled("current frame: %s",
+                                    fr->sprite.c_str());
+            }
+        }
+        if (ImGui::SmallButton("Restart")) {
+            UndoSnapshot();
+            an.currentTime = 0.0f;
+            changed = true;
+        }
+        if (changed) {
+            m_scene.MarkDirty();
+            UpdateWindowTitle();
+        }
+        (void)entity;
     }
 
     void DrawTilemapEditor(SceneEditor::Entity& entity,
@@ -2319,6 +2435,8 @@ private:
                 m_viewCam.center = EntityWorldPos(*e);
             }
         }
+        ImGui::SameLine();
+        ImGui::Checkbox("Play", &m_animPlaying);
 
         const ImVec2 panelMin  = ImGui::GetCursorScreenPos();
         const ImVec2 panelSize = ImGui::GetContentRegionAvail();
@@ -4090,6 +4208,13 @@ private:
     // painted cell whose tile-index is flagged in the bound Tileset
     // asset gets a translucent red highlight on top of the cell.
     bool                m_showCollisionOverlay = false;
+
+    // Editor-side animation playback. When true, OnRender ticks every
+    // AnimatorComponent in the scene and writes the sampled frame's
+    // sub-sprite name into the companion SpriteRenderer so the user
+    // sees the animation live in the viewport. Off freezes the
+    // currently sampled frame.
+    bool                m_animPlaying          = true;
 
     // Tilemap paint state. The active stamp is a rectangular region of
     // palette cells defined by (Anchor, Cur) in palette (column, row)
