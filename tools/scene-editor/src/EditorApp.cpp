@@ -281,7 +281,7 @@ public:
 
         DrawMainMenuBar();
         HandleGlobalShortcuts();
-        TickScriptFileWatcher(ImGui::GetIO().DeltaTime);
+        TickAssetFileWatcher(ImGui::GetIO().DeltaTime);
         TickScripts (ImGui::GetIO().DeltaTime);
         TickAnimators(ImGui::GetIO().DeltaTime);
         DrawHierarchyPanel();
@@ -478,35 +478,64 @@ private:
         }
     }
 
-    // Polls disk mtimes on every Script-typed asset + reloads
-    // the ones that changed since we last looked. Runs
-    // independently of m_animPlaying so an external edit during
-    // a paused scene still propagates the moment the user
-    // unpauses. First observation just seeds the cache so the
-    // initial project-open sweep doesn't double-load every file
-    // the M6c3 auto-loader already ran.
-    void TickScriptFileWatcher(float dt) {
+    // Returns true when the watcher knows how to hot-reload the
+    // given AssetEntry typeName. Filters the M6c23 sweep so the
+    // mtime cache only tracks files we can actually do something
+    // about on a change.
+    static bool IsHotReloadableType(const std::string& typeName) {
+        return typeName == "Script" ||
+               typeName == "Animation" ||
+               typeName == "AnimatorController" ||
+               typeName == "Texture" ||
+               typeName == "Tileset" ||
+               typeName == "Autotile";
+    }
+
+    // Polls disk mtimes on every hot-reloadable asset + dispatches
+    // the right reload path when one changes. Runs independently
+    // of m_animPlaying so an external edit during a paused scene
+    // still propagates the moment the user unpauses. First
+    // observation just seeds the cache so the initial project-
+    // open sweep doesn't double-load anything the M6c3 auto-
+    // loader already handled.
+    void TickAssetFileWatcher(float dt) {
         if (!m_project.IsOpen()) return;
-        m_scriptWatchAccum += dt;
-        if (m_scriptWatchAccum < kScriptWatchInterval) return;
-        m_scriptWatchAccum = 0.0f;
+        m_assetWatchAccum += dt;
+        if (m_assetWatchAccum < kAssetWatchInterval) return;
+        m_assetWatchAccum = 0.0f;
         for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
-            if (a.typeName != "Script") continue;
+            if (!IsHotReloadableType(a.typeName)) continue;
             const std::string abs =
                 m_assetDb.AssetsRoot() + "/" + a.relPath;
             std::error_code ec;
             auto mtime = std::filesystem::last_write_time(abs, ec);
             if (ec) continue;
-            auto it = m_scriptMTimes.find(abs);
-            if (it == m_scriptMTimes.end()) {
-                m_scriptMTimes[abs] = mtime;
+            auto it = m_assetMTimes.find(abs);
+            if (it == m_assetMTimes.end()) {
+                m_assetMTimes[abs] = mtime;
                 continue;
             }
-            if (it->second != mtime) {
-                it->second = mtime;
-                m_scriptHost.AppendLine(
-                    "[watcher] reloading " + a.relPath);
+            if (it->second == mtime) continue;
+            it->second = mtime;
+            m_scriptHost.AppendLine(
+                "[watcher] reloading " + a.relPath);
+            // Dispatch to the asset-type-specific reload path.
+            // Script files re-run through the Lua interpreter;
+            // everything else evicts the AssetDatabase cache so
+            // the next access path (animator tick, sprite draw,
+            // tilemap renderer) re-reads from disk.
+            if (a.typeName == "Script") {
                 m_scriptHost.LoadFile(abs, a.relPath);
+            } else if (a.typeName == "Animation") {
+                m_assetDb.EvictAnimation(a.guid);
+            } else if (a.typeName == "AnimatorController") {
+                m_assetDb.EvictAnimatorController(a.guid);
+            } else if (a.typeName == "Texture") {
+                m_assetDb.EvictTexture(a.guid);
+            } else if (a.typeName == "Tileset") {
+                m_assetDb.EvictTileset(a.guid);
+            } else if (a.typeName == "Autotile") {
+                m_assetDb.EvictAutotile(a.guid);
             }
         }
     }
@@ -997,7 +1026,7 @@ private:
         NotifyAllScriptsForDestroy();
         m_project.Close();
         m_assetDb.Close();
-        m_scriptMTimes.clear();
+        m_assetMTimes.clear();
         m_scene = SceneEditor::Scene();
         m_currentScenePath.clear();
         m_selection = SceneEditor::kInvalidEntityId;
@@ -7524,15 +7553,23 @@ private:
     // route. The host outlives every Animation Editor session.
     SceneEditor::ScriptHost  m_scriptHost;
 
-    // Polling file watcher for .lua assets. Every kScriptWatchInterval
-    // seconds the editor walks every Script-typed AssetEntry +
-    // re-loads the file when its last_write_time bumped. M6c3's
-    // Edit > Reload Scripts is the manual escape hatch; this is
-    // the "VS Code saved while the editor was running" path.
-    float                    m_scriptWatchAccum   = 0.0f;
-    static constexpr float   kScriptWatchInterval = 1.0f;
+    // Polling file watcher for hot-reloadable asset types. Every
+    // kAssetWatchInterval seconds the editor walks every entry in
+    // the database + dispatches the right reload path when its
+    // last_write_time bumped:
+    //   Script             -> ScriptHost::LoadFile (M6c3)
+    //   Animation          -> AssetDatabase::EvictAnimation
+    //   AnimatorController -> AssetDatabase::EvictAnimatorController
+    //   Texture            -> AssetDatabase::EvictTexture
+    //   Tileset            -> AssetDatabase::EvictTileset
+    //   Autotile           -> AssetDatabase::EvictAutotile
+    // Non-trackable types (Scene, Prefab, Model, Audio, Font,
+    // SpriteSheet, HdrEnvironment, Unknown) drop through without
+    // mtime bookkeeping so the cache stays bounded.
+    float                    m_assetWatchAccum   = 0.0f;
+    static constexpr float   kAssetWatchInterval = 1.0f;
     std::unordered_map<std::string, std::filesystem::file_time_type>
-                             m_scriptMTimes;
+                             m_assetMTimes;
 
     // Minimal in-editor text editor for .lua scripts. Opens via
     // double-click on a Script-typed Project row; the buffer is
