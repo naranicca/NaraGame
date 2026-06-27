@@ -52,6 +52,14 @@ public:
         m_renderer.Init(GetDevice());
         m_post.Init(GetDevice(), kWindowW, kWindowH);
 
+        // Override the engine's procedural sky with an HDR sunset --
+        // bright sun spot aligned with the directional light so the
+        // metal sphere row picks up a recognisable highlight in the
+        // prefiltered env reflection.
+        const std::string envPath =
+            std::string(NARAGAME_ASSETS_DIR) + "/sunset.hdr";
+        m_renderer.LoadEnvironment(envPath);
+
         m_white  = MakeSolid(0xFF, 0xFF, 0xFF);
         m_ground = MakeChecker(0x6A, 0x55, 0x3A, 0x3A, 0x2C, 0x1E);
 

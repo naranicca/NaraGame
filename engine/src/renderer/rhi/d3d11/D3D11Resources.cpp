@@ -98,13 +98,14 @@ D3D11Texture::D3D11Texture(ID3D11Device* device, ID3D11DeviceContext* context,
 
     D3D11_SUBRESOURCE_DATA init{};
     init.pSysMem = desc.pixels;
-    init.SysMemPitch = desc.width * 4; // RGBA8 path only
+    // RGBA8 = 4 bytes/pixel, RGBA16F = 8 bytes/pixel (4 half-floats).
+    init.SysMemPitch = desc.width * (isHDR ? 8u : 4u);
 
-    // Render targets, depth textures, and HDR float targets start
-    // undefined and get filled by GPU writes; we never seed them from
-    // CPU pixels.
+    // Render targets and depth textures start undefined and get filled by
+    // GPU writes; CPU pixels are accepted for RGBA8 and RGBA16F sources
+    // (the latter expects pre-converted half-float data).
     const D3D11_SUBRESOURCE_DATA* initPtr =
-        (desc.pixels && !desc.renderTarget && !isDepth && !isHDR) ? &init : nullptr;
+        (desc.pixels && !desc.renderTarget && !isDepth) ? &init : nullptr;
 
     HRESULT hr =
         device->CreateTexture2D(&td, initPtr, m_texture.GetAddressOf());

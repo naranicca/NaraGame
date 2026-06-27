@@ -1,5 +1,6 @@
 #include "NaraGame/renderer/Renderer3D.h"
 
+#include "NaraGame/assets/Hdr.h"
 #include "NaraGame/core/Log.h"
 #include "NaraGame/renderer/rhi/RHIDevice.h"
 #include "NaraGame/renderer/rhi/RHIResources.h"
@@ -493,12 +494,14 @@ Vec2f DirToEquirectCpu(const Vec3& d) {
     return {u, v};
 }
 
-// Bilinear sample of the equirectangular sky pixel buffer.
-Vec3 SampleSkyBilinear(const std::vector<uint8_t>& skyPixels,
-                      int w, int h, const Vec3& dir) {
+// Bilinear sample of an equirectangular float-RGB pixel buffer. Source
+// is interleaved RGB (3 floats per pixel) of arbitrary size; the bake
+// pipeline can feed either the procedural default or a loaded HDR file.
+Vec3 SampleSkyBilinearFloat(const float* skyPixels, int w, int h,
+                            const Vec3& dir) {
     const Vec2f uv = DirToEquirectCpu(dir);
     const float fx = uv.x * float(w);
-    const float fy = uv.y * float(h - 1);  // v=1 maps to row h-1
+    const float fy = uv.y * float(h - 1);
     int x0 = int(std::floor(fx)) % w;
     if (x0 < 0) x0 += w;
     int x1 = (x0 + 1) % w;
@@ -507,10 +510,8 @@ Vec3 SampleSkyBilinear(const std::vector<uint8_t>& skyPixels,
     const float tx = fx - std::floor(fx);
     const float ty = fy - std::floor(fy);
     auto get = [&](int x, int y) {
-        const size_t i = (size_t(y) * w + size_t(x)) * 4;
-        return Vec3{float(skyPixels[i + 0]) / 255.0f,
-                    float(skyPixels[i + 1]) / 255.0f,
-                    float(skyPixels[i + 2]) / 255.0f};
+        const size_t i = (size_t(y) * w + size_t(x)) * 3;
+        return Vec3{skyPixels[i + 0], skyPixels[i + 1], skyPixels[i + 2]};
     };
     const Vec3 c00 = get(x0, y0), c10 = get(x1, y0);
     const Vec3 c01 = get(x0, y1), c11 = get(x1, y1);
@@ -523,6 +524,55 @@ Vec3 SampleSkyBilinear(const std::vector<uint8_t>& skyPixels,
     return {a.x + (b.x - a.x) * ty,
             a.y + (b.y - a.y) * ty,
             a.z + (b.z - a.z) * ty};
+}
+
+// IEEE 754 binary32 -> binary16 conversion for RGBA16F texture upload.
+// Subnormals + Inf collapse to nearest representable; mantissa truncates
+// (faster than round-to-nearest and the IBL bake doesn't care about
+// half-bit precision).
+uint16_t FloatToHalf(float f) {
+    union { float f; uint32_t u; } v;
+    v.f = f;
+    const uint32_t bits = v.u;
+    const uint32_t sign = (bits >> 16) & 0x8000u;
+    const int32_t  e    = int32_t((bits >> 23) & 0xFFu) - 127 + 15;
+    const uint32_t m    = bits & 0x007FFFFFu;
+    if (e >= 31) return uint16_t(sign | 0x7C00u | (m ? 0x0200u : 0u));
+    if (e <= 0)  return uint16_t(sign);
+    return uint16_t(sign | (uint32_t(e) << 10) | (m >> 13));
+}
+
+// Fill a 256x128 float-RGB buffer with the engine's default sky gradient
+// -- cool zenith at the top through neutral horizon to dark warm earth.
+// Lifted out of Init so LoadEnvironment can re-bake from the procedural
+// source via the same code path that handles a loaded HDR file.
+constexpr int kProcSkyW = 256;
+constexpr int kProcSkyH = 128;
+std::vector<float> MakeProceduralSkyPixels() {
+    const Vec3 cZenith   = {0.30f, 0.42f, 0.55f};
+    const Vec3 cHorizUp  = {0.55f, 0.55f, 0.55f};
+    const Vec3 cHorizDn  = {0.50f, 0.42f, 0.35f};
+    const Vec3 cGround   = {0.16f, 0.13f, 0.10f};
+    auto lerp3 = [](const Vec3& a, const Vec3& b, float t) {
+        return Vec3{a.x + (b.x - a.x) * t,
+                    a.y + (b.y - a.y) * t,
+                    a.z + (b.z - a.z) * t};
+    };
+    auto smooth = [](float t) { return t * t * (3.0f - 2.0f * t); };
+    std::vector<float> px(size_t(kProcSkyW) * size_t(kProcSkyH) * 3);
+    for (int y = 0; y < kProcSkyH; ++y) {
+        const float v = float(y) / float(kProcSkyH - 1);
+        const Vec3 col = (v < 0.5f)
+            ? lerp3(cZenith,  cHorizUp, smooth(v * 2.0f))
+            : lerp3(cHorizDn, cGround,  smooth((v - 0.5f) * 2.0f));
+        for (int x = 0; x < kProcSkyW; ++x) {
+            const size_t i = (size_t(y) * kProcSkyW + size_t(x)) * 3;
+            px[i + 0] = col.x;
+            px[i + 1] = col.y;
+            px[i + 2] = col.z;
+        }
+    }
+    return px;
 }
 
 } // namespace
@@ -685,121 +735,11 @@ void Renderer3D::Init(RHIDevice& device) {
     nd.pixels = flatNormalPixels;
     m_flatNormalTex = device.CreateTexture(nd);
 
-    // Bake the diffuse-IBL sky env: a 256x128 equirectangular gradient
-    // running from a cool zenith at v=0 through a neutral horizon at
-    // v=0.5 to a dark warm earth at v=1. Sampled in the pixel shader by
-    // the (perturbed) world normal to give each surface point an ambient
-    // colour that follows where it's looking instead of the old two-
-    // colour hemi lerp. Colours match the look the cube test scene was
-    // already using so this drops in without retuning anything else.
-    constexpr int kSkyW = 256;
-    constexpr int kSkyH = 128;
-    const Vec3 cZenith   = {0.30f, 0.42f, 0.55f};  // cool blue overhead
-    const Vec3 cHorizUp  = {0.55f, 0.55f, 0.55f};  // neutral at horizon (above)
-    const Vec3 cHorizDn  = {0.50f, 0.42f, 0.35f};  // warm horizon (below)
-    const Vec3 cGround   = {0.16f, 0.13f, 0.10f};  // dark earth straight down
-    auto lerp3 = [](const Vec3& a, const Vec3& b, float t) {
-        return Vec3{a.x + (b.x - a.x) * t,
-                    a.y + (b.y - a.y) * t,
-                    a.z + (b.z - a.z) * t};
-    };
-    auto smooth = [](float t) { return t * t * (3.0f - 2.0f * t); };
-    std::vector<uint8_t> skyPixels(size_t(kSkyW) * size_t(kSkyH) * 4);
-    for (int y = 0; y < kSkyH; ++y) {
-        const float v = float(y) / float(kSkyH - 1);  // 0 = top, 1 = bottom
-        Vec3 col;
-        if (v < 0.5f) {
-            col = lerp3(cZenith, cHorizUp, smooth(v * 2.0f));
-        } else {
-            col = lerp3(cHorizDn, cGround, smooth((v - 0.5f) * 2.0f));
-        }
-        const uint8_t r = uint8_t(std::clamp(col.x, 0.0f, 1.0f) * 255.0f);
-        const uint8_t g = uint8_t(std::clamp(col.y, 0.0f, 1.0f) * 255.0f);
-        const uint8_t b = uint8_t(std::clamp(col.z, 0.0f, 1.0f) * 255.0f);
-        for (int x = 0; x < kSkyW; ++x) {
-            const size_t i = (size_t(y) * kSkyW + size_t(x)) * 4;
-            skyPixels[i + 0] = r;
-            skyPixels[i + 1] = g;
-            skyPixels[i + 2] = b;
-            skyPixels[i + 3] = 0xFF;
-        }
-    }
-    TextureDesc sky;
-    sky.width  = kSkyW;
-    sky.height = kSkyH;
-    sky.format = TextureFormat::RGBA8;
-    sky.filter = TextureFilter::Linear;
-    sky.pixels = skyPixels.data();
-    m_skyEnvTex = device.CreateTexture(sky);
-
-    // --- Specular IBL: prefiltered env atlas ----------------------------
-    //
-    // Six 256x128 strips stacked vertically, each pre-convolved with a
-    // GGX lobe at roughness = level/5. Importance-sampled with 32
-    // Hammersley draws per output pixel: enough to read smooth without
-    // adding seconds to startup. The runtime trilinearly blends two
-    // adjacent strips by frac(roughness * 5) so the metal reflection
-    // roughness response stays continuous.
-    constexpr int kPrefLevels = 6;
-    constexpr int kPrefW = kSkyW;
-    constexpr int kPrefH = kSkyH;
-    constexpr int kPrefSamples = 32;
-    const int prefTotalH = kPrefH * kPrefLevels;
-    std::vector<uint8_t> prefPixels(size_t(kPrefW) * size_t(prefTotalH) * 4);
-    for (int level = 0; level < kPrefLevels; ++level) {
-        const float roughness = float(level) / float(kPrefLevels - 1);
-        const int rowStart = level * kPrefH;
-        for (int y = 0; y < kPrefH; ++y) {
-            // Each output pixel represents a normal direction = reflection
-            // direction (split-sum approximation: V = N).
-            const float v = float(y) / float(kPrefH - 1);
-            const float elev = v * kIblPi;  // 0 = +Y, pi = -Y
-            const float sinE = std::sin(elev);
-            const float cosE = std::cos(elev);
-            for (int x = 0; x < kPrefW; ++x) {
-                const float u = float(x) / float(kPrefW);
-                const float az = (u - 0.5f) * 2.0f * kIblPi;
-                const Vec3 N = {sinE * std::sin(az), cosE, sinE * std::cos(az)};
-                Vec3 sum{0.0f, 0.0f, 0.0f};
-                float weight = 0.0f;
-                for (int s = 0; s < kPrefSamples; ++s) {
-                    const Vec2f xi = Hammersley(uint32_t(s),
-                                                uint32_t(kPrefSamples));
-                    const Vec3 H = ImportanceSampleGGX(xi, N, roughness);
-                    const float NdotH = N.x * H.x + N.y * H.y + N.z * H.z;
-                    // L = reflect(V, H) with V = N -> L = 2 NdotH H - N.
-                    const Vec3 L = {2.0f * NdotH * H.x - N.x,
-                                    2.0f * NdotH * H.y - N.y,
-                                    2.0f * NdotH * H.z - N.z};
-                    const float NdotL = std::max(0.0f,
-                                                 N.x * L.x + N.y * L.y + N.z * L.z);
-                    if (NdotL > 0.0f) {
-                        const Vec3 c = SampleSkyBilinear(skyPixels, kSkyW,
-                                                        kSkyH, L);
-                        sum.x += c.x * NdotL;
-                        sum.y += c.y * NdotL;
-                        sum.z += c.z * NdotL;
-                        weight += NdotL;
-                    }
-                }
-                if (weight > 0.0f) {
-                    sum.x /= weight; sum.y /= weight; sum.z /= weight;
-                }
-                const size_t i = (size_t(rowStart + y) * kPrefW + size_t(x)) * 4;
-                prefPixels[i + 0] = uint8_t(std::clamp(sum.x, 0.0f, 1.0f) * 255.0f);
-                prefPixels[i + 1] = uint8_t(std::clamp(sum.y, 0.0f, 1.0f) * 255.0f);
-                prefPixels[i + 2] = uint8_t(std::clamp(sum.z, 0.0f, 1.0f) * 255.0f);
-                prefPixels[i + 3] = 0xFF;
-            }
-        }
-    }
-    TextureDesc pref;
-    pref.width  = kPrefW;
-    pref.height = prefTotalH;
-    pref.format = TextureFormat::RGBA8;
-    pref.filter = TextureFilter::Linear;
-    pref.pixels = prefPixels.data();
-    m_prefilteredEnvTex = device.CreateTexture(pref);
+    // Bake the IBL sky env + prefiltered atlas from the procedural sky
+    // gradient. LoadEnvironment can later swap the source for a loaded
+    // HDR file and re-bake both textures via the same code path.
+    const std::vector<float> procSky = MakeProceduralSkyPixels();
+    BakeIblFromSource(procSky.data(), kProcSkyW, kProcSkyH);
 
     // --- Specular IBL: BRDF LUT ----------------------------------------
     //
@@ -875,6 +815,121 @@ void Renderer3D::Init(RHIDevice& device) {
 
     NARAGAME_INFO("Renderer3D initialized (%d cascades @ %ux%u + IBL)",
                   kCascadeCount, kCascadeShadowSize, kCascadeShadowSize);
+}
+
+void Renderer3D::BakeIblFromSource(const float* srcPixels, int srcW, int srcH) {
+    if (!m_device || !srcPixels || srcW <= 0 || srcH <= 0) return;
+
+    // Output sky env tex: 256x128 RGBA16F. We keep the bake output
+    // resolution fixed regardless of source HDR size so the shader's
+    // SamplePrefilteredStrip math (strip = level/6) stays unchanged.
+    constexpr int kSkyW = 256;
+    constexpr int kSkyH = 128;
+    std::vector<uint16_t> skyHalf(size_t(kSkyW) * size_t(kSkyH) * 4);
+    for (int y = 0; y < kSkyH; ++y) {
+        const float v = float(y) / float(kSkyH - 1);
+        const float elev = v * kIblPi;
+        const float sinE = std::sin(elev);
+        const float cosE = std::cos(elev);
+        for (int x = 0; x < kSkyW; ++x) {
+            const float u = float(x) / float(kSkyW);
+            const float az = (u - 0.5f) * 2.0f * kIblPi;
+            const Vec3 dir = {sinE * std::sin(az), cosE, sinE * std::cos(az)};
+            const Vec3 col = SampleSkyBilinearFloat(srcPixels, srcW, srcH, dir);
+            const size_t i = (size_t(y) * kSkyW + size_t(x)) * 4;
+            skyHalf[i + 0] = FloatToHalf(col.x);
+            skyHalf[i + 1] = FloatToHalf(col.y);
+            skyHalf[i + 2] = FloatToHalf(col.z);
+            skyHalf[i + 3] = FloatToHalf(1.0f);
+        }
+    }
+    TextureDesc sky;
+    sky.width  = kSkyW;
+    sky.height = kSkyH;
+    sky.format = TextureFormat::RGBA16F;
+    sky.filter = TextureFilter::Linear;
+    sky.pixels = skyHalf.data();
+    m_skyEnvTex = m_device->CreateTexture(sky);
+
+    // Prefiltered atlas: six 256x128 strips, GGX-convolved at the
+    // corresponding roughness level. 32 importance samples / pixel.
+    constexpr int kPrefLevels  = 6;
+    constexpr int kPrefSamples = 32;
+    const int prefTotalH = kSkyH * kPrefLevels;
+    std::vector<uint16_t> prefHalf(size_t(kSkyW) * size_t(prefTotalH) * 4);
+    for (int level = 0; level < kPrefLevels; ++level) {
+        const float roughness = float(level) / float(kPrefLevels - 1);
+        const int rowStart = level * kSkyH;
+        for (int y = 0; y < kSkyH; ++y) {
+            const float v = float(y) / float(kSkyH - 1);
+            const float elev = v * kIblPi;
+            const float sinE = std::sin(elev);
+            const float cosE = std::cos(elev);
+            for (int x = 0; x < kSkyW; ++x) {
+                const float u = float(x) / float(kSkyW);
+                const float az = (u - 0.5f) * 2.0f * kIblPi;
+                const Vec3 N = {sinE * std::sin(az), cosE, sinE * std::cos(az)};
+                Vec3 sum{0.0f, 0.0f, 0.0f};
+                float weight = 0.0f;
+                for (int s = 0; s < kPrefSamples; ++s) {
+                    const Vec2f xi = Hammersley(uint32_t(s),
+                                                uint32_t(kPrefSamples));
+                    const Vec3 H = ImportanceSampleGGX(xi, N, roughness);
+                    const float NdotH = N.x * H.x + N.y * H.y + N.z * H.z;
+                    const Vec3 L = {2.0f * NdotH * H.x - N.x,
+                                    2.0f * NdotH * H.y - N.y,
+                                    2.0f * NdotH * H.z - N.z};
+                    const float NdotL = std::max(0.0f,
+                                                 N.x * L.x + N.y * L.y + N.z * L.z);
+                    if (NdotL > 0.0f) {
+                        const Vec3 c = SampleSkyBilinearFloat(srcPixels,
+                                                              srcW, srcH, L);
+                        sum.x += c.x * NdotL;
+                        sum.y += c.y * NdotL;
+                        sum.z += c.z * NdotL;
+                        weight += NdotL;
+                    }
+                }
+                if (weight > 0.0f) {
+                    sum.x /= weight; sum.y /= weight; sum.z /= weight;
+                }
+                const size_t i = (size_t(rowStart + y) * kSkyW + size_t(x)) * 4;
+                prefHalf[i + 0] = FloatToHalf(sum.x);
+                prefHalf[i + 1] = FloatToHalf(sum.y);
+                prefHalf[i + 2] = FloatToHalf(sum.z);
+                prefHalf[i + 3] = FloatToHalf(1.0f);
+            }
+        }
+    }
+    TextureDesc pref;
+    pref.width  = kSkyW;
+    pref.height = prefTotalH;
+    pref.format = TextureFormat::RGBA16F;
+    pref.filter = TextureFilter::Linear;
+    pref.pixels = prefHalf.data();
+    m_prefilteredEnvTex = m_device->CreateTexture(pref);
+}
+
+bool Renderer3D::LoadEnvironment(const std::string& hdrPath) {
+    if (!m_device) return false;
+    if (hdrPath.empty()) {
+        // Revert to the procedural default.
+        const std::vector<float> procSky = MakeProceduralSkyPixels();
+        BakeIblFromSource(procSky.data(), kProcSkyW, kProcSkyH);
+        NARAGAME_INFO("Renderer3D::LoadEnvironment: reverted to procedural sky");
+        return true;
+    }
+    const HdrImage hdr = LoadHdrFile(hdrPath);
+    if (!hdr.Valid()) {
+        NARAGAME_WARN("Renderer3D::LoadEnvironment: '%s' invalid; "
+                      "keeping current sky",
+                      hdrPath.c_str());
+        return false;
+    }
+    BakeIblFromSource(hdr.pixels.data(), int(hdr.width), int(hdr.height));
+    NARAGAME_INFO("Renderer3D::LoadEnvironment: '%s' baked (%ux%u source)",
+                  hdrPath.c_str(), hdr.width, hdr.height);
+    return true;
 }
 
 void Renderer3D::Shutdown() {

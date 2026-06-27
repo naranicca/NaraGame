@@ -6,6 +6,7 @@
 #include "NaraGame/renderer/rhi/RHITypes.h"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace NaraGame {
@@ -121,6 +122,14 @@ public:
     void Init(RHIDevice& device);
     void Shutdown();
 
+    // Override the procedural sky baked at Init with an external HDR
+    // equirectangular environment map (.hdr / RGBE). Re-bakes the sky
+    // env + prefiltered env atlas; the BRDF LUT is environment-agnostic
+    // and stays untouched. Returns false on load / decode failure (the
+    // existing environment is preserved). Pass an empty string to revert
+    // to the procedural default.
+    bool LoadEnvironment(const std::string& hdrPath);
+
     // Lock in the camera, light + ambient hemisphere, and fog for the
     // current frame. The queue starts empty; subsequent DrawMesh calls
     // populate it. End() does the actual GPU work.
@@ -172,6 +181,10 @@ public:
 private:
     void RunShadowPass(const Mat4& lightViewProj);
     void RunMainPass();
+    // Bake (or re-bake) the IBL sky env + prefiltered atlas from a
+    // float-RGB equirectangular source. Used both by Init (procedural
+    // default) and LoadEnvironment (HDR override).
+    void BakeIblFromSource(const float* srcPixels, int srcW, int srcH);
 
     RHIDevice* m_device = nullptr;
 

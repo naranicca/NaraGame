@@ -8,6 +8,7 @@ set(NARAGAME_SOURCES
     src/assets/BMFont.cpp
     src/assets/Inflate.cpp
     src/assets/Gltf.cpp
+    src/assets/Hdr.cpp
     src/assets/MeshLoader.cpp
     src/assets/MiniJson.cpp
     src/assets/MSDFFontLoader.cpp
