@@ -25,11 +25,13 @@ public:
 
     // Optional .ncontroller reference. When set, the runtime ignores
     // `animation` and plays the controller's currentState animation
-    // instead. paramValues drives the controller's transitions; the
-    // editor's inspector exposes a toggle for each parameter.
+    // instead. Live parameter values live in three type-matched maps;
+    // the editor's inspector picks the right widget per parameter.
     AssetGuid controller;
     int       currentState = -1;   // -1 = "not initialised yet"
-    std::unordered_map<std::string, bool> paramValues;
+    std::unordered_map<std::string, bool>  paramBools;
+    std::unordered_map<std::string, float> paramFloats;
+    std::unordered_map<std::string, int>   paramInts;
 
     static const char* StaticTypeName() { return "Animator"; }
     const char* TypeName() const override { return StaticTypeName(); }

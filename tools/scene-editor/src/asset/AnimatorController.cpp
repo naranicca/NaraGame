@@ -54,8 +54,15 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
             for (const Value& p : arr->arrayValue) {
                 if (!p.IsObject()) continue;
                 AnimatorParameter par;
-                par.name         = p.GetString("name");
-                par.defaultValue = p.GetBool("defaultValue", false);
+                par.name = p.GetString("name");
+                const std::string& ts = p.GetString("type", "Bool");
+                if      (ts == "Float") par.type = AnimatorParameter::Type::Float;
+                else if (ts == "Int")   par.type = AnimatorParameter::Type::Int;
+                else                    par.type = AnimatorParameter::Type::Bool;
+                par.defaultBool  = p.GetBool ("defaultBool",
+                                              p.GetBool("defaultValue", false));
+                par.defaultFloat = float(p.GetNumber("defaultFloat", 0.0));
+                par.defaultInt   = p.GetInt ("defaultInt", 0);
                 parameters.push_back(std::move(par));
             }
         }
@@ -65,10 +72,23 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
             for (const Value& t : arr->arrayValue) {
                 if (!t.IsObject()) continue;
                 AnimatorTransition tr;
-                tr.fromIdx  = t.GetInt("fromIdx", -1);
-                tr.toIdx    = t.GetInt("toIdx", 0);
-                tr.param    = t.GetString("param");
-                tr.expected = t.GetBool("expected", true);
+                tr.fromIdx = t.GetInt("fromIdx", -1);
+                tr.toIdx   = t.GetInt("toIdx", 0);
+                tr.param   = t.GetString("param");
+                const std::string& os = t.GetString("op", "Equals");
+                if      (os == "NotEqual")     tr.op = AnimatorTransition::Op::NotEqual;
+                else if (os == "Less")         tr.op = AnimatorTransition::Op::Less;
+                else if (os == "LessEqual")    tr.op = AnimatorTransition::Op::LessEqual;
+                else if (os == "Greater")      tr.op = AnimatorTransition::Op::Greater;
+                else if (os == "GreaterEqual") tr.op = AnimatorTransition::Op::GreaterEqual;
+                else                           tr.op = AnimatorTransition::Op::Equals;
+                // Backward-compat: legacy "expected" bool maps to
+                // valueBool, op stays Equals so M5c4 controllers keep
+                // their behaviour.
+                tr.valueBool  = t.GetBool ("valueBool",
+                                           t.GetBool("expected", true));
+                tr.valueFloat = float(t.GetNumber("valueFloat", 0.0));
+                tr.valueInt   = t.GetInt ("valueInt", 0);
                 transitions.push_back(std::move(tr));
             }
         }
@@ -93,18 +113,36 @@ Value AnimatorControllerAsset::ToJson() const {
     Value parr = Value::MakeArray();
     for (const AnimatorParameter& p : parameters) {
         Value o = Value::MakeObject();
-        o.Add("name",         Value::MakeString(p.name));
-        o.Add("defaultValue", Value::MakeBool(p.defaultValue));
+        o.Add("name", Value::MakeString(p.name));
+        const char* tname = "Bool";
+        if      (p.type == AnimatorParameter::Type::Float) tname = "Float";
+        else if (p.type == AnimatorParameter::Type::Int)   tname = "Int";
+        o.Add("type",         Value::MakeString(tname));
+        o.Add("defaultBool",  Value::MakeBool(p.defaultBool));
+        o.Add("defaultFloat", Value::MakeNumber(p.defaultFloat));
+        o.Add("defaultInt",   Value::MakeNumber(p.defaultInt));
         parr.Push(std::move(o));
     }
     root.Add("parameters", std::move(parr));
     Value tarr = Value::MakeArray();
     for (const AnimatorTransition& t : transitions) {
         Value o = Value::MakeObject();
-        o.Add("fromIdx",  Value::MakeNumber(t.fromIdx));
-        o.Add("toIdx",    Value::MakeNumber(t.toIdx));
-        o.Add("param",    Value::MakeString(t.param));
-        o.Add("expected", Value::MakeBool(t.expected));
+        o.Add("fromIdx", Value::MakeNumber(t.fromIdx));
+        o.Add("toIdx",   Value::MakeNumber(t.toIdx));
+        o.Add("param",   Value::MakeString(t.param));
+        const char* opname = "Equals";
+        switch (t.op) {
+            case AnimatorTransition::Op::NotEqual:     opname = "NotEqual";     break;
+            case AnimatorTransition::Op::Less:         opname = "Less";         break;
+            case AnimatorTransition::Op::LessEqual:    opname = "LessEqual";    break;
+            case AnimatorTransition::Op::Greater:      opname = "Greater";      break;
+            case AnimatorTransition::Op::GreaterEqual: opname = "GreaterEqual"; break;
+            default: break;
+        }
+        o.Add("op",         Value::MakeString(opname));
+        o.Add("valueBool",  Value::MakeBool(t.valueBool));
+        o.Add("valueFloat", Value::MakeNumber(t.valueFloat));
+        o.Add("valueInt",   Value::MakeNumber(t.valueInt));
         tarr.Push(std::move(o));
     }
     root.Add("transitions", std::move(tarr));

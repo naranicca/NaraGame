@@ -361,17 +361,28 @@ private:
             m_assetDb.GetAnimatorController(an.controller);
         if (!ctrl || ctrl->states.empty()) return;
 
-        // Initialise on first run / out-of-range state. paramValues
-        // is also bootstrapped from the controller's declared
-        // defaults the first time we see this animator.
+        // Initialise on first run / out-of-range state. Parameter
+        // maps are also bootstrapped from the controller's declared
+        // defaults the first time we see this animator -- per type.
         if (an.currentState < 0 ||
             an.currentState >= int(ctrl->states.size())) {
             an.currentState = std::clamp(ctrl->defaultState, 0,
                                          int(ctrl->states.size()) - 1);
             an.currentTime  = 0.0f;
             for (const auto& p : ctrl->parameters) {
-                if (an.paramValues.find(p.name) == an.paramValues.end()) {
-                    an.paramValues[p.name] = p.defaultValue;
+                using PT = SceneEditor::AnimatorParameter::Type;
+                if (p.type == PT::Float) {
+                    if (an.paramFloats.find(p.name) == an.paramFloats.end()) {
+                        an.paramFloats[p.name] = p.defaultFloat;
+                    }
+                } else if (p.type == PT::Int) {
+                    if (an.paramInts.find(p.name) == an.paramInts.end()) {
+                        an.paramInts[p.name] = p.defaultInt;
+                    }
+                } else {
+                    if (an.paramBools.find(p.name) == an.paramBools.end()) {
+                        an.paramBools[p.name] = p.defaultBool;
+                    }
                 }
             }
         }
@@ -393,14 +404,51 @@ private:
 
         // Transition evaluation in declaration order. A transition
         // fires when its `fromIdx` matches the current state (or is
-        // -1 = any), its parameter is known, and its value matches
-        // the expected bool.
+        // -1 = any), the named parameter is declared on the
+        // controller, and the value-vs-target comparison passes for
+        // the parameter's type.
         for (const SceneEditor::AnimatorTransition& tr : ctrl->transitions) {
             if (tr.fromIdx >= 0 && tr.fromIdx != an.currentState) continue;
-            auto it = an.paramValues.find(tr.param);
-            if (it == an.paramValues.end()) continue;
-            if (it->second != tr.expected) continue;
+            const SceneEditor::AnimatorParameter* decl = nullptr;
+            for (const auto& p : ctrl->parameters) {
+                if (p.name == tr.param) { decl = &p; break; }
+            }
+            if (!decl) continue;
             if (tr.toIdx < 0 || tr.toIdx >= int(ctrl->states.size())) continue;
+            using PT = SceneEditor::AnimatorParameter::Type;
+            using OP = SceneEditor::AnimatorTransition::Op;
+            auto cmp = [&](auto v, auto target) {
+                switch (tr.op) {
+                    case OP::Equals:       return v == target;
+                    case OP::NotEqual:     return v != target;
+                    case OP::Less:         return v <  target;
+                    case OP::LessEqual:    return v <= target;
+                    case OP::Greater:      return v >  target;
+                    case OP::GreaterEqual: return v >= target;
+                }
+                return false;
+            };
+            bool fire = false;
+            if (decl->type == PT::Float) {
+                auto it = an.paramFloats.find(tr.param);
+                const float v = (it != an.paramFloats.end())
+                              ? it->second : decl->defaultFloat;
+                fire = cmp(v, tr.valueFloat);
+            } else if (decl->type == PT::Int) {
+                auto it = an.paramInts.find(tr.param);
+                const int v = (it != an.paramInts.end())
+                            ? it->second : decl->defaultInt;
+                fire = cmp(v, tr.valueInt);
+            } else {
+                auto it = an.paramBools.find(tr.param);
+                const bool v = (it != an.paramBools.end())
+                             ? it->second : decl->defaultBool;
+                // Bool only supports == / != meaningfully; the other
+                // ops degenerate to the equality check below.
+                if (tr.op == OP::NotEqual) fire = (v != tr.valueBool);
+                else                       fire = (v == tr.valueBool);
+            }
+            if (!fire) continue;
             an.currentState = tr.toIdx;
             an.currentTime  = 0.0f;
             break;
@@ -825,9 +873,9 @@ private:
                 if (hit >= 0 && hit != m_graphPendingFrom &&
                     m_graphPendingFrom < int(ctrl.states.size())) {
                     SceneEditor::AnimatorTransition tr;
-                    tr.fromIdx  = m_graphPendingFrom;
-                    tr.toIdx    = hit;
-                    tr.expected = true;
+                    tr.fromIdx   = m_graphPendingFrom;
+                    tr.toIdx     = hit;
+                    tr.valueBool = true;
                     ctrl.transitions.push_back(std::move(tr));
                     dirty = true;
                 }
@@ -1130,16 +1178,34 @@ private:
             ImGui::PushID(10000 + i);
             char nameBuf[64];
             std::snprintf(nameBuf, sizeof(nameBuf), "%s", p.name.c_str());
-            ImGui::SetNextItemWidth(180.0f);
+            ImGui::SetNextItemWidth(160.0f);
             if (ImGui::InputText("##pname", nameBuf, sizeof(nameBuf))) {
                 p.name = nameBuf;
                 dirty = true;
             }
             ImGui::SameLine();
-            bool draft = p.defaultValue;
-            if (ImGui::Checkbox("default", &draft)) {
-                p.defaultValue = draft;
+            const char* typeNames[] = { "Bool", "Float", "Int" };
+            int typeIdx = int(p.type);
+            ImGui::SetNextItemWidth(80.0f);
+            if (ImGui::Combo("##ptype", &typeIdx, typeNames, 3)) {
+                p.type = static_cast<SceneEditor::AnimatorParameter::Type>(typeIdx);
                 dirty = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f);
+            using PT = SceneEditor::AnimatorParameter::Type;
+            if (p.type == PT::Float) {
+                if (ImGui::DragFloat("##pdef", &p.defaultFloat, 0.05f,
+                                     0.0f, 0.0f, "def %.2f")) dirty = true;
+            } else if (p.type == PT::Int) {
+                if (ImGui::DragInt("##pdef", &p.defaultInt, 0.2f,
+                                    0, 0, "def %d")) dirty = true;
+            } else {
+                bool draft = p.defaultBool;
+                if (ImGui::Checkbox("default", &draft)) {
+                    p.defaultBool = draft;
+                    dirty = true;
+                }
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("X")) removeParamAt = i;
@@ -1229,12 +1295,37 @@ private:
                 ImGui::EndCombo();
             }
             ImGui::SameLine();
-            ImGui::TextUnformatted("==");
-            ImGui::SameLine();
-            bool expDraft = tr.expected;
-            if (ImGui::Checkbox("##expected", &expDraft)) {
-                tr.expected = expDraft;
+            // Op combo. Per parameter type we expose either the full
+            // arithmetic ladder (Float / Int) or just Equals /
+            // NotEqual (Bool, since < / > don't read meaningfully).
+            const SceneEditor::AnimatorParameter* decl = nullptr;
+            for (const auto& pr : ctrl->parameters) {
+                if (pr.name == tr.param) { decl = &pr; break; }
+            }
+            using PT = SceneEditor::AnimatorParameter::Type;
+            using OP = SceneEditor::AnimatorTransition::Op;
+            const char* opNamesAll[] = { "==", "!=", "<", "<=", ">", ">=" };
+            const int opCount =
+                (decl && decl->type != PT::Bool) ? 6 : 2;
+            int opIdx = int(tr.op);
+            if (opIdx < 0 || opIdx >= opCount) opIdx = 0;
+            ImGui::SetNextItemWidth(60.0f);
+            if (ImGui::Combo("##op", &opIdx, opNamesAll, opCount)) {
+                tr.op = static_cast<OP>(opIdx);
                 dirty = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110.0f);
+            if (decl && decl->type == PT::Float) {
+                if (ImGui::DragFloat("##val", &tr.valueFloat, 0.05f)) dirty = true;
+            } else if (decl && decl->type == PT::Int) {
+                if (ImGui::DragInt("##val", &tr.valueInt)) dirty = true;
+            } else {
+                bool draft = tr.valueBool;
+                if (ImGui::Checkbox("##val", &draft)) {
+                    tr.valueBool = draft;
+                    dirty = true;
+                }
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("Up") && i > 0) moveTrUp = i;
@@ -1261,9 +1352,9 @@ private:
         }
         if (ImGui::Button("+ Transition") && !ctrl->states.empty()) {
             SceneEditor::AnimatorTransition t;
-            t.fromIdx = -1;
-            t.toIdx = 0;
-            t.expected = true;
+            t.fromIdx   = -1;
+            t.toIdx     = 0;
+            t.valueBool = true;
             ctrl->transitions.push_back(std::move(t));
             dirty = true;
         }
@@ -2859,20 +2950,41 @@ private:
                 } else {
                     ImGui::TextDisabled("Current state: (uninitialised)");
                 }
-                // Parameter toggles. The animator backs each toggle
-                // with paramValues[name]; missing entries fall back
-                // to the controller's declared default so a fresh
-                // animator still picks up the right starting state.
+                // Parameter controls. Per-type widget; missing live
+                // entries fall back to the controller's declared
+                // defaults so a fresh animator still starts from a
+                // known position.
                 if (!ctrl->parameters.empty()) {
                     ImGui::Text("Parameters");
+                    using PT = SceneEditor::AnimatorParameter::Type;
                     for (const auto& p : ctrl->parameters) {
-                        bool draft = p.defaultValue;
-                        auto it = an.paramValues.find(p.name);
-                        if (it != an.paramValues.end()) draft = it->second;
-                        if (ImGui::Checkbox(p.name.c_str(), &draft)) {
-                            UndoSnapshot();
-                            an.paramValues[p.name] = draft;
-                            changed = true;
+                        if (p.type == PT::Float) {
+                            float v = p.defaultFloat;
+                            auto it = an.paramFloats.find(p.name);
+                            if (it != an.paramFloats.end()) v = it->second;
+                            if (ImGui::DragFloat(p.name.c_str(), &v, 0.05f)) {
+                                UndoSnapshot();
+                                an.paramFloats[p.name] = v;
+                                changed = true;
+                            }
+                        } else if (p.type == PT::Int) {
+                            int v = p.defaultInt;
+                            auto it = an.paramInts.find(p.name);
+                            if (it != an.paramInts.end()) v = it->second;
+                            if (ImGui::DragInt(p.name.c_str(), &v)) {
+                                UndoSnapshot();
+                                an.paramInts[p.name] = v;
+                                changed = true;
+                            }
+                        } else {
+                            bool draft = p.defaultBool;
+                            auto it = an.paramBools.find(p.name);
+                            if (it != an.paramBools.end()) draft = it->second;
+                            if (ImGui::Checkbox(p.name.c_str(), &draft)) {
+                                UndoSnapshot();
+                                an.paramBools[p.name] = draft;
+                                changed = true;
+                            }
                         }
                     }
                 }

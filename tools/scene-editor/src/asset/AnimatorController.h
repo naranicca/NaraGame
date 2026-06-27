@@ -23,23 +23,30 @@ struct AnimatorState {
     float       nodeY = 0.0f;
 };
 
-// Bool parameter declared by the controller. AnimatorComponent stores
-// the live value at runtime; transitions read it to decide whether to
-// fire. M5c4 ships bool-only parameters; the JSON schema reserves
-// space for float / int / trigger to land later.
+// Parameter declared by the controller. AnimatorComponent stores the
+// live value at runtime in a type-matched map; transitions read it +
+// compare against their own per-type value to decide whether to fire.
 struct AnimatorParameter {
+    enum class Type { Bool, Float, Int };
     std::string name;
-    bool        defaultValue = false;
+    Type        type         = Type::Bool;
+    bool        defaultBool  = false;
+    float       defaultFloat = 0.0f;
+    int         defaultInt   = 0;
 };
 
 // Edge in the state machine. fromIdx == -1 means "any state" (i.e.
 // a global transition that fires regardless of where you currently
 // are). Transitions are checked in declaration order each frame.
 struct AnimatorTransition {
-    int         fromIdx  = -1;
-    int         toIdx    =  0;
+    enum class Op { Equals, NotEqual, Less, LessEqual, Greater, GreaterEqual };
+    int         fromIdx    = -1;
+    int         toIdx      =  0;
     std::string param;
-    bool        expected = true;
+    Op          op         = Op::Equals;
+    bool        valueBool  = true;
+    float       valueFloat = 0.0f;
+    int         valueInt   = 0;
 };
 
 // .ncontroller asset: a small animation state machine. The runtime
