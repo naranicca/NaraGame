@@ -46,6 +46,7 @@
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 // Forward-declared by imgui_impl_win32.h with C++ linkage. We wrap it
@@ -2082,24 +2083,77 @@ private:
                     static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                         tex->GetNativeView()));
                 ImGui::Image(texId, imgSize);
-                if (curFr) {
-                    // Look up the sub-sprite rect via the texture's
-                    // spriteSheet so the highlight tracks whichever
-                    // slice the user picked.
-                    if (const auto* te = m_assetDb.FindByGuid(an->texture)) {
-                        SceneEditor::TextureImportSettings imp;
-                        imp.FromJson(te->importSettings);
-                        for (const auto& s : imp.spriteSheet.sprites) {
-                            if (s.name != curFr->sprite) continue;
-                            const ImVec2 a{imgMin.x + s.x * scale,
-                                           imgMin.y + s.y * scale};
-                            const ImVec2 b{imgMin.x + (s.x + s.w) * scale,
-                                           imgMin.y + (s.y + s.h) * scale};
-                            ImGui::GetWindowDrawList()->AddRect(
-                                a, b, IM_COL32(255, 220, 60, 255),
-                                0.0f, 0, 2.0f);
-                            break;
+                // The same TextureImportSettings powers both the
+                // current-frame highlight and the per-event marker
+                // dots below, so load it once.
+                SceneEditor::TextureImportSettings imp;
+                bool haveImp = false;
+                if (const auto* te = m_assetDb.FindByGuid(an->texture)) {
+                    imp.FromJson(te->importSettings);
+                    haveImp = !imp.spriteSheet.sprites.empty();
+                }
+                ImDrawList* pdl = ImGui::GetWindowDrawList();
+                auto findRect = [&](const std::string& name,
+                                    ImVec2& a, ImVec2& b) {
+                    for (const auto& s : imp.spriteSheet.sprites) {
+                        if (s.name != name) continue;
+                        a = ImVec2{imgMin.x + s.x * scale,
+                                   imgMin.y + s.y * scale};
+                        b = ImVec2{imgMin.x + (s.x + s.w) * scale,
+                                   imgMin.y + (s.y + s.h) * scale};
+                        return true;
+                    }
+                    return false;
+                };
+                if (curFr && haveImp) {
+                    ImVec2 a, b;
+                    if (findRect(curFr->sprite, a, b)) {
+                        pdl->AddRect(a, b, IM_COL32(255, 220, 60, 255),
+                                     0.0f, 0, 2.0f);
+                    }
+                }
+                // Event markers: one dot per event in the top-right
+                // corner of the sub-rect that fires the event.
+                // Multiple events on the same frame stack downward so
+                // every dot stays visible.
+                if (haveImp && !an->events.empty() && !an->frames.empty()) {
+                    std::unordered_map<std::string, int> perSpriteCount;
+                    for (size_t ei = 0; ei < an->events.size(); ++ei) {
+                        const auto& ev = an->events[ei];
+                        // Locate the frame the event time falls into.
+                        float acc = 0.0f;
+                        int   frameIdx = -1;
+                        for (size_t fi = 0; fi < an->frames.size(); ++fi) {
+                            const float next = acc + an->frames[fi].duration;
+                            if (ev.time >= acc && ev.time < next) {
+                                frameIdx = int(fi);
+                                break;
+                            }
+                            acc = next;
                         }
+                        if (frameIdx < 0) continue;
+                        const std::string& fs =
+                            an->frames[size_t(frameIdx)].sprite;
+                        ImVec2 a, b;
+                        if (!findRect(fs, a, b)) continue;
+                        const float r       = 5.0f;
+                        const int   stackI  = perSpriteCount[fs]++;
+                        const ImVec2 c{b.x - r - 3.0f,
+                                       a.y + r + 3.0f +
+                                           stackI * (r * 2.0f + 1.0f)};
+                        // Skip dots that would land outside the
+                        // sub-rect, so a crowded sprite doesn't get
+                        // a column of dots dangling underneath.
+                        if (c.y - r > b.y) continue;
+                        const bool isSel =
+                            (int(ei) == m_animEditorSelEvent);
+                        const ImU32 fillCol = isSel
+                            ? IM_COL32(255, 220, 60, 255)
+                            : IM_COL32(150, 200, 255, 220);
+                        pdl->AddCircleFilled(c, r, fillCol);
+                        pdl->AddCircle(c, r,
+                                       IM_COL32(20, 20, 30, 255),
+                                       0, 1.5f);
                     }
                 }
             }
