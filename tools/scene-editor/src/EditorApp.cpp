@@ -1772,10 +1772,15 @@ private:
         }
         const ResolvedSprite rs = Resolve(spr, tex, imp);
 
-        // Sliced takes a separate draw path -- nine sub-quads with their
-        // own UV ranges. Simple keeps the original single AddImage call.
+        // Sliced + Tiled both take a separate 9-zone draw path. Sliced
+        // stretches the edges + centre; Tiled repeats them. Simple
+        // keeps the original single AddImage call below.
         if (spr.drawMode == SceneEditor::SpriteDrawMode::Sliced) {
             DrawSlicedSpriteEntity(dl, e, spr, tex, imp, rs, c, selected);
+            return;
+        }
+        if (spr.drawMode == SceneEditor::SpriteDrawMode::Tiled) {
+            DrawTiledSpriteEntity(dl, e, spr, tex, imp, rs, c, selected);
             return;
         }
 
@@ -1894,6 +1899,150 @@ private:
                 const ImVec2 uvMin{us[i],     vs[srcRow]};
                 const ImVec2 uvMax{us[i + 1], vs[srcRow + 1]};
                 dl->AddImage(texId, pMin, pMax, uvMin, uvMax, tint);
+            }
+        }
+
+        // Selection outline + label.
+        const ImVec2 a{c.x + worldLeft  * zoom, c.y - worldTop    * zoom};
+        const ImVec2 b{c.x + worldRight * zoom, c.y - worldBottom * zoom};
+        if (selected) {
+            dl->AddRect(a, b, IM_COL32(255, 220, 60, 255), 0.0f, 0, 2.0f);
+        }
+        dl->AddText(ImVec2{a.x, b.y + 2.0f},
+                    IM_COL32(220, 220, 220, 255),
+                    e.name.c_str());
+    }
+
+    // Tile a source pixel rect across a world-space destination rect.
+    // `tileX` / `tileY` decide whether each axis repeats (true) or
+    // stretches the source span over the dest band (false). Partial
+    // tiles at the trailing edge clip the UV span so the cut tile shows
+    // the leading portion of the source (matching the seam pattern of
+    // every other tile).
+    void TileQuad(ImDrawList* dl, const ImVec2& c, ImTextureID texId,
+                  int srcX, int srcY, int srcW, int srcH,
+                  float worldL, float worldR, float worldT, float worldB,
+                  float texW, float texH, float ppu, float zoom,
+                  bool tileX, bool tileY, ImU32 tint) const {
+        if (worldR <= worldL || worldT <= worldB) return;
+        if (srcW <= 0 || srcH <= 0) return;
+        const float tileWorldW = float(srcW) / ppu;
+        const float tileWorldH = float(srcH) / ppu;
+        const float u0Base   = float(srcX)         / texW;
+        const float v0Base   = float(srcY)         / texH;
+        const float u1Full   = float(srcX + srcW)  / texW;
+        const float v1Full   = float(srcY + srcH)  / texH;
+
+        // Build the X / Y span lists. Each span is (worldA, worldB,
+        // fracOfSource) where fracOfSource is the portion of the
+        // source tile covered (1.0 for full, <1 for trailing partials).
+        struct Span { float a; float b; float frac; };
+        std::vector<Span> xs, ys;
+        if (tileX) {
+            for (float x = worldL; x < worldR; ) {
+                const float next = std::min(x + tileWorldW, worldR);
+                xs.push_back({x, next, (next - x) / tileWorldW});
+                x = next;
+            }
+        } else {
+            xs.push_back({worldL, worldR, 1.0f});
+        }
+        if (tileY) {
+            // Y-up: walk top-down from worldT to worldB.
+            for (float y = worldT; y > worldB; ) {
+                const float next = std::max(y - tileWorldH, worldB);
+                ys.push_back({next, y, (y - next) / tileWorldH});
+                y = next;
+            }
+        } else {
+            ys.push_back({worldB, worldT, 1.0f});
+        }
+
+        for (const Span& yspan : ys) {
+            for (const Span& xspan : xs) {
+                const float u1 = tileX
+                    ? (float(srcX) + float(srcW) * xspan.frac) / texW
+                    : u1Full;
+                const float v1 = tileY
+                    ? (float(srcY) + float(srcH) * yspan.frac) / texH
+                    : v1Full;
+                const ImVec2 pMin{c.x + xspan.a * zoom, c.y - yspan.b * zoom};
+                const ImVec2 pMax{c.x + xspan.b * zoom, c.y - yspan.a * zoom};
+                dl->AddImage(texId, pMin, pMax,
+                             ImVec2{u0Base, v0Base},
+                             ImVec2{u1, v1}, tint);
+            }
+        }
+    }
+
+    void DrawTiledSpriteEntity(ImDrawList* dl,
+                               const SceneEditor::Entity& e,
+                               const SceneEditor::SpriteRendererComponent& spr,
+                               const NaraGame::RHITexture* tex,
+                               const SceneEditor::TextureImportSettings& imp,
+                               const ResolvedSprite& rs,
+                               const ImVec2& c, bool selected) {
+        // 9-zone split identical to Sliced; the difference is that
+        // edges + centre tile their source instead of stretching it.
+        // border = 0 collapses every corner / edge to zero size so the
+        // single centre zone tiles the whole texture across the dest.
+        const float ppu = imp.pixelsPerUnit;
+        const float bLw = float(rs.borderL) / ppu;
+        const float bRw = float(rs.borderR) / ppu;
+        const float bTw = float(rs.borderT) / ppu;
+        const float bBw = float(rs.borderB) / ppu;
+        const float totW = std::max(spr.size.x, bLw + bRw);
+        const float totH = std::max(spr.size.y, bTw + bBw);
+        const float worldLeft   = -rs.pivot.x        * totW;
+        const float worldRight  = (1.0f - rs.pivot.x) * totW;
+        const float worldBottom = -rs.pivot.y        * totH;
+        const float worldTop    = (1.0f - rs.pivot.y) * totH;
+
+        // 4 world X / Y boundaries (matches DrawSlicedSpriteEntity).
+        const float xs[4] = { worldLeft, worldLeft + bLw,
+                              worldRight - bRw, worldRight };
+        const float ys[4] = { worldBottom, worldBottom + bBw,
+                              worldTop - bTw, worldTop };
+
+        // Inner pixel span of the source rect (corners not included).
+        const int innerW = std::max(0, rs.srcW - rs.borderL - rs.borderR);
+        const int innerH = std::max(0, rs.srcH - rs.borderT - rs.borderB);
+
+        const float texW = float(tex->Width());
+        const float texH = float(tex->Height());
+        const float zoom = m_viewCam.zoom;
+        const ImU32 tint = ColorToImU32(spr.color);
+        const ImTextureID texId =
+            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                tex->GetNativeView()));
+
+        // Helper to pick the source rect for (column i, row j) in the
+        // 3x3 split. Row 0 (world bottom) -> source row 2 (texture top
+        // is small Y, so source bottom = srcY + srcH - bB).
+        auto SrcRect = [&](int i, int j, int& sx, int& sy,
+                                   int& sw, int& sh) {
+            const int srcRow = 2 - j;   // world row -> source row
+            // X
+            if (i == 0)      { sx = rs.srcX;                    sw = rs.borderL; }
+            else if (i == 1) { sx = rs.srcX + rs.borderL;       sw = innerW;     }
+            else             { sx = rs.srcX + rs.srcW - rs.borderR; sw = rs.borderR; }
+            // Y (srcRow 0 = top of texture)
+            if (srcRow == 0)      { sy = rs.srcY;                    sh = rs.borderT; }
+            else if (srcRow == 1) { sy = rs.srcY + rs.borderT;       sh = innerH;     }
+            else                  { sy = rs.srcY + rs.srcH - rs.borderB; sh = rs.borderB; }
+        };
+
+        for (int j = 0; j < 3; ++j) {
+            for (int i = 0; i < 3; ++i) {
+                if (xs[i + 1] <= xs[i] || ys[j + 1] <= ys[j]) continue;
+                int sx, sy, sw, sh;
+                SrcRect(i, j, sx, sy, sw, sh);
+                if (sw <= 0 || sh <= 0) continue;
+                const bool tileX = (i == 1);   // X tiles inside the middle column
+                const bool tileY = (j == 1);   // Y tiles inside the middle row
+                TileQuad(dl, c, texId, sx, sy, sw, sh,
+                         xs[i], xs[i + 1], ys[j + 1], ys[j],
+                         texW, texH, ppu, zoom, tileX, tileY, tint);
             }
         }
 
