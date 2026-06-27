@@ -283,6 +283,7 @@ public:
         DrawTilesetEditorWindow();
         DrawAutotileEditorWindow();
         DrawAnimationEditorWindow();
+        DrawControllerEditorWindow();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
 
         ImGui::Render();
@@ -683,6 +684,319 @@ private:
         m_spriteEditorAsset    = guid;
         m_spriteEditorOpen     = true;
         m_spriteEditorActivate = true;
+    }
+
+    void OpenControllerEditor(const SceneEditor::AssetGuid& guid) {
+        m_controllerEditorAsset    = guid;
+        m_controllerEditorOpen     = true;
+        m_controllerEditorActivate = true;
+    }
+
+    // AnimatorController Editor. Three sections: States, Parameters,
+    // Transitions. Auto-saves to the .ncontroller file on every edit.
+    void DrawControllerEditorWindow() {
+        if (!m_controllerEditorOpen) return;
+        if (m_controllerEditorActivate) {
+            ImGui::SetNextWindowSize(ImVec2(820, 640), ImGuiCond_Appearing);
+            ImGui::SetNextWindowFocus();
+            m_controllerEditorActivate = false;
+        }
+        if (!ImGui::Begin("Animator Controller", &m_controllerEditorOpen)) {
+            ImGui::End();
+            return;
+        }
+        const SceneEditor::AssetEntry* entry =
+            m_assetDb.FindByGuid(m_controllerEditorAsset);
+        if (!entry || entry->typeName != "AnimatorController") {
+            ImGui::TextDisabled("Double-click a .ncontroller in the "
+                                "Project panel to edit it.");
+            ImGui::End();
+            return;
+        }
+        SceneEditor::AnimatorControllerAsset* ctrl =
+            m_assetDb.GetAnimatorController(m_controllerEditorAsset);
+        if (!ctrl) {
+            ImGui::TextDisabled("Could not load '%s'.",
+                                entry->relPath.c_str());
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("%s", entry->relPath.c_str());
+        bool dirty = false;
+
+        // Default state combo. Falls back to "0 -- none" hint when
+        // there are no states yet so the user knows what to do first.
+        if (!ctrl->states.empty()) {
+            const char* curName = (ctrl->defaultState >= 0 &&
+                                   ctrl->defaultState < int(ctrl->states.size()))
+                ? ctrl->states[size_t(ctrl->defaultState)].name.c_str()
+                : "(invalid)";
+            if (ImGui::BeginCombo("Default State", curName)) {
+                for (int i = 0; i < int(ctrl->states.size()); ++i) {
+                    const bool sel = (i == ctrl->defaultState);
+                    if (ImGui::Selectable(ctrl->states[size_t(i)].name.c_str(),
+                                          sel)) {
+                        ctrl->defaultState = i;
+                        dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        } else {
+            ImGui::TextDisabled("No states yet -- add one below.");
+        }
+
+        // -----------------------------------------------------------
+        // States
+        // -----------------------------------------------------------
+        ImGui::Separator();
+        ImGui::Text("States (%zu)", ctrl->states.size());
+        int removeStateAt = -1;
+        int moveStateUp   = -1;
+        int moveStateDown = -1;
+        for (int i = 0; i < int(ctrl->states.size()); ++i) {
+            SceneEditor::AnimatorState& st = ctrl->states[size_t(i)];
+            ImGui::PushID(i);
+            ImGui::Text("%2d", i);
+            ImGui::SameLine();
+            char nameBuf[64];
+            std::snprintf(nameBuf, sizeof(nameBuf), "%s", st.name.c_str());
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::InputText("##name", nameBuf, sizeof(nameBuf))) {
+                st.name = nameBuf;
+                dirty = true;
+            }
+            ImGui::SameLine();
+            // Animation combo.
+            std::string animLabel = "(none)";
+            if (st.animation.IsValid()) {
+                if (const auto* e = m_assetDb.FindByGuid(st.animation)) {
+                    animLabel = e->relPath;
+                } else {
+                    animLabel = st.animation.ToString();
+                }
+            }
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::BeginCombo("##anim", animLabel.c_str())) {
+                if (ImGui::Selectable("(none)", !st.animation.IsValid())) {
+                    st.animation = SceneEditor::AssetGuid{};
+                    dirty = true;
+                }
+                for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                    if (a.typeName != "Animation") continue;
+                    const bool sel = (a.guid == st.animation);
+                    if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                        st.animation = a.guid;
+                        dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.0f);
+            if (ImGui::DragFloat("##speed", &st.speed, 0.01f,
+                                 -10.0f, 10.0f, "%.2fx")) {
+                dirty = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Up") && i > 0) moveStateUp = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Down") &&
+                i + 1 < int(ctrl->states.size())) moveStateDown = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) removeStateAt = i;
+            ImGui::PopID();
+        }
+        if (moveStateUp > 0) {
+            std::swap(ctrl->states[size_t(moveStateUp)],
+                      ctrl->states[size_t(moveStateUp - 1)]);
+            dirty = true;
+        }
+        if (moveStateDown >= 0) {
+            std::swap(ctrl->states[size_t(moveStateDown)],
+                      ctrl->states[size_t(moveStateDown + 1)]);
+            dirty = true;
+        }
+        if (removeStateAt >= 0) {
+            ctrl->states.erase(ctrl->states.begin() + removeStateAt);
+            // Reindex defaultState + transitions so nothing points at
+            // a hole. Removing the defaultState falls back to 0; any
+            // transition that referenced the removed index gets
+            // dropped to keep the schema consistent.
+            if (ctrl->defaultState == removeStateAt) ctrl->defaultState = 0;
+            else if (ctrl->defaultState > removeStateAt) ctrl->defaultState--;
+            ctrl->transitions.erase(
+                std::remove_if(ctrl->transitions.begin(),
+                               ctrl->transitions.end(),
+                               [&](const auto& t) {
+                                   return t.fromIdx == removeStateAt ||
+                                          t.toIdx   == removeStateAt;
+                               }),
+                ctrl->transitions.end());
+            for (auto& t : ctrl->transitions) {
+                if (t.fromIdx > removeStateAt) t.fromIdx--;
+                if (t.toIdx   > removeStateAt) t.toIdx--;
+            }
+            dirty = true;
+        }
+        if (ImGui::Button("+ State")) {
+            SceneEditor::AnimatorState st;
+            st.name = "State" + std::to_string(ctrl->states.size());
+            ctrl->states.push_back(std::move(st));
+            dirty = true;
+        }
+
+        // -----------------------------------------------------------
+        // Parameters
+        // -----------------------------------------------------------
+        ImGui::Separator();
+        ImGui::Text("Parameters (%zu)", ctrl->parameters.size());
+        int removeParamAt = -1;
+        for (int i = 0; i < int(ctrl->parameters.size()); ++i) {
+            SceneEditor::AnimatorParameter& p = ctrl->parameters[size_t(i)];
+            ImGui::PushID(10000 + i);
+            char nameBuf[64];
+            std::snprintf(nameBuf, sizeof(nameBuf), "%s", p.name.c_str());
+            ImGui::SetNextItemWidth(180.0f);
+            if (ImGui::InputText("##pname", nameBuf, sizeof(nameBuf))) {
+                p.name = nameBuf;
+                dirty = true;
+            }
+            ImGui::SameLine();
+            bool draft = p.defaultValue;
+            if (ImGui::Checkbox("default", &draft)) {
+                p.defaultValue = draft;
+                dirty = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) removeParamAt = i;
+            ImGui::PopID();
+        }
+        if (removeParamAt >= 0) {
+            ctrl->parameters.erase(ctrl->parameters.begin() + removeParamAt);
+            dirty = true;
+        }
+        if (ImGui::Button("+ Param")) {
+            SceneEditor::AnimatorParameter p;
+            p.name = "param" + std::to_string(ctrl->parameters.size());
+            ctrl->parameters.push_back(std::move(p));
+            dirty = true;
+        }
+
+        // -----------------------------------------------------------
+        // Transitions
+        // -----------------------------------------------------------
+        ImGui::Separator();
+        ImGui::Text("Transitions (%zu)", ctrl->transitions.size());
+        int removeTrAt = -1;
+        int moveTrUp   = -1;
+        int moveTrDown = -1;
+        for (int i = 0; i < int(ctrl->transitions.size()); ++i) {
+            SceneEditor::AnimatorTransition& tr = ctrl->transitions[size_t(i)];
+            ImGui::PushID(20000 + i);
+            // From combo: "Any" (-1) + state names.
+            const char* fromLabel = (tr.fromIdx < 0)
+                ? "Any"
+                : (tr.fromIdx < int(ctrl->states.size())
+                    ? ctrl->states[size_t(tr.fromIdx)].name.c_str()
+                    : "(invalid)");
+            ImGui::SetNextItemWidth(120.0f);
+            if (ImGui::BeginCombo("##from", fromLabel)) {
+                if (ImGui::Selectable("Any", tr.fromIdx < 0)) {
+                    tr.fromIdx = -1;
+                    dirty = true;
+                }
+                for (int s = 0; s < int(ctrl->states.size()); ++s) {
+                    const bool sel = (tr.fromIdx == s);
+                    if (ImGui::Selectable(ctrl->states[size_t(s)].name.c_str(),
+                                          sel)) {
+                        tr.fromIdx = s;
+                        dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted("->");
+            ImGui::SameLine();
+            const char* toLabel =
+                (tr.toIdx >= 0 && tr.toIdx < int(ctrl->states.size()))
+                ? ctrl->states[size_t(tr.toIdx)].name.c_str()
+                : "(invalid)";
+            ImGui::SetNextItemWidth(120.0f);
+            if (ImGui::BeginCombo("##to", toLabel)) {
+                for (int s = 0; s < int(ctrl->states.size()); ++s) {
+                    const bool sel = (tr.toIdx == s);
+                    if (ImGui::Selectable(ctrl->states[size_t(s)].name.c_str(),
+                                          sel)) {
+                        tr.toIdx = s;
+                        dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted("when");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(140.0f);
+            const char* paramLabel = tr.param.empty() ? "(none)"
+                                                     : tr.param.c_str();
+            if (ImGui::BeginCombo("##param", paramLabel)) {
+                if (ImGui::Selectable("(none)", tr.param.empty())) {
+                    tr.param.clear();
+                    dirty = true;
+                }
+                for (const auto& p : ctrl->parameters) {
+                    const bool sel = (p.name == tr.param);
+                    if (ImGui::Selectable(p.name.c_str(), sel)) {
+                        tr.param = p.name;
+                        dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted("==");
+            ImGui::SameLine();
+            bool expDraft = tr.expected;
+            if (ImGui::Checkbox("##expected", &expDraft)) {
+                tr.expected = expDraft;
+                dirty = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Up") && i > 0) moveTrUp = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Down") &&
+                i + 1 < int(ctrl->transitions.size())) moveTrDown = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) removeTrAt = i;
+            ImGui::PopID();
+        }
+        if (moveTrUp > 0) {
+            std::swap(ctrl->transitions[size_t(moveTrUp)],
+                      ctrl->transitions[size_t(moveTrUp - 1)]);
+            dirty = true;
+        }
+        if (moveTrDown >= 0) {
+            std::swap(ctrl->transitions[size_t(moveTrDown)],
+                      ctrl->transitions[size_t(moveTrDown + 1)]);
+            dirty = true;
+        }
+        if (removeTrAt >= 0) {
+            ctrl->transitions.erase(ctrl->transitions.begin() + removeTrAt);
+            dirty = true;
+        }
+        if (ImGui::Button("+ Transition") && !ctrl->states.empty()) {
+            SceneEditor::AnimatorTransition t;
+            t.fromIdx = -1;
+            t.toIdx = 0;
+            t.expected = true;
+            ctrl->transitions.push_back(std::move(t));
+            dirty = true;
+        }
+
+        if (dirty) m_assetDb.SaveAnimatorController(m_controllerEditorAsset);
+        ImGui::End();
     }
 
     void OpenAnimationEditor(const SceneEditor::AssetGuid& guid) {
@@ -4450,6 +4764,11 @@ private:
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             OpenAnimationEditor(e->guid);
         }
+        if (e && e->typeName == "AnimatorController" &&
+            ImGui::IsItemHovered() &&
+            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            OpenControllerEditor(e->guid);
+        }
         if (e && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             // The 16-byte GUID is the entire payload. Editor drop sites
             // use the type tag to pick what to do with it.
@@ -4566,6 +4885,10 @@ private:
     SceneEditor::AssetGuid m_animEditorAsset;
     float               m_animEditorScrubTime = 0.0f;
     bool                m_animEditorAutoplay  = true;
+    // Animator Controller Editor follows the same pattern.
+    bool                m_controllerEditorOpen     = false;
+    bool                m_controllerEditorActivate = false;
+    SceneEditor::AssetGuid m_controllerEditorAsset;
     int                 m_spriteEditorMode  = 0;    // 0=by size, 1=by count
     int                 m_spriteEditorCellW = 32;
     int                 m_spriteEditorCellH = 32;
