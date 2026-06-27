@@ -1,6 +1,7 @@
 #include "AssetDatabase.h"
 
 #include "../project/Project.h"
+#include "TextureImportSettings.h"
 
 #include <NaraGame/assets/Image.h>
 #include <NaraGame/assets/MiniJson.h>
@@ -93,8 +94,9 @@ NaraGame::RHITexture* AssetDatabase::GetTexture(NaraGame::RHIDevice& device,
         m_textureCache.emplace(guid, nullptr);
         return nullptr;
     }
-    auto tex = NaraGame::CreateTexture(device, img,
-                                       NaraGame::TextureFilter::Linear);
+    TextureImportSettings imp;
+    imp.FromJson(entry->importSettings);
+    auto tex = NaraGame::CreateTexture(device, img, imp.ToRHIFilter());
     if (!tex) return nullptr;
     NaraGame::RHITexture* raw = tex.get();
     m_textureCache.emplace(guid, std::move(tex));
@@ -247,6 +249,24 @@ const AssetEntry* AssetDatabase::FindByPath(const std::string& relPath) const {
     auto it = m_byPath.find(relPath);
     if (it == m_byPath.end()) return nullptr;
     return &m_entries[it->second];
+}
+
+AssetEntry* AssetDatabase::FindByGuidMutable(const AssetGuid& guid) {
+    auto it = m_byGuid.find(guid);
+    if (it == m_byGuid.end()) return nullptr;
+    return &m_entries[it->second];
+}
+
+bool AssetDatabase::SaveMeta(const AssetGuid& guid) const {
+    auto it = m_byGuid.find(guid);
+    if (it == m_byGuid.end()) return false;
+    const AssetEntry& e = m_entries[it->second];
+    const std::string absPath = m_assetsRoot + "/" + e.relPath;
+    return WriteMeta(absPath, e);
+}
+
+void AssetDatabase::EvictTexture(const AssetGuid& guid) {
+    m_textureCache.erase(guid);
 }
 
 std::string AssetDatabase::ClassifyByExtension(const std::string& relPath) {

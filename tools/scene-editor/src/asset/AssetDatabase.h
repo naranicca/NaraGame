@@ -57,8 +57,21 @@ public:
 
     const AssetEntry* FindByGuid(const AssetGuid& guid) const;
     const AssetEntry* FindByPath(const std::string& relPath) const;
+    // Non-const overload so the inspector can mutate importSettings
+    // directly without going through a copy + replace dance.
+    AssetEntry* FindByGuidMutable(const AssetGuid& guid);
 
     const std::string& AssetsRoot() const { return m_assetsRoot; }
+
+    // Write the entry's current importSettings (and type / guid) back
+    // to its `.meta` sidecar. Returns false on I/O failure; the
+    // in-memory entry is unchanged either way.
+    bool SaveMeta(const AssetGuid& guid) const;
+
+    // Drop the cached RHITexture for `guid`. Next GetTexture call
+    // re-uploads from disk -- used after the user flips filterMode in
+    // the inspector so the new sampler kicks in immediately.
+    void EvictTexture(const AssetGuid& guid);
 
     // Lazy texture cache. First call decodes the file from disk via the
     // engine's PNG/JPG path and uploads it as an RHI texture; later

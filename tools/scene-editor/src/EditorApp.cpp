@@ -6,6 +6,7 @@
 // panels on top of the project shell.
 
 #include "asset/AssetDatabase.h"
+#include "asset/TextureImportSettings.h"
 #include "project/Project.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
@@ -538,7 +539,8 @@ private:
         const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(size_t(id)),
                                             flags, "%s", e->name.c_str());
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-            m_selection = id;
+            m_selection     = id;
+            m_selectedAsset = SceneEditor::AssetGuid{};
         }
         // Drop target: a texture dragged onto an entity row spawns the
         // new sprite as a child of this entity.
@@ -584,7 +586,13 @@ private:
         }
         SceneEditor::Entity* e = m_scene.Get(m_selection);
         if (!e) {
-            ImGui::TextDisabled("No entity selected.");
+            // No entity selection -- fall through to the asset
+            // inspector if one is selected in the Project panel.
+            if (m_selectedAsset.IsValid()) {
+                DrawAssetInspector();
+            } else {
+                ImGui::TextDisabled("No selection.");
+            }
             ImGui::End();
             return;
         }
@@ -648,6 +656,82 @@ private:
             DrawSpriteRendererEditor(entity, *s);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
+        }
+    }
+
+    // Asset Inspector: shown when the user clicks a file in the Project
+    // panel and no entity is selected. M2c3 ships the Texture variant;
+    // other asset types fall through to a stub for now.
+    void DrawAssetInspector() {
+        SceneEditor::AssetEntry* entry =
+            m_assetDb.FindByGuidMutable(m_selectedAsset);
+        if (!entry) {
+            ImGui::TextDisabled("Selected asset no longer exists.");
+            return;
+        }
+        ImGui::Text("Asset:  %s", entry->relPath.c_str());
+        ImGui::Text("Type:   %s", entry->typeName.c_str());
+        ImGui::TextDisabled("guid %s", entry->guid.ToString().c_str());
+        ImGui::Separator();
+        if (entry->typeName == "Texture") {
+            DrawTextureImportEditor(*entry);
+        } else {
+            ImGui::TextDisabled("(no import settings editor for %s yet)",
+                                entry->typeName.c_str());
+        }
+    }
+
+    void DrawTextureImportEditor(SceneEditor::AssetEntry& entry) {
+        // Decode the entry's existing importSettings, edit through the
+        // struct form, then write back on any change. Auto-save +
+        // texture-evict so the viewport reflects the new settings in
+        // the very next frame.
+        SceneEditor::TextureImportSettings imp;
+        imp.FromJson(entry.importSettings);
+        const auto before = imp;
+
+        ImGui::DragFloat("Pixels Per Unit", &imp.pixelsPerUnit, 0.5f,
+                         1.0f, 4096.0f, "%.2f");
+        const char* pivotNames[] = { "Center", "TopLeft", "TopRight",
+                                     "BottomLeft", "BottomRight",
+                                     "Custom" };
+        int pivotIdx = int(imp.pivotMode);
+        if (ImGui::Combo("Pivot", &pivotIdx, pivotNames, 6)) {
+            imp.pivotMode = static_cast<
+                SceneEditor::TextureImportSettings::PivotMode>(pivotIdx);
+        }
+        if (imp.pivotMode ==
+            SceneEditor::TextureImportSettings::PivotMode::Custom) {
+            float cp[2] = { imp.customPivot.x, imp.customPivot.y };
+            if (ImGui::DragFloat2("Custom Pivot", cp, 0.01f, 0.0f, 1.0f)) {
+                imp.customPivot = { cp[0], cp[1] };
+            }
+        }
+        const char* filterNames[] = { "Linear", "Point" };
+        int filterIdx = int(imp.filterMode);
+        if (ImGui::Combo("Filter", &filterIdx, filterNames, 2)) {
+            imp.filterMode = static_cast<
+                SceneEditor::TextureImportSettings::Filter>(filterIdx);
+        }
+        const char* wrapNames[] = { "Clamp", "Repeat", "Mirror" };
+        int wrapIdx = int(imp.wrapMode);
+        if (ImGui::Combo("Wrap", &wrapIdx, wrapNames, 3)) {
+            imp.wrapMode = static_cast<
+                SceneEditor::TextureImportSettings::Wrap>(wrapIdx);
+        }
+        ImGui::Checkbox("Alpha is Transparency", &imp.alphaIsTransparency);
+
+        const bool changed = std::memcmp(&imp, &before, sizeof(imp)) != 0;
+        if (changed) {
+            entry.importSettings = imp.ToJson();
+            m_assetDb.SaveMeta(entry.guid);
+            // FilterMode is sampler state baked into the texture object;
+            // evict so the next GetTexture picks up the new setting.
+            // PPU + pivot are read live by DrawSpriteEntity each frame,
+            // no eviction needed.
+            if (imp.filterMode != before.filterMode) {
+                m_assetDb.EvictTexture(entry.guid);
+            }
         }
     }
 
@@ -965,6 +1049,9 @@ private:
                 }
             }
             m_selection = hit;  // empty click clears selection
+            if (hit != SceneEditor::kInvalidEntityId) {
+                m_selectedAsset = SceneEditor::AssetGuid{};
+            }
         }
         // 'F' key frames the selected entity.
         if (hovered && ImGui::IsKeyPressed(ImGuiKey_F) && m_selection) {
@@ -1081,17 +1168,31 @@ private:
             DrawMarkerEntity(dl, e, c, selected);
             return;
         }
-        // Sprite asset import settings (pixels-per-unit, pivot) land in
-        // M3 with the Sprite Editor; for M2c1 we hard-code a sensible
-        // default: 100 px / unit, centred pivot. The world-space size of
-        // the quad is therefore (textureWidth, textureHeight) / 100.
-        constexpr float kDefaultPpu = 100.0f;
-        const float wWorld = float(tex->Width())  / kDefaultPpu;
-        const float hWorld = float(tex->Height()) / kDefaultPpu;
-        const float halfW  = wWorld * 0.5f * m_viewCam.zoom;
-        const float halfH  = hWorld * 0.5f * m_viewCam.zoom;
-        const ImVec2 a{c.x - halfW, c.y - halfH};
-        const ImVec2 b{c.x + halfW, c.y + halfH};
+        // Resolve the asset's import settings (pixels-per-unit + pivot)
+        // so the quad reflects whatever the user picked in the asset
+        // inspector. Defaults are 100 px/u + centred pivot, matching
+        // the previous hard-coded values.
+        SceneEditor::TextureImportSettings imp;
+        if (const auto* entry = m_assetDb.FindByGuid(spr.sprite)) {
+            imp.FromJson(entry->importSettings);
+        }
+        const float wWorld = float(tex->Width())  / imp.pixelsPerUnit;
+        const float hWorld = float(tex->Height()) / imp.pixelsPerUnit;
+        const NaraGame::Vec2 pivot = imp.ResolvedPivot();
+        // World-space rect anchored on the entity's transform. The pivot
+        // chooses which texel sits on the transform position: (0.5,0.5)
+        // centres it, (0,0) puts the bottom-left of the sprite there,
+        // and so on.
+        const float worldLeft   = -pivot.x        * wWorld;
+        const float worldRight  = (1.0f - pivot.x) * wWorld;
+        const float worldBottom = -pivot.y        * hWorld;
+        const float worldTop    = (1.0f - pivot.y) * hWorld;
+        // Convert to screen pixels (Y-up world -> Y-down screen so
+        // worldTop maps to the smaller screen Y).
+        const ImVec2 a{c.x + worldLeft  * m_viewCam.zoom,
+                       c.y - worldTop   * m_viewCam.zoom};
+        const ImVec2 b{c.x + worldRight * m_viewCam.zoom,
+                       c.y - worldBottom* m_viewCam.zoom};
 
         // UV flip via swapped corners. Sprite tint multiplies the texture.
         const ImVec2 uv0{spr.flipX ? 1.0f : 0.0f,
@@ -1180,7 +1281,10 @@ private:
                           ImGuiTreeNodeFlags_SpanAvailWidth |
                           (selected ? ImGuiTreeNodeFlags_Selected : 0),
                           "%s", node.name.c_str());
-        if (ImGui::IsItemClicked() && e) m_selectedAsset = e->guid;
+        if (ImGui::IsItemClicked() && e) {
+            m_selectedAsset = e->guid;
+            m_selection     = SceneEditor::kInvalidEntityId;
+        }
         if (e && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             // The 16-byte GUID is the entire payload. Editor drop sites
             // use the type tag to pick what to do with it.
