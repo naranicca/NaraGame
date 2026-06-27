@@ -279,6 +279,7 @@ public:
         DrawSpriteEditorWindow();
         DrawTilesetEditorWindow();
         DrawAutotileEditorWindow();
+        DrawAnimationEditorWindow();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
 
         ImGui::Render();
@@ -587,6 +588,214 @@ private:
         m_spriteEditorAsset    = guid;
         m_spriteEditorOpen     = true;
         m_spriteEditorActivate = true;
+    }
+
+    void OpenAnimationEditor(const SceneEditor::AssetGuid& guid) {
+        m_animEditorAsset      = guid;
+        m_animEditorOpen       = true;
+        m_animEditorActivate   = true;
+        m_animEditorScrubTime  = 0.0f;
+    }
+
+    // Animation Editor window. Top: texture + loop. Middle: frame
+    // list with per-row sub-sprite Combo + duration + reorder /
+    // remove. Bottom: scrubber that samples the current frame and
+    // outlines that frame's source rect on the texture preview.
+    void DrawAnimationEditorWindow() {
+        if (!m_animEditorOpen) return;
+        if (m_animEditorActivate) {
+            ImGui::SetNextWindowSize(ImVec2(820, 620), ImGuiCond_Appearing);
+            ImGui::SetNextWindowFocus();
+            m_animEditorActivate = false;
+        }
+        if (!ImGui::Begin("Animation Editor", &m_animEditorOpen)) {
+            ImGui::End();
+            return;
+        }
+        const SceneEditor::AssetEntry* entry =
+            m_assetDb.FindByGuid(m_animEditorAsset);
+        if (!entry || entry->typeName != "Animation") {
+            ImGui::TextDisabled("Double-click a .nanim in the Project "
+                                "panel to edit it.");
+            ImGui::End();
+            return;
+        }
+        SceneEditor::AnimationAsset* an =
+            m_assetDb.GetAnimation(m_animEditorAsset);
+        if (!an) {
+            ImGui::TextDisabled("Could not load '%s'.",
+                                entry->relPath.c_str());
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("%s", entry->relPath.c_str());
+        bool dirty = false;
+
+        // Texture combo.
+        std::string current = "(none)";
+        if (an->texture.IsValid()) {
+            if (const auto* te = m_assetDb.FindByGuid(an->texture)) {
+                current = te->relPath;
+            } else {
+                current = an->texture.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Texture", current.c_str())) {
+            if (ImGui::Selectable("(none)", !an->texture.IsValid())) {
+                an->texture = SceneEditor::AssetGuid{};
+                dirty = true;
+            }
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "Texture") continue;
+                const bool sel = (a.guid == an->texture);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    an->texture = a.guid;
+                    dirty = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::Checkbox("Loop", &an->loop)) dirty = true;
+
+        // Pre-resolve the texture's sub-sprite name list so the
+        // per-frame Combo can offer it without re-parsing every row.
+        std::vector<std::string> subNames;
+        if (const auto* te = m_assetDb.FindByGuid(an->texture)) {
+            SceneEditor::TextureImportSettings imp;
+            imp.FromJson(te->importSettings);
+            for (const auto& s : imp.spriteSheet.sprites) {
+                subNames.push_back(s.name);
+            }
+        }
+        if (subNames.empty()) {
+            ImGui::TextDisabled("Texture has no Multiple-mode sprite "
+                                "sheet -- open the Sprite Editor on "
+                                "the texture to slice it first.");
+        }
+
+        ImGui::Separator();
+        // Frame list.
+        ImGui::Text("Frames (%zu)", an->frames.size());
+        int  removeAt = -1;
+        int  moveUp   = -1;
+        int  moveDown = -1;
+        for (size_t i = 0; i < an->frames.size(); ++i) {
+            SceneEditor::AnimationFrame& fr = an->frames[i];
+            ImGui::PushID(int(i));
+            ImGui::Text("%2zu", i);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(180.0f);
+            const char* preview = fr.sprite.empty() ? "(none)"
+                                                    : fr.sprite.c_str();
+            if (ImGui::BeginCombo("##sprite", preview)) {
+                for (const std::string& n : subNames) {
+                    const bool sel = (n == fr.sprite);
+                    if (ImGui::Selectable(n.c_str(), sel)) {
+                        fr.sprite = n;
+                        dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100.0f);
+            if (ImGui::DragFloat("##dur", &fr.duration, 0.01f,
+                                 0.01f, 60.0f, "%.3fs")) {
+                dirty = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Up") && i > 0)
+                moveUp = int(i);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Down") && i + 1 < an->frames.size())
+                moveDown = int(i);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) removeAt = int(i);
+            ImGui::PopID();
+        }
+        if (moveUp > 0) {
+            std::swap(an->frames[size_t(moveUp)],
+                      an->frames[size_t(moveUp - 1)]);
+            dirty = true;
+        }
+        if (moveDown >= 0) {
+            std::swap(an->frames[size_t(moveDown)],
+                      an->frames[size_t(moveDown + 1)]);
+            dirty = true;
+        }
+        if (removeAt >= 0) {
+            an->frames.erase(an->frames.begin() + removeAt);
+            dirty = true;
+        }
+        if (ImGui::Button("+ Frame")) {
+            SceneEditor::AnimationFrame nf;
+            nf.sprite = subNames.empty() ? std::string{} : subNames.front();
+            nf.duration = 0.1f;
+            an->frames.push_back(std::move(nf));
+            dirty = true;
+        }
+        ImGui::Separator();
+
+        // Scrubber + autoplay. Editor-local so opening the editor
+        // never mutates the live scene's AnimatorComponent.
+        const float total = an->TotalDuration();
+        if (m_animEditorAutoplay && total > 0.0f) {
+            m_animEditorScrubTime += ImGui::GetIO().DeltaTime;
+            if (m_animEditorScrubTime > total) {
+                m_animEditorScrubTime = an->loop
+                    ? std::fmod(m_animEditorScrubTime, total)
+                    : total;
+            }
+        }
+        ImGui::SliderFloat("Time", &m_animEditorScrubTime, 0.0f,
+                           std::max(0.01f, total), "%.3f s");
+        ImGui::SameLine();
+        ImGui::Checkbox("Autoplay", &m_animEditorAutoplay);
+        const SceneEditor::AnimationFrame* curFr =
+            an->Sample(m_animEditorScrubTime);
+        ImGui::TextDisabled("Current frame: %s",
+                            curFr ? curFr->sprite.c_str() : "(none)");
+
+        // Texture preview with current frame outlined.
+        if (an->texture.IsValid()) {
+            if (NaraGame::RHITexture* tex =
+                    m_assetDb.GetTexture(GetDevice(), an->texture)) {
+                const ImVec2 avail = ImGui::GetContentRegionAvail();
+                const float texW = float(tex->Width());
+                const float texH = float(tex->Height());
+                float scale = std::min(avail.x, std::min(280.0f, avail.y))
+                              / std::max(texW, texH);
+                if (scale <= 0.0f) scale = 1.0f;
+                const ImVec2 imgSize{texW * scale, texH * scale};
+                const ImVec2 imgMin = ImGui::GetCursorScreenPos();
+                const ImTextureID texId =
+                    static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                        tex->GetNativeView()));
+                ImGui::Image(texId, imgSize);
+                if (curFr) {
+                    // Look up the sub-sprite rect via the texture's
+                    // spriteSheet so the highlight tracks whichever
+                    // slice the user picked.
+                    if (const auto* te = m_assetDb.FindByGuid(an->texture)) {
+                        SceneEditor::TextureImportSettings imp;
+                        imp.FromJson(te->importSettings);
+                        for (const auto& s : imp.spriteSheet.sprites) {
+                            if (s.name != curFr->sprite) continue;
+                            const ImVec2 a{imgMin.x + s.x * scale,
+                                           imgMin.y + s.y * scale};
+                            const ImVec2 b{imgMin.x + (s.x + s.w) * scale,
+                                           imgMin.y + (s.y + s.h) * scale};
+                            ImGui::GetWindowDrawList()->AddRect(
+                                a, b, IM_COL32(255, 220, 60, 255),
+                                0.0f, 0, 2.0f);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (dirty) m_assetDb.SaveAnimation(m_animEditorAsset);
+        ImGui::End();
     }
 
     void OpenAutotileEditor(const SceneEditor::AssetGuid& guid) {
@@ -4081,6 +4290,11 @@ private:
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             OpenAutotileEditor(e->guid);
         }
+        if (e && e->typeName == "Animation" &&
+            ImGui::IsItemHovered() &&
+            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            OpenAnimationEditor(e->guid);
+        }
         if (e && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             // The 16-byte GUID is the entire payload. Editor drop sites
             // use the type tag to pick what to do with it.
@@ -4189,6 +4403,14 @@ private:
     bool                m_autotileEditorActivate = false;
     SceneEditor::AssetGuid m_autotileEditorAsset;
     int                 m_autotileEditorSlot = 0;
+    // Animation Editor: editor-local scrubber + autoplay drive the
+    // preview without touching the AnimatorComponent's playback state,
+    // so opening the .nanim in the editor never mutates the live scene.
+    bool                m_animEditorOpen     = false;
+    bool                m_animEditorActivate = false;
+    SceneEditor::AssetGuid m_animEditorAsset;
+    float               m_animEditorScrubTime = 0.0f;
+    bool                m_animEditorAutoplay  = true;
     int                 m_spriteEditorMode  = 0;    // 0=by size, 1=by count
     int                 m_spriteEditorCellW = 32;
     int                 m_spriteEditorCellH = 32;
