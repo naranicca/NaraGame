@@ -1803,6 +1803,7 @@ private:
         m_animEditorOpen       = true;
         m_animEditorActivate   = true;
         m_animEditorScrubTime  = 0.0f;
+        m_animEditorSelEvent   = -1;
     }
 
     // Animation Editor window. Top: texture + loop. Middle: frame
@@ -1950,9 +1951,25 @@ private:
         ImGui::Separator();
         ImGui::Text("Events (%zu)", an->events.size());
         int  removeEvAt = -1;
+        if (m_animEditorSelEvent >= int(an->events.size())) {
+            m_animEditorSelEvent = -1;
+        }
         for (size_t i = 0; i < an->events.size(); ++i) {
             SceneEditor::AnimationEvent& ev = an->events[i];
             ImGui::PushID(int(60000 + i));
+            const bool selRow = (m_animEditorSelEvent == int(i));
+            // Jump-to button. Selects the row + parks the scrubber on
+            // the event's time, paused, so the preview locks onto
+            // whichever frame the user is investigating.
+            if (selRow) ImGui::PushStyleColor(ImGuiCol_Button,
+                                              IM_COL32(220, 180, 70, 255));
+            if (ImGui::SmallButton("->")) {
+                m_animEditorSelEvent  = int(i);
+                m_animEditorScrubTime = ev.time;
+                m_animEditorAutoplay  = false;
+            }
+            if (selRow) ImGui::PopStyleColor();
+            ImGui::SameLine();
             ImGui::SetNextItemWidth(85.0f);
             if (ImGui::DragFloat("##evt", &ev.time, 0.01f,
                                   0.0f, 0.0f, "%.3fs")) dirty = true;
@@ -2012,6 +2029,36 @@ private:
         }
         ImGui::SliderFloat("Time", &m_animEditorScrubTime, 0.0f,
                            std::max(0.01f, total), "%.3f s");
+        // Event markers under the slider: a small triangle per
+        // declared event, brighter on the selected one. Helps the
+        // user see which events live near the current scrub cursor
+        // without scanning the row list.
+        if (!an->events.empty() && total > 0.0f) {
+            ImDrawList* tdl = ImGui::GetWindowDrawList();
+            const ImVec2 sMin = ImGui::GetItemRectMin();
+            const ImVec2 sMax = ImGui::GetItemRectMax();
+            const float  sliderW = sMax.x - sMin.x;
+            const float  markY   = sMax.y + 2.0f;
+            for (size_t i = 0; i < an->events.size(); ++i) {
+                const auto& ev = an->events[i];
+                const float t  = std::clamp(ev.time, 0.0f, total);
+                const float x  = sMin.x + (t / total) * sliderW;
+                const bool sel = (m_animEditorSelEvent == int(i));
+                const ImU32 col = sel
+                    ? IM_COL32(255, 220, 60, 255)
+                    : IM_COL32(170, 180, 200, 200);
+                const float h = sel ? 9.0f : 7.0f;
+                const float w = sel ? 5.0f : 4.0f;
+                tdl->AddTriangleFilled(
+                    ImVec2(x - w, markY + h),
+                    ImVec2(x + w, markY + h),
+                    ImVec2(x,     markY),
+                    col);
+            }
+            // Reserve the layout space the markers visually use so
+            // following widgets sit below them.
+            ImGui::Dummy(ImVec2(0, 12));
+        }
         ImGui::SameLine();
         ImGui::Checkbox("Autoplay", &m_animEditorAutoplay);
         const SceneEditor::AnimationFrame* curFr =
@@ -5786,6 +5833,10 @@ private:
     SceneEditor::AssetGuid m_animEditorAsset;
     float               m_animEditorScrubTime = 0.0f;
     bool                m_animEditorAutoplay  = true;
+    // Index of the event the user picked via the row "->" button.
+    // The scrubber marker and the matching row jump to its time when
+    // clicked; -1 = no event selected.
+    int                 m_animEditorSelEvent  = -1;
     // Animator Controller Editor follows the same pattern.
     bool                m_controllerEditorOpen     = false;
     bool                m_controllerEditorActivate = false;
