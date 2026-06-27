@@ -42,7 +42,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 // Forward-declared by imgui_impl_win32.h with C++ linkage. We wrap it
@@ -477,6 +479,31 @@ private:
         }
     }
 
+    void DoNewAnimation() {
+        const std::string animDir =
+            m_project.IsOpen() ? (m_project.AssetsDir() + "/Animations")
+                               : std::string{};
+        // Ensure the folder exists for older projects that pre-date the
+        // M5 default subfolder; the save dialog falls back to Assets/
+        // anyway when this can't be created.
+        if (!animDir.empty()) {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            fs::create_directories(fs::path(animDir), ec);
+        }
+        const std::string path = PickFileDialog(
+            m_hwnd, CLSID_FileSaveDialog, L"New Animation",
+            L"NaraGame Animation (*.nanim)", L"*.nanim", L"nanim",
+            animDir);
+        if (path.empty()) return;
+        SceneEditor::AnimationAsset an;
+        if (!an.SaveToFile(path)) return;
+        m_assetDb.Rescan();
+        if (const auto* entry = m_assetDb.FindByPath(RelToAssets(path))) {
+            OpenAnimationEditor(entry->guid);
+        }
+    }
+
     void DoNewTileset() {
         const std::string tilesetsDir =
             m_project.IsOpen() ? (m_project.AssetsDir() + "/Tilesets")
@@ -550,6 +577,8 @@ private:
             ImGui::Separator();
             if (ImGui::MenuItem("New Tileset...", nullptr, false, projOpen))
                 DoNewTileset();
+            if (ImGui::MenuItem("New Animation...", nullptr, false, projOpen))
+                DoNewAnimation();
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) Close();
             ImGui::EndMenu();
