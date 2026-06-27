@@ -2223,6 +2223,7 @@ private:
         m_animEditorScrubTime  = 0.0f;
         m_animEditorSelEvent   = -1;
         m_animEditorEventFilter[0] = '\0';
+        m_animEditorAutoSort   = false;
     }
 
     // Animation Editor window. Top: texture + loop. Middle: frame
@@ -2374,6 +2375,38 @@ private:
             "##eventfilter", "Filter events...",
             m_animEditorEventFilter,
             sizeof(m_animEditorEventFilter));
+        // Selection-preserving sort by time. Used by the "Sort by
+        // time" button below and -- when the Auto checkbox is on --
+        // after any add or per-row time edit.
+        auto SortEventsByTime = [&]() {
+            if (an->events.size() < 2) return;
+            SceneEditor::AnimationEvent selSnapshot;
+            bool hadSelection = false;
+            if (m_animEditorSelEvent >= 0 &&
+                m_animEditorSelEvent < int(an->events.size())) {
+                selSnapshot  = an->events[size_t(m_animEditorSelEvent)];
+                hadSelection = true;
+            }
+            std::sort(an->events.begin(), an->events.end(),
+                      [](const SceneEditor::AnimationEvent& a,
+                         const SceneEditor::AnimationEvent& b) {
+                          return a.time < b.time;
+                      });
+            if (hadSelection) {
+                m_animEditorSelEvent = -1;
+                for (size_t i = 0; i < an->events.size(); ++i) {
+                    const auto& e = an->events[i];
+                    if (e.time      == selSnapshot.time &&
+                        e.name      == selSnapshot.name &&
+                        e.stringArg == selSnapshot.stringArg) {
+                        m_animEditorSelEvent = int(i);
+                        break;
+                    }
+                }
+            }
+            dirty = true;
+        };
+        bool anyTimeChanged = false;
         int  removeEvAt = -1;
         if (m_animEditorSelEvent >= int(an->events.size())) {
             m_animEditorSelEvent = -1;
@@ -2400,7 +2433,10 @@ private:
             ImGui::SameLine();
             ImGui::SetNextItemWidth(85.0f);
             if (ImGui::DragFloat("##evt", &ev.time, 0.01f,
-                                  0.0f, 0.0f, "%.3fs")) dirty = true;
+                                  0.0f, 0.0f, "%.3fs")) {
+                dirty = true;
+                anyTimeChanged = true;
+            }
             ImGui::SameLine();
             char nameBuf[64];
             std::snprintf(nameBuf, sizeof(nameBuf), "%s", ev.name.c_str());
@@ -2465,44 +2501,32 @@ private:
             an->events.erase(an->events.begin() + removeEvAt);
             dirty = true;
         }
+        bool eventAdded = false;
         if (ImGui::Button("+ Event")) {
             SceneEditor::AnimationEvent ev;
             ev.time = 0.0f;
             ev.name = "event";
             an->events.push_back(std::move(ev));
             dirty = true;
+            eventAdded = true;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Sort by time") && an->events.size() > 1) {
-            // Capture the selected event before the sort so we can
-            // restore m_animEditorSelEvent to whichever index now
-            // holds it. We match on (time, name, stringArg) which is
-            // unique in practice; duplicates pick the earliest slot.
-            SceneEditor::AnimationEvent selSnapshot;
-            bool hadSelection = false;
-            if (m_animEditorSelEvent >= 0 &&
-                m_animEditorSelEvent < int(an->events.size())) {
-                selSnapshot  = an->events[size_t(m_animEditorSelEvent)];
-                hadSelection = true;
-            }
-            std::sort(an->events.begin(), an->events.end(),
-                      [](const SceneEditor::AnimationEvent& a,
-                         const SceneEditor::AnimationEvent& b) {
-                          return a.time < b.time;
-                      });
-            if (hadSelection) {
-                m_animEditorSelEvent = -1;
-                for (size_t i = 0; i < an->events.size(); ++i) {
-                    const auto& e = an->events[i];
-                    if (e.time      == selSnapshot.time &&
-                        e.name      == selSnapshot.name &&
-                        e.stringArg == selSnapshot.stringArg) {
-                        m_animEditorSelEvent = int(i);
-                        break;
-                    }
-                }
-            }
-            dirty = true;
+        if (ImGui::Button("Sort by time")) {
+            SortEventsByTime();
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto", &m_animEditorAutoSort);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Re-sort the events list by time after every add or "
+                "time edit. Selection survives the reorder.");
+        }
+        // Auto-sort trigger: only re-sort when something with a
+        // visible time impact actually happened this frame, so
+        // non-time edits (name / args) don't churn row order while
+        // the user is in the middle of typing.
+        if (m_animEditorAutoSort && (anyTimeChanged || eventAdded)) {
+            SortEventsByTime();
         }
         ImGui::Separator();
 
@@ -6494,6 +6518,11 @@ private:
     // preview-dot markers stay unfiltered so the user still sees
     // every event's firing position at a glance.
     char                m_animEditorEventFilter[64] = "";
+    // When on, the editor sorts the events vector by time after
+    // any add or time edit so the rows + markers stay in playback
+    // order without the user clicking the M5c25 "Sort by time"
+    // button.
+    bool                m_animEditorAutoSort  = false;
     // Parameter filters used by the controller editor + the per-
     // entity Animator inspector. Both treat an empty buffer as
     // "show every parameter" and otherwise match the parameter name
