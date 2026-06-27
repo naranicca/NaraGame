@@ -2464,6 +2464,30 @@ private:
             }
             dirty = true;
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Copy##frames") && !an->frames.empty()) {
+            m_clipboardFrames = an->frames;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Copy %zu frames to clipboard.",
+                              an->frames.size());
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m_clipboardFrames.empty());
+        if (ImGui::Button("Paste##frames")) {
+            for (const auto& f : m_clipboardFrames) {
+                an->frames.push_back(f);
+            }
+            dirty = true;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                m_clipboardFrames.empty()
+                    ? "Clipboard empty."
+                    : "Append %zu frames from clipboard.",
+                m_clipboardFrames.size());
+        }
 
         // Events: one-shot markers fired when the play cursor
         // crosses `time`. The editor's Console panel logs them; the
@@ -2621,6 +2645,36 @@ private:
             ImGui::SetTooltip(
                 "Re-sort the events list by time after every add or "
                 "time edit. Selection survives the reorder.");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Copy##events") && !an->events.empty()) {
+            m_clipboardEvents = an->events;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Copy %zu events to clipboard.",
+                              an->events.size());
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m_clipboardEvents.empty());
+        if (ImGui::Button("Paste##events")) {
+            for (const auto& e : m_clipboardEvents) {
+                an->events.push_back(e);
+            }
+            dirty = true;
+            if (m_animEditorAutoSort) {
+                // Newly pasted events likely sit at arbitrary
+                // times; if Auto is on, sort once so the rows +
+                // markers land in playback order.
+                SortEventsByTime();
+            }
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                m_clipboardEvents.empty()
+                    ? "Clipboard empty."
+                    : "Append %zu events from clipboard.",
+                m_clipboardEvents.size());
         }
         // Auto-sort trigger: only re-sort when something with a
         // visible time impact actually happened this frame, so
@@ -6630,6 +6684,12 @@ private:
     char                m_animEditorFrameFilter[64] = "";
     // "Apply to all" duration value used by the bulk-edit button.
     float               m_animEditorApplyDuration   = 0.1f;
+    // Editor-side clipboards used by the Frames + Events Copy /
+    // Paste triggers. Outlive any single Animation Editor session
+    // so the user can copy from one .nanim, swap assets, and paste
+    // into another. Not serialised.
+    std::vector<SceneEditor::AnimationFrame> m_clipboardFrames;
+    std::vector<SceneEditor::AnimationEvent> m_clipboardEvents;
     // Parameter filters used by the controller editor + the per-
     // entity Animator inspector. Both treat an empty buffer as
     // "show every parameter" and otherwise match the parameter name
