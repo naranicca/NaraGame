@@ -1971,8 +1971,9 @@ private:
 
     // True if the screen point overlaps any drawn entity (any of its
     // sprite quad bounds for sprite entities, the 0.6-unit marker box
-    // for plain ones). Returns the topmost (last-drawn) hit so a child
-    // that's painted over a parent wins.
+    // for plain ones, ANY painted cell for tilemap entities). Returns
+    // the topmost (last-drawn) hit so a child that's painted over a
+    // parent wins.
     SceneEditor::EntityId HitTestEntity(const ImVec2& worldMouse) const {
         std::vector<SceneEditor::EntityId> ids;
         ids.reserve(64);
@@ -1981,6 +1982,31 @@ private:
             const auto* e = m_scene.Get(*it);
             if (!e || !e->enabled) continue;
             const ImVec2 wp = EntityWorldPos(*e);
+            // Tilemap: hit if the cursor's (gx, gy) maps to a painted
+            // cell. Single O(log n) map lookup instead of walking
+            // every cell. Falls through to the transform-box hit so a
+            // freshly created tilemap with no cells stays clickable
+            // via its transform marker.
+            if (const auto* tm = e->GetComponent<SceneEditor::TilemapComponent>()) {
+                if (tm->tileset.IsValid() &&
+                    tm->cellPixelW > 0 && tm->cellPixelH > 0 &&
+                    !tm->cells.empty()) {
+                    SceneEditor::TextureImportSettings imp;
+                    if (const auto* entry = m_assetDb.FindByGuid(tm->tileset)) {
+                        imp.FromJson(entry->importSettings);
+                    }
+                    const float ppu = imp.pixelsPerUnit;
+                    if (ppu > 0.0f) {
+                        const float cellW = float(tm->cellPixelW) / ppu;
+                        const float cellH = float(tm->cellPixelH) / ppu;
+                        const int gx = int(std::floor((worldMouse.x - wp.x) / cellW));
+                        const int gy = int(std::floor((worldMouse.y - wp.y) / cellH));
+                        if (tm->cells.count({gx, gy}) > 0) {
+                            return *it;
+                        }
+                    }
+                }
+            }
             if (std::abs(worldMouse.x - wp.x) <= 0.5f &&
                 std::abs(worldMouse.y - wp.y) <= 0.5f) {
                 return *it;
