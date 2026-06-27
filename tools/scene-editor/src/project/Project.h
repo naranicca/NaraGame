@@ -49,6 +49,21 @@ public:
     // Asset subfolders (one per asset kind the editor knows about).
     static std::vector<std::string> AssetSubfolders();
 
+    // Sorting layers control the draw order across SpriteRenderer
+    // components. The vector is back-to-front: index 0 draws first
+    // (deepest), the last entry draws last (closest). Fresh projects
+    // start with the same default list Unity uses; the editor's
+    // "Sorting Layers..." dialog edits these.
+    const std::vector<std::string>& SortingLayers() const { return m_sortingLayers; }
+    void SetSortingLayers(std::vector<std::string> layers);
+
+    // Resolve a layer name to its priority. Returns the index of `name`
+    // when present, the index of "Default" when name is unknown but
+    // "Default" exists, and 0 otherwise. Used by the viewport sort.
+    int LayerPriority(const std::string& name) const;
+
+    static std::vector<std::string> DefaultSortingLayers();
+
 private:
     bool EnsureFolderTree() const;
     bool WriteProjectJson() const;
@@ -57,6 +72,7 @@ private:
     std::string m_rootDir;
     std::string m_name;
     std::string m_version = "0.1.0";
+    std::vector<std::string> m_sortingLayers = DefaultSortingLayers();
 };
 
 } // namespace SceneEditor

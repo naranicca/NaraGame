@@ -266,6 +266,7 @@ public:
         DrawConsolePanel();
         DrawProjectPanel();
         DrawNewProjectModal();
+        DrawSortingLayersModal();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
 
         ImGui::Render();
@@ -407,6 +408,10 @@ private:
         }
         if (ImGui::BeginMenu("Window")) {
             if (ImGui::MenuItem("Reset Layout")) m_resetLayout = true;
+            if (ImGui::MenuItem("Sorting Layers...", nullptr, false,
+                                m_project.IsOpen())) {
+                m_openLayersModal = true;
+            }
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
@@ -414,6 +419,76 @@ private:
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
+    }
+
+    void DrawSortingLayersModal() {
+        if (m_openLayersModal) {
+            ImGui::OpenPopup("Sorting Layers");
+            m_openLayersModal = false;
+        }
+        if (!ImGui::BeginPopupModal("Sorting Layers", nullptr,
+                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            return;
+        }
+        ImGui::TextUnformatted("Order is back-to-front: the top entry "
+                               "draws first, the bottom one draws last.");
+        ImGui::Separator();
+
+        std::vector<std::string> layers = m_project.SortingLayers();
+        bool changed = false;
+        int  removeAt = -1;
+        int  moveUp   = -1;
+        int  moveDown = -1;
+        for (int i = 0; i < int(layers.size()); ++i) {
+            ImGui::PushID(i);
+            // Editable name field for each row.
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%s", layers[i].c_str());
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::InputText("##name", buf, sizeof(buf))) {
+                layers[i] = buf;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Up") && i > 0) moveUp = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Down") &&
+                i + 1 < int(layers.size())) moveDown = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove") &&
+                layers.size() > 1) removeAt = i;
+            ImGui::PopID();
+        }
+        if (moveUp >= 0) {
+            std::swap(layers[size_t(moveUp)], layers[size_t(moveUp - 1)]);
+            changed = true;
+        }
+        if (moveDown >= 0) {
+            std::swap(layers[size_t(moveDown)], layers[size_t(moveDown + 1)]);
+            changed = true;
+        }
+        if (removeAt >= 0) {
+            layers.erase(layers.begin() + removeAt);
+            changed = true;
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Add Layer")) {
+            layers.push_back("NewLayer");
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Restore Defaults")) {
+            layers   = SceneEditor::Project::DefaultSortingLayers();
+            changed  = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+
+        if (changed) {
+            m_project.SetSortingLayers(std::move(layers));
+            m_project.Save();
+        }
+        ImGui::EndPopup();
     }
 
     void DrawNewProjectModal() {
@@ -824,12 +899,30 @@ private:
                 changed = true;
             }
         }
-        char layerBuf[64];
-        std::snprintf(layerBuf, sizeof(layerBuf), "%s",
-                      s.sortingLayer.c_str());
-        if (ImGui::InputText("Sorting Layer", layerBuf, sizeof(layerBuf))) {
-            s.sortingLayer = layerBuf;
-            changed = true;
+        // Sorting layer dropdown -- if the entity is on a layer that no
+        // longer exists in the project (renamed / deleted via the
+        // Window > Sorting Layers... dialog) we still show the orphan
+        // name at the top so the user can either keep it or pick one
+        // from the live list.
+        const auto& layers = m_project.SortingLayers();
+        const bool currentInList = std::find(layers.begin(), layers.end(),
+                                              s.sortingLayer) != layers.end();
+        if (ImGui::BeginCombo("Sorting Layer", s.sortingLayer.c_str())) {
+            if (!currentInList && !s.sortingLayer.empty()) {
+                if (ImGui::Selectable((s.sortingLayer + "  (orphan)").c_str(),
+                                      true)) {
+                    // No-op; clicking the orphan keeps it.
+                }
+                ImGui::Separator();
+            }
+            for (const std::string& l : layers) {
+                const bool sel = (l == s.sortingLayer);
+                if (ImGui::Selectable(l.c_str(), sel)) {
+                    s.sortingLayer = l;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
         }
         if (ImGui::DragInt("Order in Layer", &s.orderInLayer, 0.2f,
                            -1000, 1000)) {
@@ -1281,18 +1374,55 @@ private:
                       const ImVec2& panelSize) {
         std::vector<SceneEditor::EntityId> ids;
         CollectAllEntities(m_scene.Roots(), ids);
-        for (SceneEditor::EntityId id : ids) {
-            const auto* e = m_scene.Get(id);
+
+        // Split sprite-bearing entities from marker-only ones. Sprites
+        // sort by (layer, orderInLayer, sceneTraversalOrder) so the
+        // user's layer + order choices take precedence. Markers are
+        // editor-only visuals -- draw them after every sprite so the
+        // user can always click them even when stacked under sprites.
+        struct SortKey {
+            int layerPrio;
+            int order;
+            size_t traversal;
+            SceneEditor::EntityId id;
+        };
+        std::vector<SortKey> sprites;
+        std::vector<SceneEditor::EntityId> markers;
+        sprites.reserve(ids.size());
+        for (size_t i = 0; i < ids.size(); ++i) {
+            const auto* e = m_scene.Get(ids[i]);
             if (!e || !e->enabled) continue;
+            const auto* spr = e->GetComponent<SceneEditor::SpriteRendererComponent>();
+            if (spr && spr->sprite.IsValid()) {
+                sprites.push_back({
+                    m_project.LayerPriority(spr->sortingLayer),
+                    spr->orderInLayer, i, ids[i]});
+            } else {
+                markers.push_back(ids[i]);
+            }
+        }
+        std::sort(sprites.begin(), sprites.end(),
+                  [](const SortKey& a, const SortKey& b) {
+                      if (a.layerPrio != b.layerPrio) return a.layerPrio < b.layerPrio;
+                      if (a.order     != b.order)     return a.order     < b.order;
+                      return a.traversal < b.traversal;
+                  });
+
+        for (const SortKey& k : sprites) {
+            const auto* e = m_scene.Get(k.id);
+            if (!e) continue;
             const auto* spr = e->GetComponent<SceneEditor::SpriteRendererComponent>();
             const ImVec2 wp = EntityWorldPos(*e);
             const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
-            const bool sel = (id == m_selection);
-            if (spr && spr->sprite.IsValid()) {
-                DrawSpriteEntity(dl, *e, *spr, c, sel);
-            } else {
-                DrawMarkerEntity(dl, *e, c, sel);
-            }
+            const bool sel = (k.id == m_selection);
+            DrawSpriteEntity(dl, *e, *spr, c, sel);
+        }
+        for (SceneEditor::EntityId id : markers) {
+            const auto* e = m_scene.Get(id);
+            if (!e) continue;
+            const ImVec2 wp = EntityWorldPos(*e);
+            const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
+            DrawMarkerEntity(dl, *e, c, id == m_selection);
         }
     }
 
@@ -1525,6 +1655,8 @@ private:
     ImVec2         m_gizmoDownWorld{0.0f, 0.0f};
     NaraGame::Vec3 m_gizmoStartPos{0.0f, 0.0f, 0.0f};
 
+    // Modal trigger flags.
+    bool                m_openLayersModal = false;
     // New Project modal state.
     bool                m_openNewProjectModal = false;
     std::array<char, 256> m_newProjectName{};

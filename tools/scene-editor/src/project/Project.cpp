@@ -45,6 +45,28 @@ std::vector<std::string> Project::AssetSubfolders() {
     return { "Sprites", "Tilesets", "Scripts", "Scenes", "Prefabs", "Materials" };
 }
 
+std::vector<std::string> Project::DefaultSortingLayers() {
+    return { "Background", "Default", "Foreground", "UI" };
+}
+
+void Project::SetSortingLayers(std::vector<std::string> layers) {
+    if (layers.empty()) layers = DefaultSortingLayers();
+    m_sortingLayers = std::move(layers);
+}
+
+int Project::LayerPriority(const std::string& name) const {
+    for (size_t i = 0; i < m_sortingLayers.size(); ++i) {
+        if (m_sortingLayers[i] == name) return int(i);
+    }
+    // Unknown layer -> use the "Default" slot if present so it falls
+    // somewhere reasonable instead of leaping to layer 0 (back) and
+    // disappearing behind every other sprite.
+    for (size_t i = 0; i < m_sortingLayers.size(); ++i) {
+        if (m_sortingLayers[i] == "Default") return int(i);
+    }
+    return 0;
+}
+
 std::string Project::AssetsDir()       const { return m_rootDir + "/Assets"; }
 std::string Project::LibraryDir()      const { return m_rootDir + "/Library"; }
 std::string Project::SettingsDir()     const { return m_rootDir + "/ProjectSettings"; }
@@ -150,6 +172,11 @@ bool Project::WriteProjectJson() const {
     // shape changes incompatibly. Distinct from the user-facing
     // `version` above.
     root.Add("schema",  Value::MakeNumber(1));
+    Value layers = Value::MakeArray();
+    for (const std::string& l : m_sortingLayers) {
+        layers.Push(Value::MakeString(l));
+    }
+    root.Add("sortingLayers", std::move(layers));
     const std::string out = NaraGame::MiniJson::Write(root);
     if (!WriteFileText(ProjectJsonPath(), out)) {
         NARAGAME_ERROR("Project: cannot write '%s'", ProjectJsonPath().c_str());
@@ -174,6 +201,18 @@ bool Project::ReadProjectJson() {
     }
     m_name    = root.GetString("name",    fs::path(m_rootDir).filename().string());
     m_version = root.GetString("version", "0.1.0");
+    // Sorting layers default to the standard set when missing or empty
+    // so legacy projects pick up a sensible draw order automatically.
+    const NaraGame::MiniJson::Value* layers = root.Find("sortingLayers");
+    if (layers && layers->IsArray() && !layers->arrayValue.empty()) {
+        m_sortingLayers.clear();
+        for (const NaraGame::MiniJson::Value& v : layers->arrayValue) {
+            if (v.IsString()) m_sortingLayers.push_back(v.stringValue);
+        }
+        if (m_sortingLayers.empty()) m_sortingLayers = DefaultSortingLayers();
+    } else {
+        m_sortingLayers = DefaultSortingLayers();
+    }
     return true;
 }
 
