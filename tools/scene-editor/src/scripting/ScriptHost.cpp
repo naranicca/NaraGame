@@ -273,6 +273,33 @@ static int LuaSceneEntityCount(lua_State* L) {
     lua_pushinteger(L, count);
     return 1;
 }
+// scene.set_enabled / is_enabled. Flipping enabled triggers the
+// M6c17 OnEnable / OnDisable edge detection on the next
+// TickScripts pass, so a script that toggles its own host
+// observes the lifecycle hooks fire as a side-effect.
+static int LuaSceneSetEnabled(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    Entity* e = host->BoundScene()->FindByName(
+        luaL_checkstring(L, 1));
+    if (!e) { lua_pushboolean(L, 0); return 1; }
+    e->enabled = lua_toboolean(L, 2) != 0;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+static int LuaSceneIsEnabled(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    Entity* e = host->BoundScene()->FindByName(
+        luaL_checkstring(L, 1));
+    lua_pushboolean(L, e && e->enabled);
+    return 1;
+}
+
 // scene.add_component / has_component / remove_component. Each
 // callback resolves the entity by name through BoundScene and
 // returns `false` (silent no-op) when the lookup fails so scripts
@@ -884,6 +911,8 @@ ScriptHost::ScriptHost() {
         {"add_component",     LuaSceneAddComponent},
         {"has_component",     LuaSceneHasComponent},
         {"remove_component",  LuaSceneRemoveComponent},
+        {"set_enabled",       LuaSceneSetEnabled},
+        {"is_enabled",        LuaSceneIsEnabled},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
