@@ -1,11 +1,13 @@
 #include "NaraGame/renderer/Renderer3D.h"
 
+#include "NaraGame/assets/Dds.h"
 #include "NaraGame/assets/Hdr.h"
 #include "NaraGame/core/Log.h"
 #include "NaraGame/renderer/rhi/RHIDevice.h"
 #include "NaraGame/renderer/rhi/RHIResources.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -524,6 +526,82 @@ Vec3 SampleSkyBilinearFloat(const float* skyPixels, int w, int h,
             a.z + (b.z - a.z) * ty};
 }
 
+// Bilinear sample of one face of a cube (interleaved float RGB). `dir`
+// already lives in the convention BakeIblFromSource uses to MAKE the
+// faces; this is the inverse: find which face's plane it's closest to,
+// project into face-local (s, t), then bilinear sample.
+Vec3 SampleCubeFloat(const float* cubeFaces, int faceSize, const Vec3& dir) {
+    const float ax = std::abs(dir.x);
+    const float ay = std::abs(dir.y);
+    const float az = std::abs(dir.z);
+    int face = 0;
+    float s = 0.0f, t = 0.0f, ma = 0.0f;
+    if (ax >= ay && ax >= az) {
+        if (dir.x > 0) { face = 0; s = -dir.z; t = -dir.y; ma = ax; }  // +X
+        else           { face = 1; s =  dir.z; t = -dir.y; ma = ax; }  // -X
+    } else if (ay >= az) {
+        if (dir.y > 0) { face = 2; s =  dir.x; t =  dir.z; ma = ay; }  // +Y
+        else           { face = 3; s =  dir.x; t = -dir.z; ma = ay; }  // -Y
+    } else {
+        if (dir.z > 0) { face = 4; s =  dir.x; t = -dir.y; ma = az; }  // +Z
+        else           { face = 5; s = -dir.x; t = -dir.y; ma = az; }  // -Z
+    }
+    if (ma <= 1e-12f) return {0.0f, 0.0f, 0.0f};
+    const float u = (s / ma) * 0.5f + 0.5f;
+    const float v = (t / ma) * 0.5f + 0.5f;
+    const float fx = u * float(faceSize) - 0.5f;
+    const float fy = v * float(faceSize) - 0.5f;
+    const int x0 = std::clamp(int(std::floor(fx)), 0, faceSize - 1);
+    const int x1 = std::clamp(x0 + 1, 0, faceSize - 1);
+    const int y0 = std::clamp(int(std::floor(fy)), 0, faceSize - 1);
+    const int y1 = std::clamp(y0 + 1, 0, faceSize - 1);
+    const float tx = fx - std::floor(fx);
+    const float ty = fy - std::floor(fy);
+    auto get = [&](int x, int y) {
+        const size_t base = size_t(face) * size_t(faceSize) * size_t(faceSize) * 3;
+        const size_t i    = base + (size_t(y) * faceSize + size_t(x)) * 3;
+        return Vec3{cubeFaces[i + 0], cubeFaces[i + 1], cubeFaces[i + 2]};
+    };
+    const Vec3 c00 = get(x0, y0), c10 = get(x1, y0);
+    const Vec3 c01 = get(x0, y1), c11 = get(x1, y1);
+    const Vec3 a{c00.x + (c10.x - c00.x) * tx,
+                c00.y + (c10.y - c00.y) * tx,
+                c00.z + (c10.z - c00.z) * tx};
+    const Vec3 b{c01.x + (c11.x - c01.x) * tx,
+                c01.y + (c11.y - c01.y) * tx,
+                c01.z + (c11.z - c01.z) * tx};
+    return {a.x + (b.x - a.x) * ty,
+            a.y + (b.y - a.y) * ty,
+            a.z + (b.z - a.z) * ty};
+}
+
+// Convert a 6-face cube (interleaved float RGB) into an equirectangular
+// float-RGB buffer so the same BakeIblFromSource path can consume it.
+// Output size is fixed at 512x256 -- enough to avoid aliasing the GGX
+// importance samples against the cube's larger face resolution.
+std::vector<float> CubeToEquirectFloat(const float* cubeFaces, int faceSize,
+                                       int outW, int outH) {
+    constexpr float kPi = 3.14159265358979323846f;
+    std::vector<float> out(size_t(outW) * size_t(outH) * 3);
+    for (int y = 0; y < outH; ++y) {
+        const float v = (float(y) + 0.5f) / float(outH);
+        const float elev = v * kPi;
+        const float sinE = std::sin(elev);
+        const float cosE = std::cos(elev);
+        for (int x = 0; x < outW; ++x) {
+            const float u = (float(x) + 0.5f) / float(outW);
+            const float az = (u - 0.5f) * 2.0f * kPi;
+            const Vec3 dir = {sinE * std::sin(az), cosE, sinE * std::cos(az)};
+            const Vec3 col = SampleCubeFloat(cubeFaces, faceSize, dir);
+            const size_t i = (size_t(y) * outW + size_t(x)) * 3;
+            out[i + 0] = col.x;
+            out[i + 1] = col.y;
+            out[i + 2] = col.z;
+        }
+    }
+    return out;
+}
+
 // IEEE 754 binary32 -> binary16 conversion for RGBA16F texture upload.
 // Subnormals + Inf collapse to nearest representable; mantissa truncates
 // (faster than round-to-nearest and the IBL bake doesn't care about
@@ -938,26 +1016,63 @@ void Renderer3D::BakeIblFromSource(const float* srcPixels, int srcW, int srcH) {
     m_prefilteredEnvTex = m_device->CreateTexture(pref);
 }
 
-bool Renderer3D::LoadEnvironment(const std::string& hdrPath) {
+bool Renderer3D::LoadEnvironment(const std::string& envPath) {
     if (!m_device) return false;
-    if (hdrPath.empty()) {
+    if (envPath.empty()) {
         // Revert to the procedural default.
         const std::vector<float> procSky = MakeProceduralSkyPixels();
         BakeIblFromSource(procSky.data(), kProcSkyW, kProcSkyH);
         NARAGAME_INFO("Renderer3D::LoadEnvironment: reverted to procedural sky");
         return true;
     }
-    const HdrImage hdr = LoadHdrFile(hdrPath);
-    if (!hdr.Valid()) {
-        NARAGAME_WARN("Renderer3D::LoadEnvironment: '%s' invalid; "
-                      "keeping current sky",
-                      hdrPath.c_str());
-        return false;
+    // Sniff the source format by extension: .dds is a DX10 cubemap, .hdr
+    // is Radiance equirect, anything else is an error.
+    auto endsWithLower = [](const std::string& s, const std::string& ext) {
+        if (s.size() < ext.size()) return false;
+        for (size_t i = 0; i < ext.size(); ++i) {
+            const char a = char(std::tolower(unsigned(s[s.size() - ext.size() + i])));
+            if (a != ext[i]) return false;
+        }
+        return true;
+    };
+    if (endsWithLower(envPath, ".dds")) {
+        const DdsCubeImage cube = LoadDdsCube(envPath);
+        if (!cube.Valid()) {
+            NARAGAME_WARN("Renderer3D::LoadEnvironment: '%s' invalid DDS; "
+                          "keeping current sky",
+                          envPath.c_str());
+            return false;
+        }
+        // Re-project the cube into an equirect buffer so the existing
+        // bake path (which samples equirect by direction) consumes it.
+        // The output res (512x256) is sized so the prefilter's GGX
+        // sampling doesn't alias against the cube's 128 face texels.
+        const std::vector<float> equirect = CubeToEquirectFloat(
+            cube.pixels.data(), int(cube.faceSize), 512, 256);
+        BakeIblFromSource(equirect.data(), 512, 256);
+        NARAGAME_INFO("Renderer3D::LoadEnvironment: '%s' baked "
+                      "(%ux%u cube source)",
+                      envPath.c_str(), cube.faceSize, cube.faceSize);
+        return true;
     }
-    BakeIblFromSource(hdr.pixels.data(), int(hdr.width), int(hdr.height));
-    NARAGAME_INFO("Renderer3D::LoadEnvironment: '%s' baked (%ux%u source)",
-                  hdrPath.c_str(), hdr.width, hdr.height);
-    return true;
+    if (endsWithLower(envPath, ".hdr")) {
+        const HdrImage hdr = LoadHdrFile(envPath);
+        if (!hdr.Valid()) {
+            NARAGAME_WARN("Renderer3D::LoadEnvironment: '%s' invalid; "
+                          "keeping current sky",
+                          envPath.c_str());
+            return false;
+        }
+        BakeIblFromSource(hdr.pixels.data(), int(hdr.width), int(hdr.height));
+        NARAGAME_INFO("Renderer3D::LoadEnvironment: '%s' baked "
+                      "(%ux%u equirect source)",
+                      envPath.c_str(), hdr.width, hdr.height);
+        return true;
+    }
+    NARAGAME_WARN("Renderer3D::LoadEnvironment: '%s' has unsupported "
+                  "extension (expected .hdr or .dds)",
+                  envPath.c_str());
+    return false;
 }
 
 void Renderer3D::Shutdown() {

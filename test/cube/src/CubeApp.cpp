@@ -52,12 +52,14 @@ public:
         m_renderer.Init(GetDevice());
         m_post.Init(GetDevice(), kWindowW, kWindowH);
 
-        // Override the engine's procedural sky with an HDR sunset --
-        // bright sun spot aligned with the directional light so the
-        // metal sphere row picks up a recognisable highlight in the
-        // prefiltered env reflection.
+        // Override the engine's procedural sky with a studio cubemap
+        // (.dds, DX10 + RGBA16F). Each face is a solid colour so the
+        // metal sphere reflections clearly show which face they're
+        // bouncing off -- a quick visual sanity check of the cubemap
+        // path. Swap to "/sunset.hdr" to exercise the equirect HDR
+        // loader instead.
         const std::string envPath =
-            std::string(NARAGAME_ASSETS_DIR) + "/sunset.hdr";
+            std::string(NARAGAME_ASSETS_DIR) + "/studio.dds";
         m_renderer.LoadEnvironment(envPath);
 
         m_white  = MakeSolid(0xFF, 0xFF, 0xFF);

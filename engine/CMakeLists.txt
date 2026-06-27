@@ -6,6 +6,7 @@
 set(NARAGAME_SOURCES
     src/assets/AssetWatcher.cpp
     src/assets/BMFont.cpp
+    src/assets/Dds.cpp
     src/assets/Inflate.cpp
     src/assets/Gltf.cpp
     src/assets/Hdr.cpp
