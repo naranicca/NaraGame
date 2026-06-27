@@ -473,8 +473,8 @@ private:
         bool dirty = false;
 
         // Slice mode chooser + parameter inputs.
-        const char* sliceTabs[] = { "By Cell Size", "By Cell Count" };
-        ImGui::Combo("##slicemode", &m_spriteEditorMode, sliceTabs, 2);
+        const char* sliceTabs[] = { "By Cell Size", "By Cell Count", "Manual" };
+        ImGui::Combo("##slicemode", &m_spriteEditorMode, sliceTabs, 3);
         ImGui::SameLine();
         ImGui::TextDisabled("(slice mode)");
 
@@ -491,7 +491,7 @@ private:
                     FileStem(entry->relPath));
                 dirty = true;
             }
-        } else {
+        } else if (m_spriteEditorMode == 1) {
             ImGui::DragInt("Columns", &m_spriteEditorCols, 1.0f, 1, 64);
             ImGui::DragInt("Rows",    &m_spriteEditorRows, 1.0f, 1, 64);
             if (ImGui::Button("Slice")) {
@@ -502,11 +502,17 @@ private:
                     FileStem(entry->relPath));
                 dirty = true;
             }
+        } else {
+            ImGui::TextWrapped("Click + drag on the preview to add a "
+                               "rectangle. Click an existing one to "
+                               "select; drag to move it.");
         }
         ImGui::SameLine();
         if (ImGui::Button("Reset to Single")) {
             imp.spriteMode = SceneEditor::TextureImportSettings::SpriteMode::Single;
             imp.spriteSheet.sprites.clear();
+            m_spriteEditorSel = -1;
+            m_manualDrag = ManualDrag::None;
             dirty = true;
         }
         ImGui::Separator();
@@ -528,14 +534,52 @@ private:
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                 tex->GetNativeView()));
         ImGui::Image(texId, imgSize);
+        // Manual mode lays an InvisibleButton on top of the image so we
+        // own the left mouse without ImGui::Image stealing focus. Other
+        // modes leave the image as a passive preview.
+        if (m_spriteEditorMode == 2) {
+            ImGui::SetCursorScreenPos(imgMin);
+            ImGui::InvisibleButton("##spreview_hit", imgSize,
+                                   ImGuiButtonFlags_MouseButtonLeft);
+            if (HandleManualSliceInput(imgMin, scale, imp, int(tex->Width()),
+                                       int(tex->Height()),
+                                       FileStem(entry->relPath))) {
+                dirty = true;
+            }
+        }
         ImDrawList* dl = ImGui::GetWindowDrawList();
         DrawSpritePreviewOverlay(dl, imgMin, scale, imp);
+        // In-progress rubber-band rect while the user is drawing a new
+        // sub-sprite. Snap to integer pixels so the live preview matches
+        // what we eventually persist.
+        if (m_spriteEditorMode == 2 && m_manualDrag == ManualDrag::Create) {
+            const int x0 = std::min(m_manualAnchorPx[0], m_manualCurPx[0]);
+            const int y0 = std::min(m_manualAnchorPx[1], m_manualCurPx[1]);
+            const int x1 = std::max(m_manualAnchorPx[0], m_manualCurPx[0]);
+            const int y1 = std::max(m_manualAnchorPx[1], m_manualCurPx[1]);
+            const ImVec2 a{imgMin.x + x0 * scale, imgMin.y + y0 * scale};
+            const ImVec2 b{imgMin.x + x1 * scale, imgMin.y + y1 * scale};
+            dl->AddRectFilled(a, b, IM_COL32(80, 200, 255, 60));
+            dl->AddRect(a, b, IM_COL32(80, 200, 255, 255), 0.0f, 0, 2.0f);
+        }
         ImGui::EndChild();
         ImGui::SameLine();
 
         // Sub-sprite list on the right.
         ImGui::BeginChild("##sublist", ImVec2(0, previewMaxH), true);
         ImGui::Text("Sub-sprites: %zu", imp.spriteSheet.sprites.size());
+        ImGui::SameLine();
+        const bool canDelete = (m_spriteEditorSel >= 0 &&
+                                m_spriteEditorSel <
+                                    int(imp.spriteSheet.sprites.size()));
+        if (!canDelete) ImGui::BeginDisabled();
+        if (ImGui::SmallButton("Delete Selected")) {
+            imp.spriteSheet.sprites.erase(
+                imp.spriteSheet.sprites.begin() + m_spriteEditorSel);
+            m_spriteEditorSel = -1;
+            dirty = true;
+        }
+        if (!canDelete) ImGui::EndDisabled();
         ImGui::Separator();
         for (size_t i = 0; i < imp.spriteSheet.sprites.size(); ++i) {
             SceneEditor::SubSprite& s = imp.spriteSheet.sprites[i];
@@ -617,6 +661,108 @@ private:
         const size_t dot = stem.rfind('.');
         if (dot != std::string::npos) stem.resize(dot);
         return stem;
+    }
+
+    // Manual-mode interaction state. Create = the user is dragging out
+    // a fresh rect from an empty area; Move = the user is dragging the
+    // selected sub-sprite around.
+    enum class ManualDrag { None, Create, Move };
+
+    // Drive the Manual slice mode's drag-create + drag-move flow. The
+    // preview's InvisibleButton must already be the last item submitted
+    // when this is called. Returns true when the sprite-sheet changed
+    // so the caller saves the .meta.
+    bool HandleManualSliceInput(const ImVec2& imgMin, float scale,
+                                SceneEditor::TextureImportSettings& imp,
+                                int texW, int texH,
+                                const std::string& stem) {
+        const bool hovered = ImGui::IsItemHovered();
+        const ImVec2 mp    = ImGui::GetMousePos();
+        const int   mpx    = int(std::clamp((mp.x - imgMin.x) / scale,
+                                            0.0f, float(texW)));
+        const int   mpy    = int(std::clamp((mp.y - imgMin.y) / scale,
+                                            0.0f, float(texH)));
+
+        bool changed = false;
+        const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        const bool clk  = hovered &&
+                          ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        const bool rel  = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+
+        if (clk) {
+            // Hit-test existing sub-sprites in reverse so the topmost
+            // (drawn last) wins on overlap, matching the viewport's
+            // entity hit ordering.
+            int hit = -1;
+            for (int i = int(imp.spriteSheet.sprites.size()) - 1; i >= 0; --i) {
+                const auto& s = imp.spriteSheet.sprites[i];
+                if (mpx >= s.x && mpx < s.x + s.w &&
+                    mpy >= s.y && mpy < s.y + s.h) {
+                    hit = i;
+                    break;
+                }
+            }
+            if (hit >= 0) {
+                m_spriteEditorSel = hit;
+                m_manualDrag      = ManualDrag::Move;
+                const auto& s = imp.spriteSheet.sprites[hit];
+                m_manualAnchorPx[0] = mpx - s.x;   // grab offset
+                m_manualAnchorPx[1] = mpy - s.y;
+                imp.spriteMode = SceneEditor::TextureImportSettings::SpriteMode::Multiple;
+            } else {
+                m_manualDrag      = ManualDrag::Create;
+                m_manualAnchorPx[0] = mpx;
+                m_manualAnchorPx[1] = mpy;
+                m_manualCurPx[0]   = mpx;
+                m_manualCurPx[1]   = mpy;
+                m_spriteEditorSel = -1;
+            }
+        }
+
+        if (down && m_manualDrag == ManualDrag::Create) {
+            m_manualCurPx[0] = mpx;
+            m_manualCurPx[1] = mpy;
+        } else if (down && m_manualDrag == ManualDrag::Move &&
+                   m_spriteEditorSel >= 0 &&
+                   m_spriteEditorSel <
+                       int(imp.spriteSheet.sprites.size())) {
+            auto& s = imp.spriteSheet.sprites[size_t(m_spriteEditorSel)];
+            const int newX = std::clamp(mpx - m_manualAnchorPx[0],
+                                        0, texW - s.w);
+            const int newY = std::clamp(mpy - m_manualAnchorPx[1],
+                                        0, texH - s.h);
+            if (newX != s.x || newY != s.y) {
+                s.x = newX;
+                s.y = newY;
+                changed = true;
+            }
+        }
+
+        if (rel) {
+            if (m_manualDrag == ManualDrag::Create) {
+                const int x0 = std::min(m_manualAnchorPx[0], m_manualCurPx[0]);
+                const int y0 = std::min(m_manualAnchorPx[1], m_manualCurPx[1]);
+                const int x1 = std::max(m_manualAnchorPx[0], m_manualCurPx[0]);
+                const int y1 = std::max(m_manualAnchorPx[1], m_manualCurPx[1]);
+                if (x1 - x0 >= 2 && y1 - y0 >= 2) {
+                    SceneEditor::SubSprite s;
+                    s.x = x0; s.y = y0;
+                    s.w = x1 - x0;
+                    s.h = y1 - y0;
+                    char buf[128];
+                    std::snprintf(buf, sizeof(buf), "%s_%zu",
+                                  stem.empty() ? "sprite" : stem.c_str(),
+                                  imp.spriteSheet.sprites.size());
+                    s.name = buf;
+                    imp.spriteSheet.sprites.push_back(std::move(s));
+                    imp.spriteMode = SceneEditor::TextureImportSettings::SpriteMode::Multiple;
+                    m_spriteEditorSel = int(imp.spriteSheet.sprites.size()) - 1;
+                    changed = true;
+                }
+            }
+            m_manualDrag = ManualDrag::None;
+        }
+        return changed;
     }
 
     void DrawSortingLayersModal() {
@@ -2224,6 +2370,11 @@ private:
     int                 m_spriteEditorCols  = 4;
     int                 m_spriteEditorRows  = 4;
     int                 m_spriteEditorSel   = -1;
+    // Manual-mode drag state. Pixel coords are integers so the live
+    // rubber-band matches what gets persisted on release.
+    ManualDrag          m_manualDrag        = ManualDrag::None;
+    int                 m_manualAnchorPx[2] = {0, 0};
+    int                 m_manualCurPx[2]    = {0, 0};
     // New Project modal state.
     bool                m_openNewProjectModal = false;
     std::array<char, 256> m_newProjectName{};
