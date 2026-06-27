@@ -2023,6 +2023,60 @@ private:
             ctrl->transitions.push_back(std::move(t));
             dirty = true;
         }
+        // Selection snapshot helper -- both sort buttons want to
+        // anchor m_graphSelectedTransition to the same edge after
+        // the reorder.
+        auto SortTransitions = [&](auto&& cmp) {
+            SceneEditor::AnimatorTransition selSnap;
+            bool hadSel = false;
+            if (m_graphSelectedTransition >= 0 &&
+                m_graphSelectedTransition <
+                    int(ctrl->transitions.size())) {
+                selSnap = ctrl->transitions[
+                    size_t(m_graphSelectedTransition)];
+                hadSel = true;
+            }
+            std::sort(ctrl->transitions.begin(),
+                      ctrl->transitions.end(), cmp);
+            if (hadSel) {
+                m_graphSelectedTransition = -1;
+                for (size_t i = 0; i < ctrl->transitions.size(); ++i) {
+                    const auto& t = ctrl->transitions[i];
+                    if (t.fromIdx == selSnap.fromIdx &&
+                        t.toIdx   == selSnap.toIdx   &&
+                        t.param   == selSnap.param) {
+                        m_graphSelectedTransition = int(i);
+                        break;
+                    }
+                }
+            }
+            dirty = true;
+        };
+        ImGui::SameLine();
+        if (ImGui::Button("Sort by source") &&
+            ctrl->transitions.size() > 1) {
+            // Group by fromIdx, then toIdx, then param so edges
+            // emanating from the same state cluster together and
+            // the order inside each cluster stays predictable.
+            SortTransitions([](const SceneEditor::AnimatorTransition& a,
+                               const SceneEditor::AnimatorTransition& b) {
+                if (a.fromIdx != b.fromIdx) return a.fromIdx < b.fromIdx;
+                if (a.toIdx   != b.toIdx)   return a.toIdx   < b.toIdx;
+                return a.param < b.param;
+            });
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Sort by param") &&
+            ctrl->transitions.size() > 1) {
+            // Group by param (so every edge reading the same
+            // parameter sits together), then fromIdx + toIdx.
+            SortTransitions([](const SceneEditor::AnimatorTransition& a,
+                               const SceneEditor::AnimatorTransition& b) {
+                if (a.param   != b.param)   return a.param   < b.param;
+                if (a.fromIdx != b.fromIdx) return a.fromIdx < b.fromIdx;
+                return a.toIdx < b.toIdx;
+            });
+        }
 
         if (dirty) m_assetDb.SaveAnimatorController(m_controllerEditorAsset);
         ImGui::End();
