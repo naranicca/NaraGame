@@ -26,6 +26,18 @@ public:
     // Not serialised because it follows currentTime each tick and
     // resets to 0 on a state switch.
     float     prevTime    = 0.0f;
+    // Transition blend runtime state. -1 = no transition in flight.
+    // duration / elapsed track the cross-fade; designAlpha captures
+    // the SpriteRenderer's pre-transition alpha so we can restore it
+    // cleanly on completion. triggerParam is the trigger to consume
+    // when the blend finishes (deferred so the user sees the live
+    // "armed" indicator survive the fade).
+    int         transitionPending      = -1;
+    float       transitionDuration     = 0.0f;
+    float       transitionElapsed      = 0.0f;
+    bool        transitionSwapped      = false;
+    float       transitionDesignAlpha  = 1.0f;
+    std::string transitionTriggerParam;
 
     // Optional .ncontroller reference. When set, the runtime ignores
     // `animation` and plays the controller's currentState animation

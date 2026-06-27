@@ -402,6 +402,80 @@ private:
         }
     }
 
+    // Arm an AnimatorComponent for a blended transition. Captures
+    // the current SpriteRenderer alpha so we can restore it cleanly
+    // when the blend completes; leaves currentState untouched
+    // (TickTransitionBlend swaps it at the midpoint).
+    void BeginTransitionBlend(SceneEditor::AnimatorComponent& an,
+                              SceneEditor::Entity& e,
+                              const SceneEditor::AnimatorTransition& tr) {
+        an.transitionPending      = tr.toIdx;
+        an.transitionDuration     = tr.duration;
+        an.transitionElapsed      = 0.0f;
+        an.transitionSwapped      = false;
+        an.transitionTriggerParam.clear();
+        an.transitionDesignAlpha  = 1.0f;
+        if (auto* spr =
+                e.GetComponent<SceneEditor::SpriteRendererComponent>()) {
+            an.transitionDesignAlpha = spr->color.a;
+        }
+    }
+
+    // Tick an in-flight transition blend: cross-fade the
+    // SpriteRenderer's alpha, swap to the target state at the
+    // midpoint, and clean up on completion. Returns true while the
+    // blend is still in progress so the caller knows to skip new
+    // transition evaluation.
+    bool TickTransitionBlend(SceneEditor::AnimatorComponent& an,
+                             float dt, SceneEditor::Entity& e) {
+        if (an.transitionPending < 0) return false;
+        if (an.transitionDuration <= 0.0f) {
+            an.transitionPending      = -1;
+            an.transitionSwapped      = false;
+            an.transitionTriggerParam.clear();
+            return false;
+        }
+        an.transitionElapsed += dt;
+        const float t = std::clamp(
+            an.transitionElapsed / an.transitionDuration, 0.0f, 1.0f);
+        // V-shape fade: 1 at the edges, 0 at the midpoint, so the
+        // user sees a clean fade-out / fade-in instead of an abrupt
+        // pop on the swap.
+        const float fade = std::abs(2.0f * t - 1.0f);
+        if (auto* spr =
+                e.GetComponent<SceneEditor::SpriteRendererComponent>()) {
+            spr->color.a = an.transitionDesignAlpha * fade;
+        }
+        // Mid-point: swap the state so the second half plays the
+        // target animation. Guard with transitionSwapped so a slow
+        // tick that lands past 0.5 in one frame doesn't double-fire.
+        if (!an.transitionSwapped && t >= 0.5f) {
+            an.currentState     = an.transitionPending;
+            an.currentTime      = 0.0f;
+            an.prevTime         = 0.0f;
+            an.transitionSwapped = true;
+        }
+        if (an.transitionElapsed >= an.transitionDuration) {
+            // End: restore alpha + clear pending. Consume the
+            // trigger now so the "armed" inspector indicator stays
+            // visible through the full fade.
+            if (auto* spr =
+                    e.GetComponent<SceneEditor::SpriteRendererComponent>()) {
+                spr->color.a = an.transitionDesignAlpha;
+            }
+            if (!an.transitionTriggerParam.empty()) {
+                an.paramBools[an.transitionTriggerParam] = false;
+                an.transitionTriggerParam.clear();
+            }
+            an.transitionPending      = -1;
+            an.transitionElapsed      = 0.0f;
+            an.transitionDuration     = 0.0f;
+            an.transitionSwapped      = false;
+            return false;
+        }
+        return true;
+    }
+
     // Drive an AnimatorComponent through its controller. Picks the
     // initial state on the first tick, advances the current state's
     // animation, samples it onto the SpriteRenderer, and then walks
@@ -446,6 +520,12 @@ private:
             }
         }
 
+        // Tick any in-flight transition blend before the per-state
+        // logic; the blend handler will swap currentState at the
+        // midpoint so the per-state code automatically picks up the
+        // new animation in the same frame.
+        const bool inBlend = TickTransitionBlend(an, dt, e);
+
         const SceneEditor::AnimatorState& st = ctrl->states[size_t(an.currentState)];
         SceneEditor::AnimationAsset* anim = m_assetDb.GetAnimation(st.animation);
         if (anim && !anim->frames.empty()) {
@@ -468,7 +548,9 @@ private:
         // fires when its `fromIdx` matches the current state (or is
         // -1 = any), the named parameter is declared on the
         // controller, and the value-vs-target comparison passes for
-        // the parameter's type.
+        // the parameter's type. Skip the loop entirely while a blend
+        // is still in flight so transitions can't stack.
+        if (inBlend) return;
         for (const SceneEditor::AnimatorTransition& tr : ctrl->transitions) {
             if (tr.fromIdx >= 0 && tr.fromIdx != an.currentState) continue;
             if (tr.toIdx < 0 || tr.toIdx >= int(ctrl->states.size())) continue;
@@ -489,9 +571,13 @@ private:
             // skip it the same way the M5c4 path did.
             if (tr.param.empty()) {
                 if (!tr.hasExitTime) continue;
-                an.currentState = tr.toIdx;
-                an.currentTime  = 0.0f;
-                an.prevTime     = 0.0f;
+                if (tr.duration > 0.0f) {
+                    BeginTransitionBlend(an, e, tr);
+                } else {
+                    an.currentState = tr.toIdx;
+                    an.currentTime  = 0.0f;
+                    an.prevTime     = 0.0f;
+                }
                 break;
             }
             const SceneEditor::AnimatorParameter* decl = nullptr;
@@ -538,14 +624,21 @@ private:
                 else                       fire = (v == tr.valueBool);
             }
             if (!fire) continue;
-            an.currentState = tr.toIdx;
-            an.currentTime  = 0.0f;
-            an.prevTime     = 0.0f;
-            // Trigger consumption: the parameter the transition just
-            // read auto-resets to false so the same trigger doesn't
-            // re-fire on the next tick.
-            if (decl->type == PT::Trigger) {
-                an.paramBools[tr.param] = false;
+            if (tr.duration > 0.0f) {
+                BeginTransitionBlend(an, e, tr);
+                // Defer trigger consumption to the blend end so the
+                // inspector keeps showing the "armed" indicator
+                // through the fade.
+                if (decl->type == PT::Trigger) {
+                    an.transitionTriggerParam = tr.param;
+                }
+            } else {
+                an.currentState = tr.toIdx;
+                an.currentTime  = 0.0f;
+                an.prevTime     = 0.0f;
+                if (decl->type == PT::Trigger) {
+                    an.paramBools[tr.param] = false;
+                }
             }
             break;
         }
@@ -1279,6 +1372,13 @@ private:
                                         0.0f, 1.0f, "%.2f")) dirty = true;
             }
             ImGui::SameLine();
+            ImGui::SetNextItemWidth(110.0f);
+            if (ImGui::DragFloat("##gdur", &tr.duration, 0.01f,
+                                  0.0f, 60.0f, "dur %.2fs")) {
+                if (tr.duration < 0.0f) tr.duration = 0.0f;
+                dirty = true;
+            }
+            ImGui::SameLine();
             if (ImGui::SmallButton("Delete")) {
                 ctrl.transitions.erase(ctrl.transitions.begin() +
                                        m_graphSelectedTransition);
@@ -1640,6 +1740,13 @@ private:
                 ImGui::SetNextItemWidth(120.0f);
                 if (ImGui::SliderFloat("##exitt", &tr.exitTime,
                                         0.0f, 1.0f, "%.2f")) dirty = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110.0f);
+            if (ImGui::DragFloat("##dur", &tr.duration, 0.01f,
+                                  0.0f, 60.0f, "dur %.2fs")) {
+                if (tr.duration < 0.0f) tr.duration = 0.0f;
+                dirty = true;
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("Up") && i > 0) moveTrUp = i;

@@ -60,6 +60,11 @@ struct AnimatorTransition {
     // re-evaluating" patterns.
     bool        hasExitTime = false;
     float       exitTime    = 0.0f;
+    // Seconds spent blending into the target state. 0 = instant
+    // swap (the M5c4 behaviour). During the blend the editor cross-
+    // fades the SpriteRenderer's alpha; the target state takes over
+    // at the midpoint.
+    float       duration    = 0.0f;
 };
 
 // .ncontroller asset: a small animation state machine. The runtime

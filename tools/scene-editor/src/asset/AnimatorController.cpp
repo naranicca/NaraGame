@@ -92,6 +92,7 @@ void AnimatorControllerAsset::FromJson(const Value& root) {
                 tr.valueInt    = t.GetInt ("valueInt", 0);
                 tr.hasExitTime = t.GetBool ("hasExitTime", false);
                 tr.exitTime    = float(t.GetNumber("exitTime", 0.0));
+                tr.duration    = float(t.GetNumber("duration", 0.0));
                 transitions.push_back(std::move(tr));
             }
         }
@@ -149,6 +150,7 @@ Value AnimatorControllerAsset::ToJson() const {
         o.Add("valueInt",    Value::MakeNumber(t.valueInt));
         o.Add("hasExitTime", Value::MakeBool(t.hasExitTime));
         o.Add("exitTime",    Value::MakeNumber(t.exitTime));
+        o.Add("duration",    Value::MakeNumber(t.duration));
         tarr.Push(std::move(o));
     }
     root.Add("transitions", std::move(tarr));
