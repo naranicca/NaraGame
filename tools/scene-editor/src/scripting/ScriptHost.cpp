@@ -212,9 +212,20 @@ static void FireScriptDestroyTree(ScriptHost* host, Scene* scene,
 static int LuaSceneCreateEntity(lua_State* L) {
     ScriptHost* host = HostFromUpvalue(L);
     if (!host || !host->BoundScene()) return 0;
-    const char* name = luaL_optstring(L, 1, "Entity");
+    const char* name       = luaL_optstring(L, 1, "Entity");
+    const char* parentName = luaL_optstring(L, 2, nullptr);
     Scene* scene = host->BoundScene();
-    EntityId id = scene->CreateEntity(name);
+    // Optional second arg names the parent. An empty / unknown
+    // parent name silently falls through to creating a root --
+    // the call still succeeds so a script that doesn't care
+    // about hierarchy keeps reading like `scene.create_entity
+    // "Foo"`.
+    EntityId parentId = kInvalidEntityId;
+    if (parentName && parentName[0] != '\0') {
+        Entity* p = scene->FindByName(parentName);
+        if (p) parentId = p->id;
+    }
+    EntityId id = scene->CreateEntity(name, parentId);
     Entity* e = scene->Get(id);
     lua_pushstring(L, e ? e->name.c_str() : "");
     return 1;
