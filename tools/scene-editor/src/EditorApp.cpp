@@ -2261,6 +2261,38 @@ private:
             an->events.push_back(std::move(ev));
             dirty = true;
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Sort by time") && an->events.size() > 1) {
+            // Capture the selected event before the sort so we can
+            // restore m_animEditorSelEvent to whichever index now
+            // holds it. We match on (time, name, stringArg) which is
+            // unique in practice; duplicates pick the earliest slot.
+            SceneEditor::AnimationEvent selSnapshot;
+            bool hadSelection = false;
+            if (m_animEditorSelEvent >= 0 &&
+                m_animEditorSelEvent < int(an->events.size())) {
+                selSnapshot  = an->events[size_t(m_animEditorSelEvent)];
+                hadSelection = true;
+            }
+            std::sort(an->events.begin(), an->events.end(),
+                      [](const SceneEditor::AnimationEvent& a,
+                         const SceneEditor::AnimationEvent& b) {
+                          return a.time < b.time;
+                      });
+            if (hadSelection) {
+                m_animEditorSelEvent = -1;
+                for (size_t i = 0; i < an->events.size(); ++i) {
+                    const auto& e = an->events[i];
+                    if (e.time      == selSnapshot.time &&
+                        e.name      == selSnapshot.name &&
+                        e.stringArg == selSnapshot.stringArg) {
+                        m_animEditorSelEvent = int(i);
+                        break;
+                    }
+                }
+            }
+            dirty = true;
+        }
         ImGui::Separator();
 
         // Scrubber + autoplay. Editor-local so opening the editor
