@@ -6879,6 +6879,38 @@ private:
                     e.name.c_str());
     }
 
+    // ImGui callback for the REPL input. Up/Down cycle through
+    // m_replHistory; -1 = "current draft" (no entry selected) and
+    // arrowing past either end wraps to the draft. Restores the
+    // text widget to whichever history entry the index lands on.
+    static int ReplHistoryCallback(ImGuiInputTextCallbackData* data) {
+        auto* app = static_cast<EditorApp*>(data->UserData);
+        if (data->EventFlag != ImGuiInputTextFlags_CallbackHistory ||
+            !app || app->m_replHistory.empty()) return 0;
+        const int last = int(app->m_replHistory.size()) - 1;
+        if (data->EventKey == ImGuiKey_UpArrow) {
+            if (app->m_replHistoryIdx == -1)
+                app->m_replHistoryIdx = last;
+            else if (app->m_replHistoryIdx > 0)
+                --app->m_replHistoryIdx;
+        } else if (data->EventKey == ImGuiKey_DownArrow) {
+            if (app->m_replHistoryIdx == -1) return 0;
+            if (app->m_replHistoryIdx >= last)
+                app->m_replHistoryIdx = -1;
+            else
+                ++app->m_replHistoryIdx;
+        } else {
+            return 0;
+        }
+        data->DeleteChars(0, data->BufTextLen);
+        if (app->m_replHistoryIdx >= 0) {
+            const std::string& s =
+                app->m_replHistory[size_t(app->m_replHistoryIdx)];
+            data->InsertChars(0, s.c_str());
+        }
+        return 0;
+    }
+
     void DrawConsolePanel() {
         ImGui::Begin("Console");
         // Toolbar.
@@ -6893,22 +6925,62 @@ private:
         ImGui::TextDisabled("Script output: %zu",
                             m_scriptHost.OutputLog().size());
         ImGui::Separator();
-        // Split the panel: event log on top, script output below.
-        // Both newest-first so freshly-fired entries stay in view.
-        const float avail = ImGui::GetContentRegionAvail().y;
-        const float halfH = avail * 0.5f;
+        // Split the panel: event log on top, script output below,
+        // REPL input line at the very bottom (always reserves its
+        // own row so the script-output child shrinks instead of
+        // pushing the prompt off-screen).
+        const float lineH      = ImGui::GetTextLineHeightWithSpacing();
+        const float availTotal = ImGui::GetContentRegionAvail().y;
+        const float promptH    = lineH + 6.0f;
+        const float logsH      = availTotal - promptH;
+        const float halfH      = std::max(40.0f, logsH * 0.5f);
         ImGui::BeginChild("##eventlog", ImVec2(0, halfH), false);
         for (auto it = m_eventLog.rbegin(); it != m_eventLog.rend(); ++it) {
             ImGui::TextUnformatted(it->c_str());
         }
         ImGui::EndChild();
         ImGui::Separator();
-        ImGui::BeginChild("##scriptlog", ImVec2(0, 0), false);
+        ImGui::BeginChild("##scriptlog",
+                          ImVec2(0, std::max(40.0f, logsH - halfH)),
+                          false);
         const auto& sout = m_scriptHost.OutputLog();
         for (auto it = sout.rbegin(); it != sout.rend(); ++it) {
             ImGui::TextUnformatted(it->c_str());
         }
         ImGui::EndChild();
+        ImGui::Separator();
+        // REPL prompt.
+        ImGui::TextUnformatted(">");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1.0f);
+        bool reclaimFocus = false;
+        const ImGuiInputTextFlags flags =
+            ImGuiInputTextFlags_EnterReturnsTrue |
+            ImGuiInputTextFlags_CallbackHistory;
+        if (ImGui::InputText("##repl", m_replInputBuffer,
+                              sizeof(m_replInputBuffer), flags,
+                              &EditorApp::ReplHistoryCallback,
+                              this)) {
+            const std::string code = m_replInputBuffer;
+            if (!code.empty()) {
+                m_scriptHost.AppendLine("> " + code);
+                // Windows.h defines LoadString as a macro that
+                // expands to LoadStringW/A -- undef it locally so
+                // the ScriptHost member call goes through cleanly.
+                #ifdef LoadString
+                #undef LoadString
+                #endif
+                m_scriptHost.LoadString(code, "[repl]");
+                m_replHistory.push_back(code);
+                if (m_replHistory.size() > 64) {
+                    m_replHistory.erase(m_replHistory.begin());
+                }
+            }
+            m_replInputBuffer[0] = '\0';
+            m_replHistoryIdx = -1;
+            reclaimFocus = true;
+        }
+        if (reclaimFocus) ImGui::SetKeyboardFocusHere(-1);
         ImGui::End();
     }
 
@@ -7403,6 +7475,15 @@ private:
     // single contiguous backing store. Files that exceed 64 KB
     // load truncated + a tag in the title flags it so the user
     // doesn't accidentally save back a chopped file.
+    // REPL input line at the bottom of the Console panel. Up /
+    // Down arrows scroll through submitted history; Enter dispatches
+    // the buffer through ScriptHost::LoadString + echoes it into
+    // the host's output log as `> <code>` so the response sits
+    // right after the prompt.
+    char                m_replInputBuffer[1024] = "";
+    std::vector<std::string> m_replHistory;
+    int                 m_replHistoryIdx = -1;
+
     bool                m_scriptEditorOpen     = false;
     bool                m_scriptEditorActivate = false;
     std::string         m_scriptEditorAbsPath;
