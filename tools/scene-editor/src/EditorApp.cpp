@@ -1764,6 +1764,33 @@ private:
             }
             dirty = true;
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Copy##states") && !ctrl->states.empty()) {
+            m_clipboardStates = ctrl->states;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Copy %zu states to clipboard.",
+                              ctrl->states.size());
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m_clipboardStates.empty());
+        if (ImGui::Button("Paste##states")) {
+            // Appending states never invalidates existing
+            // transitions because their fromIdx + toIdx still
+            // point at the original slots.
+            for (const auto& s : m_clipboardStates) {
+                ctrl->states.push_back(s);
+            }
+            dirty = true;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                m_clipboardStates.empty()
+                    ? "Clipboard empty."
+                    : "Append %zu states from clipboard.",
+                m_clipboardStates.size());
+        }
 
         // -----------------------------------------------------------
         // Parameters
@@ -1896,6 +1923,30 @@ private:
                           return a.name < b.name;
                       });
             dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Copy##params") && !ctrl->parameters.empty()) {
+            m_clipboardParameters = ctrl->parameters;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Copy %zu parameters to clipboard.",
+                              ctrl->parameters.size());
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m_clipboardParameters.empty());
+        if (ImGui::Button("Paste##params")) {
+            for (const auto& p : m_clipboardParameters) {
+                ctrl->parameters.push_back(p);
+            }
+            dirty = true;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                m_clipboardParameters.empty()
+                    ? "Clipboard empty."
+                    : "Append %zu parameters from clipboard.",
+                m_clipboardParameters.size());
         }
 
         // -----------------------------------------------------------
@@ -2276,6 +2327,47 @@ private:
                 if (a.fromIdx != b.fromIdx) return a.fromIdx < b.fromIdx;
                 return a.toIdx < b.toIdx;
             });
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Copy##trans") &&
+            !ctrl->transitions.empty()) {
+            m_clipboardTransitions = ctrl->transitions;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Copy %zu transitions to clipboard.",
+                              ctrl->transitions.size());
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m_clipboardTransitions.empty());
+        if (ImGui::Button("Paste##trans")) {
+            // Transitions reference state indices, so the paste
+            // path clamps each pasted edge against the target's
+            // current state count: out-of-range fromIdx drops to
+            // -1 (any), out-of-range toIdx drops to 0 (or stays
+            // -1 if the target has no states at all -- still a
+            // visible "(invalid)" the user will fix in the row
+            // editor). param strings stay as-is; a stale param
+            // name just means the transition won't fire until the
+            // user updates it or adds a matching parameter.
+            const int N = int(ctrl->states.size());
+            for (const auto& tr : m_clipboardTransitions) {
+                SceneEditor::AnimatorTransition copy = tr;
+                if (copy.fromIdx >= N) copy.fromIdx = -1;
+                if (copy.toIdx < 0 || copy.toIdx >= N) {
+                    copy.toIdx = (N > 0) ? 0 : -1;
+                }
+                ctrl->transitions.push_back(std::move(copy));
+            }
+            dirty = true;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                m_clipboardTransitions.empty()
+                    ? "Clipboard empty."
+                    : "Append %zu transitions from clipboard "
+                      "(state indices clamp to the target controller).",
+                m_clipboardTransitions.size());
         }
 
         if (dirty) m_assetDb.SaveAnimatorController(m_controllerEditorAsset);
@@ -6688,8 +6780,16 @@ private:
     // Paste triggers. Outlive any single Animation Editor session
     // so the user can copy from one .nanim, swap assets, and paste
     // into another. Not serialised.
-    std::vector<SceneEditor::AnimationFrame> m_clipboardFrames;
-    std::vector<SceneEditor::AnimationEvent> m_clipboardEvents;
+    std::vector<SceneEditor::AnimationFrame>      m_clipboardFrames;
+    std::vector<SceneEditor::AnimationEvent>      m_clipboardEvents;
+    // Same cross-asset clipboard pattern for the Controller
+    // Editor's three vectors. Transitions reference state indices,
+    // so the paste path clamps out-of-range fromIdx + toIdx to
+    // safe defaults (-1 / 0) when the target controller has fewer
+    // states than the source.
+    std::vector<SceneEditor::AnimatorState>      m_clipboardStates;
+    std::vector<SceneEditor::AnimatorParameter>  m_clipboardParameters;
+    std::vector<SceneEditor::AnimatorTransition> m_clipboardTransitions;
     // Parameter filters used by the controller editor + the per-
     // entity Animator inspector. Both treat an empty buffer as
     // "show every parameter" and otherwise match the parameter name
