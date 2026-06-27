@@ -1698,6 +1698,72 @@ private:
             ctrl->states.push_back(std::move(st));
             dirty = true;
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Sort A-Z") && ctrl->states.size() > 1) {
+            // Sorting the states vector reorders the indices that
+            // every transition + defaultState + graph selection
+            // points at, so we build an old->new remap and rewrite
+            // every dependent field in lockstep.
+            const size_t N = ctrl->states.size();
+            std::vector<size_t> order(N);
+            for (size_t i = 0; i < N; ++i) order[i] = i;
+            std::sort(order.begin(), order.end(),
+                      [&](size_t a, size_t b) {
+                          return ctrl->states[a].name <
+                                 ctrl->states[b].name;
+                      });
+            std::vector<int> remap(N);
+            for (size_t newIdx = 0; newIdx < N; ++newIdx) {
+                remap[order[newIdx]] = int(newIdx);
+            }
+            std::vector<SceneEditor::AnimatorState> sorted;
+            sorted.reserve(N);
+            for (size_t i = 0; i < N; ++i) {
+                sorted.push_back(std::move(ctrl->states[order[i]]));
+            }
+            ctrl->states = std::move(sorted);
+            for (auto& tr : ctrl->transitions) {
+                if (tr.fromIdx >= 0 && tr.fromIdx < int(N)) {
+                    tr.fromIdx = remap[size_t(tr.fromIdx)];
+                }
+                if (tr.toIdx >= 0 && tr.toIdx < int(N)) {
+                    tr.toIdx = remap[size_t(tr.toIdx)];
+                }
+            }
+            if (ctrl->defaultState >= 0 &&
+                ctrl->defaultState < int(N)) {
+                ctrl->defaultState = remap[size_t(ctrl->defaultState)];
+            }
+            auto remapPtr = [&](int& v) {
+                if (v >= 0 && v < int(N)) v = remap[size_t(v)];
+            };
+            remapPtr(m_graphSelectedState);
+            remapPtr(m_graphDragState);
+            remapPtr(m_graphPendingFrom);
+            remapPtr(m_graphContextNode);
+            dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Auto layout") && !ctrl->states.empty()) {
+            // Lay nodes out on an approximately square grid so the
+            // graph view starts from a readable baseline. The
+            // graph editor's drag handles still move individual
+            // nodes after.
+            const int N    = int(ctrl->states.size());
+            int cols = 1;
+            while (cols * cols < N) ++cols;
+            const float spacingX = 200.0f;
+            const float spacingY = 120.0f;
+            const float originX  = 40.0f;
+            const float originY  = 40.0f;
+            for (int i = 0; i < N; ++i) {
+                const int row = i / cols;
+                const int col = i % cols;
+                ctrl->states[size_t(i)].nodeX = originX + col * spacingX;
+                ctrl->states[size_t(i)].nodeY = originY + row * spacingY;
+            }
+            dirty = true;
+        }
 
         // -----------------------------------------------------------
         // Parameters
