@@ -501,11 +501,25 @@ private:
             DrawHierarchyNode(root);
         }
         // Click on empty area clears the selection so the inspector
-        // shows the empty state again.
+        // shows the empty state again. The same blank area doubles as a
+        // drop target so a texture dragged here spawns a root entity.
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         if (avail.y > 0) {
             ImGui::InvisibleButton("##hier_blank", ImVec2(-1, avail.y));
             if (ImGui::IsItemClicked()) m_selection = SceneEditor::kInvalidEntityId;
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* p =
+                        ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                    if (p->DataSize == sizeof(SceneEditor::AssetGuid)) {
+                        SceneEditor::AssetGuid guid;
+                        std::memcpy(&guid, p->Data, sizeof(guid));
+                        // Spawn at world origin; user can re-position
+                        // via inspector or by dragging in the viewport.
+                        SpawnSpriteEntityAt(guid, ImVec2{0.0f, 0.0f});
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
         }
         ImGui::End();
     }
@@ -525,6 +539,19 @@ private:
                                             flags, "%s", e->name.c_str());
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
             m_selection = id;
+        }
+        // Drop target: a texture dragged onto an entity row spawns the
+        // new sprite as a child of this entity.
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p =
+                    ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                if (p->DataSize == sizeof(SceneEditor::AssetGuid)) {
+                    SceneEditor::AssetGuid guid;
+                    std::memcpy(&guid, p->Data, sizeof(guid));
+                    SpawnSpriteEntityAt(guid, ImVec2{0.0f, 0.0f}, id);
+                }
+            }
+            ImGui::EndDragDropTarget();
         }
         if (ImGui::BeginPopupContextItem()) {
             if (ImGui::MenuItem("Add Child")) {
@@ -675,6 +702,24 @@ private:
             }
             ImGui::EndCombo();
         }
+        // Drop a texture from the Project panel directly onto the combo
+        // to swap the sprite without opening the dropdown.
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p =
+                    ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                if (p->DataSize == sizeof(SceneEditor::AssetGuid)) {
+                    SceneEditor::AssetGuid guid;
+                    std::memcpy(&guid, p->Data, sizeof(guid));
+                    if (const auto* e = m_assetDb.FindByGuid(guid)) {
+                        if (e->typeName == "Texture") {
+                            s.sprite = guid;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
         float col[4] = { s.color.r, s.color.g, s.color.b, s.color.a };
         if (ImGui::ColorEdit4("Tint", col)) {
             s.color = { col[0], col[1], col[2], col[3] };
@@ -802,6 +847,23 @@ private:
         const bool hovered = ImGui::IsItemHovered();
         const bool active  = ImGui::IsItemActive();
 
+        // Drop target: a texture from the Project panel lands as a new
+        // entity at the cursor's world position with a SpriteRenderer
+        // already pointing at the dropped asset.
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p =
+                    ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                if (p->DataSize == sizeof(SceneEditor::AssetGuid)) {
+                    SceneEditor::AssetGuid guid;
+                    std::memcpy(&guid, p->Data, sizeof(guid));
+                    const ImVec2 world = ScreenToWorld(ImGui::GetMousePos(),
+                                                       panelMin, panelSize);
+                    SpawnSpriteEntityAt(guid, world);
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+
         HandleViewportInput(hovered, active, panelMin, panelSize);
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -821,6 +883,39 @@ private:
 
         dl->PopClipRect();
         ImGui::End();
+    }
+
+    // Create a new entity with a SpriteRenderer pointing at `guid`,
+    // placed at the given world coordinates. Non-texture / unknown
+    // guids are silently ignored so a stray drop doesn't pollute the
+    // scene with a placeholder. The new entity is auto-selected so
+    // the Inspector reflects it right away.
+    void SpawnSpriteEntityAt(const SceneEditor::AssetGuid& guid,
+                             const ImVec2& worldPos,
+                             SceneEditor::EntityId parent =
+                                 SceneEditor::kInvalidEntityId) {
+        if (!guid.IsValid()) return;
+        const auto* entry = m_assetDb.FindByGuid(guid);
+        if (!entry || entry->typeName != "Texture") return;
+        // Use the file stem as a friendly entity name.
+        std::string stem = entry->relPath;
+        const size_t slash = stem.find_last_of('/');
+        if (slash != std::string::npos) stem = stem.substr(slash + 1);
+        const size_t dot = stem.rfind('.');
+        if (dot != std::string::npos) stem.resize(dot);
+
+        const SceneEditor::EntityId id =
+            m_scene.CreateEntity(stem.empty() ? "Sprite" : stem, parent);
+        SceneEditor::Entity* e = m_scene.Get(id);
+        if (!e) return;
+        if (auto* t = e->GetComponent<SceneEditor::TransformComponent>()) {
+            t->position = { worldPos.x, worldPos.y, 0.0f };
+        }
+        auto spr = std::make_unique<SceneEditor::SpriteRendererComponent>();
+        spr->sprite = guid;
+        e->components.push_back(std::move(spr));
+        m_selection = id;
+        UpdateWindowTitle();
     }
 
     void HandleViewportInput(bool hovered, bool active,
@@ -1071,9 +1166,9 @@ private:
             }
             return;
         }
-        // File: show name + the classified type label, selectable for
-        // future drag-drop / inspector wiring. Hover tooltip shows the
-        // stable GUID for debugging asset references.
+        // File: show name + the classified type label, selectable +
+        // drag source. Drop targets (Viewport / Inspector sprite slot /
+        // Hierarchy blank area) accept the same "ASSET_GUID" payload.
         const SceneEditor::AssetEntry* e =
             (node.entryIndex < m_assetDb.Entries().size())
                 ? &m_assetDb.Entries()[node.entryIndex]
@@ -1086,6 +1181,14 @@ private:
                           (selected ? ImGuiTreeNodeFlags_Selected : 0),
                           "%s", node.name.c_str());
         if (ImGui::IsItemClicked() && e) m_selectedAsset = e->guid;
+        if (e && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            // The 16-byte GUID is the entire payload. Editor drop sites
+            // use the type tag to pick what to do with it.
+            ImGui::SetDragDropPayload("ASSET_GUID", &e->guid, sizeof(e->guid));
+            ImGui::Text("%s", node.name.c_str());
+            ImGui::TextDisabled("[%s]", e->typeName.c_str());
+            ImGui::EndDragDropSource();
+        }
         if (e) {
             ImGui::SameLine();
             ImGui::TextDisabled("  [%s]", e->typeName.c_str());
