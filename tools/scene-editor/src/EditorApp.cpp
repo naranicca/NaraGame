@@ -296,6 +296,7 @@ public:
         DrawAutotileEditorWindow();
         DrawAnimationEditorWindow();
         DrawControllerEditorWindow();
+        DrawScriptEditorWindow();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
 
         ImGui::Render();
@@ -2618,6 +2619,101 @@ private:
         }
 
         if (dirty) m_assetDb.SaveAnimatorController(m_controllerEditorAsset);
+        ImGui::End();
+    }
+
+    // Loads `absPath` into m_scriptEditorBuffer + makes the
+    // editor window visible. relPath is the project-relative
+    // path the title bar shows so absolute paths don't bloat
+    // the window header. Truncated reads (file > 64 KB) flip
+    // m_scriptEditorTruncated; Save remains disabled while
+    // that flag is set so a partial buffer can't overwrite a
+    // larger source file.
+    void OpenScriptEditor(const std::string& absPath,
+                          const std::string& relPath) {
+        m_scriptEditorBuffer.assign(kScriptEditorBufSize, '\0');
+        m_scriptEditorTruncated = false;
+        FILE* f = nullptr;
+        fopen_s(&f, absPath.c_str(), "rb");
+        if (f) {
+            const size_t n = std::fread(m_scriptEditorBuffer.data(),
+                                         1, kScriptEditorBufSize - 1, f);
+            // Mark truncated if there's more after the read.
+            const int peek = std::fgetc(f);
+            if (peek != EOF) m_scriptEditorTruncated = true;
+            std::fclose(f);
+            m_scriptEditorBuffer[n] = '\0';
+        } else {
+            m_scriptEditorBuffer[0] = '\0';
+        }
+        m_scriptEditorAbsPath  = absPath;
+        m_scriptEditorRelPath  = relPath;
+        m_scriptEditorOpen     = true;
+        m_scriptEditorActivate = true;
+    }
+
+    // Writes the editor buffer back to disk + re-runs the
+    // script through ScriptHost::LoadFile so the interpreter
+    // picks up the change without a project reload. No-op when
+    // the editor isn't open or the buffer is flagged truncated.
+    void SaveScriptEditor() {
+        if (!m_scriptEditorOpen) return;
+        if (m_scriptEditorTruncated) return;
+        FILE* f = nullptr;
+        fopen_s(&f, m_scriptEditorAbsPath.c_str(), "wb");
+        if (!f) return;
+        const size_t len = std::strlen(m_scriptEditorBuffer.data());
+        std::fwrite(m_scriptEditorBuffer.data(), 1, len, f);
+        std::fclose(f);
+        m_scriptHost.LoadFile(m_scriptEditorAbsPath,
+                              m_scriptEditorRelPath);
+    }
+
+    // Discards in-memory edits + re-reads from disk. Same code
+    // path as the initial open; just rewires absPath / relPath
+    // back to what's already set.
+    void ReloadScriptEditor() {
+        if (!m_scriptEditorOpen) return;
+        OpenScriptEditor(m_scriptEditorAbsPath,
+                         m_scriptEditorRelPath);
+    }
+
+    // Floating panel that hosts a single InputTextMultiline +
+    // Save / Reload / Close buttons. Optional truncation banner
+    // when the source file exceeded the 64 KB buffer.
+    void DrawScriptEditorWindow() {
+        if (!m_scriptEditorOpen) return;
+        if (m_scriptEditorActivate) {
+            ImGui::SetNextWindowFocus();
+            m_scriptEditorActivate = false;
+        }
+        ImGui::SetNextWindowSize(ImVec2(720, 520),
+                                  ImGuiCond_FirstUseEver);
+        std::string title = "Script: " + m_scriptEditorRelPath +
+                            "###scripteditor";
+        if (!ImGui::Begin(title.c_str(), &m_scriptEditorOpen)) {
+            ImGui::End();
+            return;
+        }
+        if (ImGui::Button("Save")) SaveScriptEditor();
+        ImGui::SameLine();
+        if (ImGui::Button("Reload from disk")) ReloadScriptEditor();
+        ImGui::SameLine();
+        if (ImGui::Button("Close")) m_scriptEditorOpen = false;
+        if (m_scriptEditorTruncated) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f),
+                "(truncated -- file > 64 KB, Save disabled)");
+        }
+        ImGui::Separator();
+        // Fill the remaining region with the text widget. The
+        // buffer's NUL keeps trailing capacity invisible to the
+        // widget while still letting the user grow the file.
+        ImGui::InputTextMultiline("##scripttext",
+            m_scriptEditorBuffer.data(),
+            m_scriptEditorBuffer.size(),
+            ImVec2(-FLT_MIN, -FLT_MIN),
+            ImGuiInputTextFlags_AllowTabInput);
         ImGui::End();
     }
 
@@ -7075,6 +7171,12 @@ private:
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             OpenControllerEditor(e->guid);
         }
+        if (e && e->typeName == "Script" &&
+            ImGui::IsItemHovered() &&
+            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            OpenScriptEditor(m_assetDb.AssetsRoot() + "/" + e->relPath,
+                             e->relPath);
+        }
         if (e && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             // The 16-byte GUID is the entire payload. Editor drop sites
             // use the type tag to pick what to do with it.
@@ -7294,6 +7396,20 @@ private:
     // follow-up commit once the host has more event sources to
     // route. The host outlives every Animation Editor session.
     SceneEditor::ScriptHost  m_scriptHost;
+
+    // Minimal in-editor text editor for .lua scripts. Opens via
+    // double-click on a Script-typed Project row; the buffer is
+    // a fixed 64 KB block so the InputTextMultiline widget has a
+    // single contiguous backing store. Files that exceed 64 KB
+    // load truncated + a tag in the title flags it so the user
+    // doesn't accidentally save back a chopped file.
+    bool                m_scriptEditorOpen     = false;
+    bool                m_scriptEditorActivate = false;
+    std::string         m_scriptEditorAbsPath;
+    std::string         m_scriptEditorRelPath;
+    bool                m_scriptEditorTruncated = false;
+    std::vector<char>   m_scriptEditorBuffer;
+    static constexpr size_t kScriptEditorBufSize = 64 * 1024;
 
     // Tilemap paint state. The active stamp is a rectangular region of
     // palette cells defined by (Anchor, Cur) in palette (column, row)
