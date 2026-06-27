@@ -2882,6 +2882,26 @@ private:
                          ImVec2{u0, v0}, ImVec2{u1, v1}, tint);
         }
 
+        // Collision overlay: walk the cells once more (now that we have
+        // the same world-to-screen math handy) and paint a translucent
+        // red box over every cell whose tile-index is flagged
+        // collides in the bound Tileset asset. Skips entirely when the
+        // toggle is off, the tilemap doesn't point at a Tileset asset,
+        // or that tileset has no flagged tiles -- so the overhead is
+        // strictly proportional to flagged cells.
+        if (m_showCollisionOverlay) {
+            if (const auto* tsEntry = m_assetDb.FindByGuid(tm.tileset)) {
+                if (tsEntry->typeName == "Tileset") {
+                    if (SceneEditor::TilesetAsset* ts =
+                            m_assetDb.GetTileset(tm.tileset)) {
+                        DrawTilemapCollisionOverlay(dl, tm, *ts, entityWp,
+                                                    cellWorldW, cellWorldH,
+                                                    c, zoom);
+                    }
+                }
+            }
+        }
+
         // Selection outline + label only when we drew at least one cell.
         if (bbMinX <= bbMaxX && bbMinY <= bbMaxY) {
             const ImVec2 a{c.x + (bbMinX - entityWp.x) * zoom,
@@ -2895,6 +2915,31 @@ private:
             dl->AddText(ImVec2{a.x, b.y + 2.0f},
                         IM_COL32(220, 220, 220, 255), e.name.c_str());
         }
+    }
+
+    void DrawTilemapCollisionOverlay(
+        ImDrawList* dl,
+        const SceneEditor::TilemapComponent& tm,
+        const SceneEditor::TilesetAsset& ts,
+        const ImVec2& entityWp,
+        float cellWorldW, float cellWorldH,
+        const ImVec2& c, float zoom) {
+        for (const auto& kv : tm.cells) {
+            const int idx = kv.second;
+            auto it = ts.tiles.find(idx);
+            if (it == ts.tiles.end() || !it->second.collides) continue;
+            const int gx = kv.first.first;
+            const int gy = kv.first.second;
+            const float worldL =  gx       * cellWorldW;
+            const float worldR = (gx + 1) * cellWorldW;
+            const float worldB =  gy       * cellWorldH;
+            const float worldT = (gy + 1) * cellWorldH;
+            const ImVec2 a{c.x + worldL * zoom, c.y - worldT * zoom};
+            const ImVec2 b{c.x + worldR * zoom, c.y - worldB * zoom};
+            dl->AddRectFilled(a, b, IM_COL32(220, 60, 60, 110));
+            dl->AddRect(a, b, IM_COL32(255, 110, 110, 200), 0.0f, 0, 1.0f);
+        }
+        (void)entityWp;
     }
 
     void DrawMarkerEntity(ImDrawList* dl, const SceneEditor::Entity& e,
@@ -3338,6 +3383,10 @@ private:
         toolBtn("Rect",   PaintTool::Rect);
         ImGui::SameLine();
         ImGui::TextDisabled("active tile: %d", m_paintTileIndex);
+        // Collision-overlay toggle. Sits in the same toolbar so the
+        // debug view + paint tools share one panel; it's a global
+        // flag, not per-tilemap.
+        ImGui::Checkbox("Show collision", &m_showCollisionOverlay);
         ImGui::Separator();
 
         // Texture preview, scale-to-fit.
@@ -3605,6 +3654,11 @@ private:
     // border editing works in every slice mode, not just Manual.
     BorderDragSide      m_borderDrag        = BorderDragSide::None;
     BorderDragSide      m_borderHover       = BorderDragSide::None;
+    // Debug overlay for the tilemap's collides flag. When ON, every
+    // painted cell whose tile-index is flagged in the bound Tileset
+    // asset gets a translucent red highlight on top of the cell.
+    bool                m_showCollisionOverlay = false;
+
     // Tilemap paint state. The active stamp is a rectangular region of
     // palette cells defined by (Anchor, Cur) in palette (column, row)
     // coordinates. A single click leaves Anchor == Cur so the stamp is
