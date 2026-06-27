@@ -1,10 +1,15 @@
 // scene-editor -- Unity-style scene editor shell. Runs on top of the
 // NaraGame Application loop: the host drives the frame, ImGui's Win32
 // backend gets WM_* events via Window::SetMessageHook, and ImGui's
-// D3D11 backend draws on top of the engine's backbuffer. M1 commit 3
-// adds Project create / open / close on top of the dockspace shell.
+// D3D11 backend draws on top of the engine's backbuffer. M1 commit 4
+// adds Entity / Transform / Scene save+load + Hierarchy / Inspector
+// panels on top of the project shell.
 
 #include "project/Project.h"
+#include "scene/Component.h"
+#include "scene/Entity.h"
+#include "scene/Scene.h"
+#include "scene/TransformComponent.h"
 
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
@@ -86,6 +91,72 @@ std::string PickFolderDialog(HWND owner, const wchar_t* title) {
     return out;
 }
 
+// Convert a UTF-8 path returned by the shell into the engine's
+// forward-slash normalised form.
+std::string WideToUtf8(PCWSTR ws) {
+    if (!ws) return {};
+    const int len = WideCharToMultiByte(CP_UTF8, 0, ws, -1,
+                                        nullptr, 0, nullptr, nullptr);
+    std::string out;
+    if (len > 1) {
+        out.resize(size_t(len) - 1);
+        WideCharToMultiByte(CP_UTF8, 0, ws, -1, out.data(),
+                            len, nullptr, nullptr);
+    }
+    for (char& c : out) if (c == '\\') c = '/';
+    return out;
+}
+
+// File open / save dialog for one extension. `extName` shows up as the
+// filter description; `extPattern` is the wildcard (e.g. L"*.nscene");
+// `defaultExt` is appended when the user doesn't type one. Returns ""
+// on cancel.
+std::string PickFileDialog(HWND owner, REFCLSID clsid,
+                           const wchar_t* title,
+                           const wchar_t* extName,
+                           const wchar_t* extPattern,
+                           const wchar_t* defaultExt,
+                           const std::string& initialDir = {}) {
+    IFileDialog* dlg = nullptr;
+    HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_ALL,
+                                  IID_PPV_ARGS(&dlg));
+    if (FAILED(hr) || !dlg) return {};
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_FORCEFILESYSTEM);
+    if (title) dlg->SetTitle(title);
+    COMDLG_FILTERSPEC filter[1] = { { extName, extPattern } };
+    dlg->SetFileTypes(1, filter);
+    if (defaultExt) dlg->SetDefaultExtension(defaultExt);
+    if (!initialDir.empty()) {
+        // Convert UTF-8 -> wide so SHCreateItemFromParsingName accepts it.
+        const int wlen = MultiByteToWideChar(CP_UTF8, 0, initialDir.c_str(),
+                                             -1, nullptr, 0);
+        if (wlen > 1) {
+            std::wstring wide(size_t(wlen) - 1, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, initialDir.c_str(), -1,
+                                wide.data(), wlen);
+            IShellItem* folder = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(wide.c_str(), nullptr,
+                                                      IID_PPV_ARGS(&folder)))) {
+                dlg->SetFolder(folder);
+                folder->Release();
+            }
+        }
+    }
+    hr = dlg->Show(owner);
+    if (FAILED(hr)) { dlg->Release(); return {}; }
+    IShellItem* item = nullptr;
+    if (FAILED(dlg->GetResult(&item)) || !item) { dlg->Release(); return {}; }
+    PWSTR wpath = nullptr;
+    item->GetDisplayName(SIGDN_FILESYSPATH, &wpath);
+    item->Release();
+    dlg->Release();
+    std::string out = WideToUtf8(wpath);
+    if (wpath) CoTaskMemFree(wpath);
+    return out;
+}
+
 void SetWindowTitle(HWND hwnd, const std::string& title) {
     const int wlen = MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1,
                                          nullptr, 0);
@@ -98,7 +169,10 @@ void SetWindowTitle(HWND hwnd, const std::string& title) {
 
 class EditorApp : public Application {
 public:
-    EditorApp() : Application(MakeConfig()) {}
+    EditorApp(std::string startupProject, std::string startupScene)
+        : Application(MakeConfig()),
+          m_startupProjectPath(std::move(startupProject)),
+          m_startupScenePath(std::move(startupScene)) {}
 
     void OnStart() override {
         // COM apartment for IFileOpenDialog. ole32 is already linked
@@ -127,10 +201,31 @@ public:
         ImGui_ImplDX11_Init(dev, ctx);
 
         GetWindow().SetMessageHook(&ImGuiMessageHook);
+
+        // Register the built-in component factories before anything tries
+        // to deserialize a scene.
+        SceneEditor::RegisterBuiltinComponents();
+
         UpdateWindowTitle();
 
         NARAGAME_INFO("scene-editor: ImGui %s + DX11 + dockspace ready",
                       ImGui::GetVersion());
+
+        // Command-line auto-open. `--project <path>` opens a project at
+        // startup; `--scene <path>` follows to load a scene inside it.
+        // Wire-up for headless smoke tests + handy when re-launching
+        // from an external editor / build script.
+        if (!m_startupProjectPath.empty()) {
+            SceneEditor::Project p;
+            if (p.Open(m_startupProjectPath)) {
+                m_project = std::move(p);
+                UpdateWindowTitle();
+            }
+        }
+        if (!m_startupScenePath.empty() && m_scene.Load(m_startupScenePath)) {
+            m_currentScenePath = m_startupScenePath;
+            UpdateWindowTitle();
+        }
     }
 
     void OnStop() override {
@@ -183,6 +278,9 @@ private:
         if (m_project.IsOpen()) {
             title += " - ";
             title += m_project.Name();
+            title += " : ";
+            title += m_scene.Name();
+            if (m_scene.IsDirty()) title += "*";
         }
         SetWindowTitle(m_hwnd, title);
     }
@@ -210,16 +308,88 @@ private:
     void DoCloseProject() {
         if (!m_project.IsOpen()) return;
         m_project.Close();
+        m_scene = SceneEditor::Scene();
+        m_currentScenePath.clear();
+        m_selection = SceneEditor::kInvalidEntityId;
         UpdateWindowTitle();
+    }
+
+    // --- Scene flow -----------------------------------------------------
+
+    std::string ScenesDir() const {
+        return m_project.IsOpen() ? (m_project.AssetsDir() + "/Scenes")
+                                  : std::string{};
+    }
+
+    void DoNewScene() {
+        m_scene = SceneEditor::Scene();
+        m_scene.SetName("Untitled");
+        m_currentScenePath.clear();
+        m_selection = SceneEditor::kInvalidEntityId;
+        UpdateWindowTitle();
+    }
+
+    void DoOpenScene() {
+        const std::string path = PickFileDialog(
+            m_hwnd, CLSID_FileOpenDialog, L"Open Scene",
+            L"NaraGame Scene (*.nscene)", L"*.nscene", L"nscene",
+            ScenesDir());
+        if (path.empty()) return;
+        if (m_scene.Load(path)) {
+            m_currentScenePath = path;
+            m_selection = SceneEditor::kInvalidEntityId;
+            UpdateWindowTitle();
+        }
+    }
+
+    void DoSaveScene() {
+        if (m_currentScenePath.empty()) { DoSaveSceneAs(); return; }
+        if (m_scene.Save(m_currentScenePath)) {
+            m_scene.ClearDirty();
+            UpdateWindowTitle();
+        }
+    }
+
+    void DoSaveSceneAs() {
+        const std::string path = PickFileDialog(
+            m_hwnd, CLSID_FileSaveDialog, L"Save Scene As",
+            L"NaraGame Scene (*.nscene)", L"*.nscene", L"nscene",
+            ScenesDir());
+        if (path.empty()) return;
+        if (m_scene.Save(path)) {
+            m_currentScenePath = path;
+            m_scene.ClearDirty();
+            // Use the file stem as the scene name so the title and JSON
+            // line up with what the user picked.
+            const size_t slash = path.find_last_of('/');
+            std::string stem = (slash == std::string::npos)
+                ? path : path.substr(slash + 1);
+            const size_t dot = stem.rfind('.');
+            if (dot != std::string::npos) stem.resize(dot);
+            m_scene.SetName(stem);
+            UpdateWindowTitle();
+        }
     }
 
     void DrawMainMenuBar() {
         if (!ImGui::BeginMainMenuBar()) return;
         if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem("New Project...", "Ctrl+N")) StartNewProjectFlow();
-            if (ImGui::MenuItem("Open Project...", "Ctrl+O")) DoOpenProject();
+            if (ImGui::MenuItem("New Project...", "Ctrl+Shift+N"))
+                StartNewProjectFlow();
+            if (ImGui::MenuItem("Open Project...", "Ctrl+Shift+O"))
+                DoOpenProject();
             if (ImGui::MenuItem("Close Project", nullptr, false, m_project.IsOpen()))
                 DoCloseProject();
+            ImGui::Separator();
+            const bool projOpen = m_project.IsOpen();
+            if (ImGui::MenuItem("New Scene", "Ctrl+N", false, projOpen))
+                DoNewScene();
+            if (ImGui::MenuItem("Open Scene...", "Ctrl+O", false, projOpen))
+                DoOpenScene();
+            if (ImGui::MenuItem("Save Scene", "Ctrl+S", false, projOpen))
+                DoSaveScene();
+            if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S", false, projOpen))
+                DoSaveSceneAs();
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) Close();
             ImGui::EndMenu();
@@ -301,26 +471,136 @@ private:
         ImGui::Begin("Hierarchy");
         if (!m_project.IsOpen()) {
             ImGui::TextDisabled("No project open.");
-        } else {
-            ImGui::TextWrapped("Scene graph will land here -- entities, "
-                               "parenting, drag-drop.");
-            ImGui::Separator();
-            ImGui::TextDisabled("(placeholder, M1)");
+            ImGui::End();
+            return;
+        }
+        if (ImGui::Button("+ Entity")) {
+            const SceneEditor::EntityId id = m_scene.CreateEntity("Entity");
+            m_selection = id;
+            UpdateWindowTitle();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Scene: %s%s",
+                            m_scene.Name().c_str(),
+                            m_scene.IsDirty() ? "*" : "");
+        ImGui::Separator();
+        // Render each root, recurse into children. Right-click any node
+        // opens a Delete / Duplicate(stub) context menu.
+        for (SceneEditor::EntityId root : m_scene.Roots()) {
+            DrawHierarchyNode(root);
+        }
+        // Click on empty area clears the selection so the inspector
+        // shows the empty state again.
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        if (avail.y > 0) {
+            ImGui::InvisibleButton("##hier_blank", ImVec2(-1, avail.y));
+            if (ImGui::IsItemClicked()) m_selection = SceneEditor::kInvalidEntityId;
         }
         ImGui::End();
+    }
+
+    void DrawHierarchyNode(SceneEditor::EntityId id) {
+        SceneEditor::Entity* e = m_scene.Get(id);
+        if (!e) return;
+
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+                                   ImGuiTreeNodeFlags_OpenOnDoubleClick |
+                                   ImGuiTreeNodeFlags_SpanAvailWidth;
+        if (e->children.empty()) flags |= ImGuiTreeNodeFlags_Leaf |
+                                           ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        if (id == m_selection) flags |= ImGuiTreeNodeFlags_Selected;
+
+        const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(size_t(id)),
+                                            flags, "%s", e->name.c_str());
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+            m_selection = id;
+        }
+        if (ImGui::BeginPopupContextItem()) {
+            if (ImGui::MenuItem("Add Child")) {
+                m_scene.CreateEntity("Entity", id);
+                UpdateWindowTitle();
+            }
+            if (ImGui::MenuItem("Delete")) {
+                m_scene.DestroyEntity(id);
+                if (m_selection == id) m_selection = SceneEditor::kInvalidEntityId;
+                UpdateWindowTitle();
+                ImGui::EndPopup();
+                return;
+            }
+            ImGui::EndPopup();
+        }
+        if (open && !e->children.empty()) {
+            // Copy ids first so deletions in the loop body don't trip iterators.
+            const std::vector<SceneEditor::EntityId> kids = e->children;
+            for (SceneEditor::EntityId c : kids) DrawHierarchyNode(c);
+            ImGui::TreePop();
+        }
     }
 
     void DrawInspectorPanel() {
         ImGui::Begin("Inspector");
         if (!m_project.IsOpen()) {
-            ImGui::TextDisabled("No selection.");
-        } else {
-            ImGui::TextWrapped("Selected entity's components + property "
-                               "editors will land here.");
-            ImGui::Separator();
-            ImGui::TextDisabled("(placeholder, M1)");
+            ImGui::TextDisabled("No project open.");
+            ImGui::End();
+            return;
+        }
+        SceneEditor::Entity* e = m_scene.Get(m_selection);
+        if (!e) {
+            ImGui::TextDisabled("No entity selected.");
+            ImGui::End();
+            return;
+        }
+        // --- Header fields (name + enabled) -----------------------------
+        char nameBuf[256];
+        std::snprintf(nameBuf, sizeof(nameBuf), "%s", e->name.c_str());
+        if (ImGui::InputText("Name", nameBuf, sizeof(nameBuf))) {
+            e->name = nameBuf;
+            m_scene.MarkDirty();
+            UpdateWindowTitle();
+        }
+        if (ImGui::Checkbox("Enabled", &e->enabled)) {
+            m_scene.MarkDirty();
+            UpdateWindowTitle();
+        }
+        ImGui::TextDisabled("id %llu", e->id);
+        ImGui::Separator();
+
+        // --- Components -------------------------------------------------
+        for (auto& comp : e->components) {
+            DrawComponentEditor(comp.get());
         }
         ImGui::End();
+    }
+
+    void DrawComponentEditor(SceneEditor::Component* comp) {
+        if (!comp) return;
+        const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen |
+                                         ImGuiTreeNodeFlags_Framed;
+        if (!ImGui::CollapsingHeader(comp->TypeName(), flags)) return;
+        // Type-specific editor. New component types add a case here (or
+        // grow a virtual DrawInspector once the surface stabilises).
+        if (auto* t = dynamic_cast<SceneEditor::TransformComponent*>(comp)) {
+            float pos[3]   = { t->position.x, t->position.y, t->position.z };
+            float scale[3] = { t->scale.x,    t->scale.y,    t->scale.z };
+            bool changed = false;
+            if (ImGui::DragFloat3("Position", pos, 0.05f)) {
+                t->position = { pos[0], pos[1], pos[2] };
+                changed = true;
+            }
+            if (ImGui::DragFloat("Rotation Z", &t->rotation, 0.5f, -3600.0f, 3600.0f, "%.2f deg")) {
+                changed = true;
+            }
+            if (ImGui::DragFloat3("Scale", scale, 0.01f, -1000.0f, 1000.0f)) {
+                t->scale = { scale[0], scale[1], scale[2] };
+                changed = true;
+            }
+            if (changed) {
+                m_scene.MarkDirty();
+                UpdateWindowTitle();
+            }
+        } else {
+            ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
+        }
     }
 
     void DrawViewportPanel() {
@@ -401,15 +681,31 @@ private:
     bool                m_resetLayout  = false;
     SceneEditor::Project m_project;
 
+    // Active scene + path it last saved to / loaded from. Empty path
+    // means an unsaved (untitled) scene, so the Save command falls
+    // through to Save-As.
+    SceneEditor::Scene    m_scene;
+    std::string           m_currentScenePath;
+    SceneEditor::EntityId m_selection = SceneEditor::kInvalidEntityId;
+
     // New Project modal state.
     bool                m_openNewProjectModal = false;
     std::array<char, 256> m_newProjectName{};
     std::array<char, 1024> m_newProjectPath{};
     std::string         m_newProjectError;
+
+    std::string m_startupProjectPath;
+    std::string m_startupScenePath;
 };
 
 } // namespace
 
-Application* NaraGame::CreateApplication(int /*argc*/, char** /*argv*/) {
-    return new EditorApp();
+Application* NaraGame::CreateApplication(int argc, char** argv) {
+    std::string project, scene;
+    for (int i = 1; i + 1 < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--project") project = argv[++i];
+        else if (a == "--scene") scene = argv[++i];
+    }
+    return new EditorApp(std::move(project), std::move(scene));
 }
