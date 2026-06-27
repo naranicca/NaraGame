@@ -102,6 +102,11 @@ public:
     double Elapsed()    const { return m_elapsed; }
     long long FrameCount() const { return m_frameCount; }
 
+    // The entity name CallOn* is currently dispatching to.
+    // `scene.destroy_self` + future "self"-style helpers read it
+    // so scripts don't have to round-trip the entity argument.
+    const std::string& DispatchEntity() const { return m_dispatchEntity; }
+
 private:
     std::vector<std::string> m_outputLog;
     // Opaque lua_State* when NARAGAME_SCENE_EDITOR_HAS_LUA is
@@ -115,6 +120,10 @@ private:
     // them every editor frame; nothing else mutates them.
     double    m_elapsed    = 0.0;
     long long m_frameCount = 0;
+    // Bookkeeping for `scene.destroy_self`. Each lifecycle hook
+    // dispatcher sets this to its target entity name before the
+    // lua_pcall + clears it on return.
+    std::string m_dispatchEntity;
 };
 
 } // namespace SceneEditor

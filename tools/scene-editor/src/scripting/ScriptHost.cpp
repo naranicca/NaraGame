@@ -198,6 +198,13 @@ static void FireScriptDestroyTree(ScriptHost* host, Scene* scene,
         FireScriptDestroyTree(host, scene, childId);
     }
     if (auto* sc = e->GetComponent<ScriptComponent>()) {
+        // OnDisable runs first when the entity was alive +
+        // enabled -- mirrors the editor-side
+        // NotifyScriptDestroyForEntity ordering.
+        if (sc->lastSeenEnabled) {
+            host->CallOnDisable(e->name, sc->entryFunction);
+            sc->lastSeenEnabled = false;
+        }
         if (sc->started) {
             host->CallOnDestroy(e->name, sc->entryFunction);
             sc->started = false;
@@ -273,6 +280,29 @@ static int LuaSceneEntityCount(lua_State* L) {
     lua_pushinteger(L, count);
     return 1;
 }
+// scene.destroy_self. Fires from inside a lifecycle hook +
+// destroys whichever entity the host is currently dispatching
+// to. Outside a dispatch the call is a silent no-op so a stray
+// `scene.destroy_self()` from top-level code can't wipe the
+// scene. Re-uses FireScriptDestroyTree so children + OnDestroy
+// notifications follow the same path scene.destroy_entity does.
+static int LuaSceneDestroySelf(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    const std::string& name = host->DispatchEntity();
+    if (name.empty()) { lua_pushboolean(L, 0); return 1; }
+    Scene* scene = host->BoundScene();
+    Entity* e = scene->FindByName(name);
+    if (!e) { lua_pushboolean(L, 0); return 1; }
+    const EntityId id = e->id;
+    FireScriptDestroyTree(host, scene, id);
+    scene->DestroyEntity(id);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 // scene.parent_of / children_of / set_parent. Lets scripts walk
 // the entity hierarchy + reparent at runtime. parent_of returns
 // the parent's name string (empty string when the entity is a
@@ -975,6 +1005,7 @@ ScriptHost::ScriptHost() {
         {"parent_of",         LuaSceneParentOf},
         {"children_of",       LuaSceneChildrenOf},
         {"set_parent",        LuaSceneSetParent},
+        {"destroy_self",      LuaSceneDestroySelf},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
@@ -993,6 +1024,7 @@ ScriptHost::ScriptHost() {
                    (err ? err : "<no message>"));
         lua_pop(L, 1);
     }
+    m_dispatchEntity.clear();
 }
 
 // Tries the `<entryFunction>_<suffix>` global first when an entry
@@ -1022,6 +1054,7 @@ void ScriptHost::CallOnStart(const std::string& entityName,
     lua_State* L = static_cast<lua_State*>(m_lua);
     std::string fn = PushLifecycleHook(L, entryFunction, "Start");
     if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
     lua_pushstring(L, entityName.c_str());
     if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
@@ -1029,6 +1062,7 @@ void ScriptHost::CallOnStart(const std::string& entityName,
                    (err ? err : "<no message>"));
         lua_pop(L, 1);
     }
+    m_dispatchEntity.clear();
 }
 
 void ScriptHost::CallOnUpdate(const std::string& entityName,
@@ -1038,6 +1072,7 @@ void ScriptHost::CallOnUpdate(const std::string& entityName,
     lua_State* L = static_cast<lua_State*>(m_lua);
     std::string fn = PushLifecycleHook(L, entryFunction, "Update");
     if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
     lua_pushstring(L, entityName.c_str());
     lua_pushnumber(L, dt);
     if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
@@ -1046,6 +1081,7 @@ void ScriptHost::CallOnUpdate(const std::string& entityName,
                    (err ? err : "<no message>"));
         lua_pop(L, 1);
     }
+    m_dispatchEntity.clear();
 }
 
 void ScriptHost::CallOnDestroy(const std::string& entityName,
@@ -1054,6 +1090,7 @@ void ScriptHost::CallOnDestroy(const std::string& entityName,
     lua_State* L = static_cast<lua_State*>(m_lua);
     std::string fn = PushLifecycleHook(L, entryFunction, "Destroy");
     if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
     lua_pushstring(L, entityName.c_str());
     if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
@@ -1061,6 +1098,7 @@ void ScriptHost::CallOnDestroy(const std::string& entityName,
                    (err ? err : "<no message>"));
         lua_pop(L, 1);
     }
+    m_dispatchEntity.clear();
 }
 
 void ScriptHost::CallOnEnable(const std::string& entityName,
@@ -1069,6 +1107,7 @@ void ScriptHost::CallOnEnable(const std::string& entityName,
     lua_State* L = static_cast<lua_State*>(m_lua);
     std::string fn = PushLifecycleHook(L, entryFunction, "Enable");
     if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
     lua_pushstring(L, entityName.c_str());
     if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
@@ -1076,6 +1115,7 @@ void ScriptHost::CallOnEnable(const std::string& entityName,
                    (err ? err : "<no message>"));
         lua_pop(L, 1);
     }
+    m_dispatchEntity.clear();
 }
 
 void ScriptHost::CallOnDisable(const std::string& entityName,
@@ -1084,6 +1124,7 @@ void ScriptHost::CallOnDisable(const std::string& entityName,
     lua_State* L = static_cast<lua_State*>(m_lua);
     std::string fn = PushLifecycleHook(L, entryFunction, "Disable");
     if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
     lua_pushstring(L, entityName.c_str());
     if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
@@ -1091,6 +1132,7 @@ void ScriptHost::CallOnDisable(const std::string& entityName,
                    (err ? err : "<no message>"));
         lua_pop(L, 1);
     }
+    m_dispatchEntity.clear();
 }
 
 bool ScriptHost::LoadFile(const std::string& absolutePath,
@@ -1174,6 +1216,7 @@ void ScriptHost::OnAnimationEvent(
         }
         usedName = "OnAnimationEvent";
     }
+    m_dispatchEntity = entityName;
     lua_pushstring (L, entityName.c_str());
     lua_pushstring (L, animationName.c_str());
     lua_pushstring (L, event.name.c_str());
@@ -1193,6 +1236,7 @@ void ScriptHost::OnAnimationEvent(
                    (err ? err : "<no message>"));
         lua_pop(L, 1);
     }
+    m_dispatchEntity.clear();
 }
 
 #else
