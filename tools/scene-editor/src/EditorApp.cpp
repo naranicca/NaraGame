@@ -13,6 +13,7 @@
 #include <NaraGame/renderer/rhi/RHIDevice.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>   // DockBuilder* APIs
 #include <backends/imgui_impl_win32.h>
 #include <backends/imgui_impl_dx11.h>
 
@@ -101,15 +102,21 @@ public:
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // Dockspace covering the whole main viewport. PassthruCentralNode
-        // would let viewport content show through; we draw the backbuffer
-        // colour ourselves so the default opaque dockspace is fine.
-        ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+        // Dockspace covering the whole main viewport. On the very first
+        // frame (or when the user resets the layout) we author a default
+        // 4-panel split via the DockBuilder API; subsequent runs let
+        // ImGui's imgui.ini restore the user's saved arrangement.
+        const ImGuiID dockId =
+            ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+        EnsureDefaultLayout(dockId);
 
-        // Top menu bar -- minimal for now, future commits add File/Edit/Window.
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
                 if (ImGui::MenuItem("Exit", "Alt+F4")) Close();
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Window")) {
+                if (ImGui::MenuItem("Reset Layout")) m_resetLayout = true;
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Help")) {
@@ -140,6 +147,45 @@ public:
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     }
 
+    // Build the editor's default dock layout once, or whenever the user
+    // explicitly asks for a reset. A non-leaf existing node means ImGui
+    // already restored an arrangement from imgui.ini -- in that case we
+    // leave it alone so users keep their personalisation across runs.
+    void EnsureDefaultLayout(ImGuiID dockId) {
+        ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId);
+        const bool empty = (node == nullptr) || (node->IsLeafNode() &&
+                                                 node->ChildNodes[0] == nullptr);
+        if (!m_resetLayout && !empty) return;
+        m_resetLayout = false;
+
+        ImGui::DockBuilderRemoveNode(dockId);
+        ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(dockId,
+                                      ImGui::GetMainViewport()->WorkSize);
+
+        // Carve the dock area: right column (Inspector) first, then left
+        // column (Hierarchy), then the bottom row (Project + Console
+        // tabbed in the same slot). What's left in the middle is the
+        // Viewport.
+        ImGuiID centre = dockId;
+        const ImGuiID rightId =
+            ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.22f,
+                                        nullptr, &centre);
+        const ImGuiID leftId =
+            ImGui::DockBuilderSplitNode(centre, ImGuiDir_Left, 0.18f,
+                                        nullptr, &centre);
+        const ImGuiID bottomId =
+            ImGui::DockBuilderSplitNode(centre, ImGuiDir_Down, 0.28f,
+                                        nullptr, &centre);
+
+        ImGui::DockBuilderDockWindow("Viewport",  centre);
+        ImGui::DockBuilderDockWindow("Hierarchy", leftId);
+        ImGui::DockBuilderDockWindow("Inspector", rightId);
+        ImGui::DockBuilderDockWindow("Project",   bottomId);
+        ImGui::DockBuilderDockWindow("Console",   bottomId);
+        ImGui::DockBuilderFinish(dockId);
+    }
+
 private:
     static AppConfig MakeConfig() {
         AppConfig c;
@@ -159,6 +205,7 @@ private:
 
     ImGuiContext* m_imguiContext = nullptr;
     bool          m_showDemo     = false;
+    bool          m_resetLayout  = false;
 };
 
 } // namespace
