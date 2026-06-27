@@ -1805,6 +1805,29 @@ private:
             ctrl->parameters.push_back(std::move(p));
             dirty = true;
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Sort A-Z") && ctrl->parameters.size() > 1) {
+            std::sort(ctrl->parameters.begin(), ctrl->parameters.end(),
+                      [](const SceneEditor::AnimatorParameter& a,
+                         const SceneEditor::AnimatorParameter& b) {
+                          return a.name < b.name;
+                      });
+            dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Sort by type") && ctrl->parameters.size() > 1) {
+            // Stable enough: tie-break by name so Bool params sort
+            // alphabetically inside their group, then Float, etc.
+            std::sort(ctrl->parameters.begin(), ctrl->parameters.end(),
+                      [](const SceneEditor::AnimatorParameter& a,
+                         const SceneEditor::AnimatorParameter& b) {
+                          if (a.type != b.type) {
+                              return int(a.type) < int(b.type);
+                          }
+                          return a.name < b.name;
+                      });
+            dirty = true;
+        }
 
         // -----------------------------------------------------------
         // Transitions
