@@ -11,10 +11,15 @@
 #include "../scene/Scene.h"
 #include "../scene/ScriptComponent.h"
 #include "../scene/SpriteRendererComponent.h"
+#include "../scene/TilemapComponent.h"
 #include "../scene/TransformComponent.h"
+#include "../asset/Tileset.h"
+#include "../asset/TextureImportSettings.h"
 
 #include <algorithm>
 #include <cmath>
+#include <queue>
+#include <unordered_map>
 
 #if defined(NARAGAME_SCENE_EDITOR_HAS_LUA) && NARAGAME_SCENE_EDITOR_HAS_LUA
 #include <imgui.h>
@@ -624,6 +629,177 @@ static int LuaSceneOverlapBox(lua_State* L) {
             lua_pushstring(L, e->name.c_str());
             lua_rawseti(L, -2, idx++);
         }
+    }
+    return 1;
+}
+
+// scene.find_path(sx, sy, ex, ey) -> table of {x, y} world
+// points (or nil on failure). M7c29: 8-directional A* with
+// octile heuristic running over the first Tilemap-with-Tileset
+// the scene contains. Solid Box tiles (collides=true,
+// isTrigger=false, shape=Box) block; everything else --
+// empty cells, triggers, OneWay, slopes -- is walkable. Path
+// includes the start cell, the goal cell, and every step in
+// between (cell-centre world coords); the caller can post-
+// process for line-of-sight smoothing.
+//
+// Cell coords use the tilemap's local frame -- a rotated
+// tilemap's pathfinder still talks in unrotated cell indices,
+// which is correct for grid-based movement; callers walking
+// rotated terrain should re-rotate waypoints themselves.
+//
+// Bounded at 50k node expansions -- enough for a 100x100 fully-
+// open grid; pathological mazes that exhaust it return nil so a
+// Lua loop never freezes the editor.
+static int LuaSceneFindPath(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    Scene* scene = host ? host->BoundScene() : nullptr;
+    AssetDatabase* db = host ? host->BoundAssetDatabase() : nullptr;
+    if (!scene || !db) { lua_pushnil(L); return 1; }
+    const float sx = float(luaL_checknumber(L, 1));
+    const float sy = float(luaL_checknumber(L, 2));
+    const float ex = float(luaL_checknumber(L, 3));
+    const float ey = float(luaL_checknumber(L, 4));
+    TilemapComponent* tm = nullptr;
+    TransformComponent* tmTr = nullptr;
+    TilesetAsset* ts = nullptr;
+    float cellW = 1.0f, cellH = 1.0f;
+    {
+        std::vector<EntityId> stack(scene->Roots().begin(),
+                                     scene->Roots().end());
+        while (!stack.empty()) {
+            EntityId id = stack.back(); stack.pop_back();
+            Entity* e = scene->Get(id);
+            if (!e) continue;
+            for (EntityId childId : e->children) stack.push_back(childId);
+            if (!e->enabled) continue;
+            auto* trC = e->GetComponent<TransformComponent>();
+            auto* tmC = e->GetComponent<TilemapComponent>();
+            if (!trC || !tmC) continue;
+            TilesetAsset* tsC = db->GetTileset(tmC->tileset);
+            if (!tsC) continue;
+            tm = tmC;
+            tmTr = trC;
+            ts = tsC;
+            if (const auto* texEntry = db->FindByGuid(ts->texture)) {
+                TextureImportSettings imp;
+                imp.FromJson(texEntry->importSettings);
+                cellW = float(ts->cellPixelW) / imp.pixelsPerUnit;
+                cellH = float(ts->cellPixelH) / imp.pixelsPerUnit;
+            }
+            break;
+        }
+    }
+    if (!tm || !ts || cellW < 1e-4f || cellH < 1e-4f) {
+        lua_pushnil(L); return 1;
+    }
+    auto WorldToCell = [&](float wx, float wy,
+                            int& gx, int& gy) {
+        const float lx = (wx - tmTr->position.x) / cellW;
+        const float ly = (wy - tmTr->position.y) / cellH;
+        gx = int(std::floor(lx));
+        gy = int(std::floor(ly));
+    };
+    auto IsWalkable = [&](int gx, int gy) -> bool {
+        auto it = tm->cells.find({gx, gy});
+        if (it == tm->cells.end()) return true;
+        auto tIt = ts->tiles.find(it->second);
+        if (tIt == ts->tiles.end()) return true;
+        if (!tIt->second.collides) return true;
+        if (tIt->second.isTrigger) return true;
+        if (tIt->second.shape == TileColliderShape::Box) return false;
+        return true;
+    };
+    int sgx, sgy, egx, egy;
+    WorldToCell(sx, sy, sgx, sgy);
+    WorldToCell(ex, ey, egx, egy);
+    if (!IsWalkable(sgx, sgy) || !IsWalkable(egx, egy)) {
+        lua_pushnil(L); return 1;
+    }
+    struct Node {
+        int x, y;
+        float g, f;
+    };
+    struct NodeCmp {
+        bool operator()(const Node& a, const Node& b) const {
+            return a.f > b.f;
+        }
+    };
+    auto Key = [](int x, int y) -> int64_t {
+        return (int64_t(x) << 32) |
+               int64_t(uint32_t(y));
+    };
+    auto H = [&](int x, int y) -> float {
+        const float dx = float(std::abs(x - egx));
+        const float dy = float(std::abs(y - egy));
+        return std::max(dx, dy) +
+               (std::sqrt(2.0f) - 1.0f) * std::min(dx, dy);
+    };
+    std::priority_queue<Node, std::vector<Node>, NodeCmp> open;
+    std::unordered_map<int64_t,
+        std::pair<int, int>> cameFrom;
+    std::unordered_map<int64_t, float> gScore;
+    gScore[Key(sgx, sgy)] = 0.0f;
+    open.push({sgx, sgy, 0.0f, H(sgx, sgy)});
+    static const int kDx[8] = { 1, -1, 0, 0,  1,  1, -1, -1 };
+    static const int kDy[8] = { 0, 0, 1, -1,  1, -1,  1, -1 };
+    int iter = 0;
+    const int kMaxIter = 50000;
+    bool found = false;
+    while (!open.empty() && iter++ < kMaxIter) {
+        Node curr = open.top(); open.pop();
+        const int64_t cKey = Key(curr.x, curr.y);
+        auto gIt = gScore.find(cKey);
+        if (gIt != gScore.end() && curr.g > gIt->second + 1e-4f) {
+            continue;  // stale entry
+        }
+        if (curr.x == egx && curr.y == egy) {
+            found = true; break;
+        }
+        for (int k = 0; k < 8; ++k) {
+            const int nx = curr.x + kDx[k];
+            const int ny = curr.y + kDy[k];
+            if (!IsWalkable(nx, ny)) continue;
+            if (k >= 4) {
+                if (!IsWalkable(curr.x + kDx[k], curr.y)) continue;
+                if (!IsWalkable(curr.x, curr.y + kDy[k])) continue;
+            }
+            const float cost = (k < 4)
+                ? 1.0f : std::sqrt(2.0f);
+            const float tg = curr.g + cost;
+            const int64_t nKey = Key(nx, ny);
+            auto nIt = gScore.find(nKey);
+            if (nIt == gScore.end() || tg < nIt->second) {
+                gScore[nKey] = tg;
+                cameFrom[nKey] = { curr.x, curr.y };
+                open.push({ nx, ny, tg, tg + H(nx, ny) });
+            }
+        }
+    }
+    if (!found) { lua_pushnil(L); return 1; }
+    std::vector<std::pair<int, int>> path;
+    int cx2 = egx, cy2 = egy;
+    while (!(cx2 == sgx && cy2 == sgy)) {
+        path.push_back({ cx2, cy2 });
+        auto cfIt = cameFrom.find(Key(cx2, cy2));
+        if (cfIt == cameFrom.end()) break;
+        cx2 = cfIt->second.first;
+        cy2 = cfIt->second.second;
+    }
+    path.push_back({ sgx, sgy });
+    std::reverse(path.begin(), path.end());
+    lua_createtable(L, int(path.size()), 0);
+    for (size_t i = 0; i < path.size(); ++i) {
+        const float wx = tmTr->position.x +
+            (float(path[i].first) + 0.5f) * cellW;
+        const float wy = tmTr->position.y +
+            (float(path[i].second) + 0.5f) * cellH;
+        lua_createtable(L, 0, 2);
+        lua_pushnumber(L, wx);
+        lua_setfield(L, -2, "x");
+        lua_pushnumber(L, wy);
+        lua_setfield(L, -2, "y");
+        lua_rawseti(L, -2, int(i + 1));
     }
     return 1;
 }
@@ -1630,6 +1806,7 @@ ScriptHost::ScriptHost() {
         {"raycast",           LuaSceneRaycast},
         {"overlap_box",       LuaSceneOverlapBox},
         {"overlap_circle",    LuaSceneOverlapCircle},
+        {"find_path",         LuaSceneFindPath},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
