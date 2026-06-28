@@ -1,12 +1,17 @@
 #include "ScriptHost.h"
 
 #include "../scene/AnimatorComponent.h"
+#include "../scene/BoxColliderComponent.h"
+#include "../scene/CircleColliderComponent.h"
 #include "../scene/Component.h"
 #include "../scene/Entity.h"
 #include "../scene/Scene.h"
 #include "../scene/ScriptComponent.h"
 #include "../scene/SpriteRendererComponent.h"
 #include "../scene/TransformComponent.h"
+
+#include <algorithm>
+#include <cmath>
 
 #if defined(NARAGAME_SCENE_EDITOR_HAS_LUA) && NARAGAME_SCENE_EDITOR_HAS_LUA
 #include <imgui.h>
@@ -354,6 +359,129 @@ static int LuaSceneBroadcast(lua_State* L) {
     }
     lua_pushinteger(L, dispatched);
     return 1;
+}
+
+// Segment-vs-AABB slab method. Returns true + sets `tHit` in
+// [0, 1] when the segment from (ox, oy) along (dx, dy) (with
+// unit-length t spanning the segment endpoints) crosses the
+// box. tHit = 0 means the origin already starts inside; we
+// keep that so a ray fired from inside still reports a hit
+// at distance 0.
+static bool RaySegmentVsBox(float ox, float oy, float dx, float dy,
+                            float minX, float minY,
+                            float maxX, float maxY,
+                            float& tHit) {
+    float tmin = 0.0f;
+    float tmax = 1.0f;
+    auto Slab = [&](float origin, float dir,
+                    float lo, float hi) -> bool {
+        if (std::fabs(dir) < 1e-6f) {
+            return origin >= lo && origin <= hi;
+        }
+        const float invD = 1.0f / dir;
+        float t1 = (lo - origin) * invD;
+        float t2 = (hi - origin) * invD;
+        if (t1 > t2) std::swap(t1, t2);
+        tmin = std::max(tmin, t1);
+        tmax = std::min(tmax, t2);
+        return tmin <= tmax;
+    };
+    if (!Slab(ox, dx, minX, maxX)) return false;
+    if (!Slab(oy, dy, minY, maxY)) return false;
+    tHit = tmin;
+    return true;
+}
+
+// Segment-vs-circle. Standard quadratic; returns the nearest
+// non-negative root inside [0, 1]. Inside-the-circle origin
+// reports tHit = 0 the same way the box variant does.
+static bool RaySegmentVsCircle(float ox, float oy, float dx, float dy,
+                               float cx, float cy, float r,
+                               float& tHit) {
+    const float fx = ox - cx;
+    const float fy = oy - cy;
+    if (fx * fx + fy * fy <= r * r) { tHit = 0.0f; return true; }
+    const float a = dx * dx + dy * dy;
+    const float b = 2.0f * (fx * dx + fy * dy);
+    const float c = fx * fx + fy * fy - r * r;
+    const float disc = b * b - 4.0f * a * c;
+    if (disc < 0.0f) return false;
+    const float s = std::sqrt(disc);
+    const float t1 = (-b - s) / (2.0f * a);
+    const float t2 = (-b + s) / (2.0f * a);
+    if (t1 >= 0.0f && t1 <= 1.0f) { tHit = t1; return true; }
+    if (t2 >= 0.0f && t2 <= 1.0f) { tHit = t2; return true; }
+    return false;
+}
+
+// scene.raycast(x0, y0, x1, y1) -> (name, hx, hy, distance).
+// Walks every enabled entity that carries a Box or Circle
+// collider, returns the nearest hit's entity name + hit point
+// + distance from the origin. Misses return just "" so callers
+// can write `if scene.raycast(...) ~= "" then`. Treats the
+// 4-arg form as a finite segment from (x0, y0) to (x1, y1) --
+// for unbounded rays the caller can scale (x1, y1) far away
+// from the origin.
+static int LuaSceneRaycast(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushstring(L, ""); return 1;
+    }
+    const float x0 = float(luaL_checknumber(L, 1));
+    const float y0 = float(luaL_checknumber(L, 2));
+    const float x1 = float(luaL_checknumber(L, 3));
+    const float y1 = float(luaL_checknumber(L, 4));
+    const float dx = x1 - x0;
+    const float dy = y1 - y0;
+    Scene* scene = host->BoundScene();
+    const Entity* bestE = nullptr;
+    float bestT = 2.0f;  // any real hit has tHit <= 1
+    std::vector<EntityId> stack(scene->Roots().begin(),
+                                scene->Roots().end());
+    while (!stack.empty()) {
+        EntityId id = stack.back(); stack.pop_back();
+        Entity* e = scene->Get(id);
+        if (!e) continue;
+        for (EntityId childId : e->children) stack.push_back(childId);
+        if (!e->enabled) continue;
+        auto* tr = e->GetComponent<TransformComponent>();
+        if (!tr) continue;
+        auto* bc = e->GetComponent<BoxColliderComponent>();
+        auto* cc = e->GetComponent<CircleColliderComponent>();
+        if (!bc && !cc) continue;
+        float tHit = 0.0f;
+        bool hit = false;
+        if (bc) {
+            const float halfX = bc->size.x * 0.5f * tr->scale.x;
+            const float halfY = bc->size.y * 0.5f * tr->scale.y;
+            const float cx    = tr->position.x + bc->offset.x;
+            const float cy    = tr->position.y + bc->offset.y;
+            hit = RaySegmentVsBox(
+                x0, y0, dx, dy,
+                cx - halfX, cy - halfY, cx + halfX, cy + halfY,
+                tHit);
+        } else {
+            const float scaleAvg =
+                (tr->scale.x + tr->scale.y) * 0.5f;
+            const float cx = tr->position.x + cc->offset.x;
+            const float cy = tr->position.y + cc->offset.y;
+            const float r  = cc->radius * scaleAvg;
+            hit = RaySegmentVsCircle(x0, y0, dx, dy, cx, cy, r, tHit);
+        }
+        if (hit && tHit < bestT) {
+            bestT = tHit;
+            bestE = e;
+        }
+    }
+    if (!bestE) { lua_pushstring(L, ""); return 1; }
+    const float hx   = x0 + dx * bestT;
+    const float hy   = y0 + dy * bestT;
+    const float dist = std::sqrt(dx * dx + dy * dy) * bestT;
+    lua_pushstring(L, bestE->name.c_str());
+    lua_pushnumber(L, hx);
+    lua_pushnumber(L, hy);
+    lua_pushnumber(L, dist);
+    return 4;
 }
 
 // scene.find_by_component(type_name) -> table of strings. DFS
@@ -1169,6 +1297,7 @@ ScriptHost::ScriptHost() {
         {"entity_at",         LuaSceneEntityAt},
         {"find_by_component", LuaSceneFindByComponent},
         {"broadcast",         LuaSceneBroadcast},
+        {"raycast",           LuaSceneRaycast},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
