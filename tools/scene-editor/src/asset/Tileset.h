@@ -14,6 +14,12 @@ namespace SceneEditor {
 // fall through automatically.
 struct TilesetTile {
     bool collides = false;
+    // M7c19: trigger-mode collision. When set alongside
+    // `collides`, the per-tile synthetic collider fires
+    // OnTriggerEnter/Stay/Exit instead of applying push-out --
+    // useful for damage zones, pickups baked into the tilemap,
+    // door / portal cells, etc.
+    bool isTrigger = false;
 };
 
 // .ntileset asset: a named slice of a tileset texture + per-tile

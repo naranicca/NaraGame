@@ -702,8 +702,13 @@ private:
                 const int gy = kv.first.second;
                 const int idx = kv.second;
                 auto tIt = ts->tiles.find(idx);
-                if (tIt == ts->tiles.end() || !tIt->second.collides)
+                if (tIt == ts->tiles.end()) continue;
+                // M7c19: a tile contributes a collider when
+                // either flag is set. isTrigger drives the
+                // synthetic collider's Trigger / Solid mode.
+                if (!tIt->second.collides && !tIt->second.isTrigger)
                     continue;
+                const bool tileTrigger = tIt->second.isTrigger;
                 // Cell centre in entity-local coordinates, then
                 // rotate into world.
                 const float lx = (float(gx) + 0.5f) * cellWorldW;
@@ -717,7 +722,7 @@ private:
                 ci.name          = e->name;
                 ci.hasScript     = false;
                 ci.entryFunction.clear();
-                ci.isTrigger     = false;
+                ci.isTrigger     = tileTrigger;
                 ci.kind          = ColliderKind::Box;
                 ci.layer         = "Default";
                 ci.cx            = wx;
@@ -4535,8 +4540,9 @@ private:
         }
         const int texCols = int(tex->Width())  / ts->cellPixelW;
         const int texRows = int(tex->Height()) / ts->cellPixelH;
-        ImGui::TextDisabled("%d x %d tiles  -- click a cell to toggle "
-                            "collides", texCols, texRows);
+        ImGui::TextDisabled("%d x %d tiles  -- click a cell to cycle "
+                            "blank -> solid -> trigger -> blank",
+                            texCols, texRows);
 
         // Preview area.
         const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -4569,9 +4575,11 @@ private:
             dl->AddLine(ImVec2{x, imgMin.y},
                         ImVec2{x, imgMin.y + imgSize.y}, grid, 1.0f);
         }
-        // Highlight cells flagged "collides" with a translucent red.
+        // Highlight cells. Solid (collides + !isTrigger) = red.
+        // Trigger (isTrigger) = blue. M7c19 separates the two
+        // intents through the click cycle below.
         for (const auto& kv : ts->tiles) {
-            if (!kv.second.collides) continue;
+            if (!kv.second.collides && !kv.second.isTrigger) continue;
             const int idx = kv.first;
             const int col = idx % texCols;
             const int row = idx / texCols;
@@ -4580,8 +4588,15 @@ private:
                            imgMin.y +  row      * cellScreenH};
             const ImVec2 b{imgMin.x + (col + 1) * cellScreenW,
                            imgMin.y + (row + 1) * cellScreenH};
-            dl->AddRectFilled(a, b, IM_COL32(220, 60, 60, 90));
-            dl->AddRect(a, b, IM_COL32(255, 100, 100, 255), 0.0f, 0, 2.0f);
+            const bool trigger = kv.second.isTrigger;
+            const ImU32 fill = trigger
+                ? IM_COL32( 60, 140, 220,  90)
+                : IM_COL32(220,  60,  60,  90);
+            const ImU32 edge = trigger
+                ? IM_COL32(100, 170, 255, 255)
+                : IM_COL32(255, 100, 100, 255);
+            dl->AddRectFilled(a, b, fill);
+            dl->AddRect(a, b, edge, 0.0f, 0, 2.0f);
         }
 
         if (clicked) {
@@ -4591,15 +4606,23 @@ private:
             const int col = px / ts->cellPixelW;
             const int row = py / ts->cellPixelH;
             if (col >= 0 && col < texCols && row >= 0 && row < texRows) {
+                // M7c19: cycle blank -> solid -> trigger ->
+                // blank. The dual flags let the runtime pick
+                // between OnCollision* and OnTrigger* without
+                // a separate registration step.
                 const int idx = row * texCols + col;
                 auto it = ts->tiles.find(idx);
                 if (it == ts->tiles.end()) {
                     SceneEditor::TilesetTile t;
-                    t.collides = true;
+                    t.collides  = true;
+                    t.isTrigger = false;
                     ts->tiles[idx] = t;
+                } else if (!it->second.isTrigger) {
+                    // solid -> trigger
+                    it->second.isTrigger = true;
                 } else {
-                    it->second.collides = !it->second.collides;
-                    if (!it->second.collides) ts->tiles.erase(it);
+                    // trigger -> blank
+                    ts->tiles.erase(it);
                 }
                 dirty = true;
             }

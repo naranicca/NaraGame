@@ -41,7 +41,8 @@ void TilesetAsset::FromJson(const Value& root) {
         const int idx = t.GetInt("index", -1);
         if (idx < 0) continue;
         TilesetTile td;
-        td.collides = t.GetBool("collides", false);
+        td.collides  = t.GetBool("collides",  false);
+        td.isTrigger = t.GetBool("isTrigger", false);
         tiles[idx] = td;
     }
 }
@@ -55,8 +56,9 @@ Value TilesetAsset::ToJson() const {
     Value arr = Value::MakeArray();
     for (const auto& kv : tiles) {
         Value t = Value::MakeObject();
-        t.Add("index",    Value::MakeNumber(kv.first));
-        t.Add("collides", Value::MakeBool(kv.second.collides));
+        t.Add("index",     Value::MakeNumber(kv.first));
+        t.Add("collides",  Value::MakeBool(kv.second.collides));
+        t.Add("isTrigger", Value::MakeBool(kv.second.isTrigger));
         arr.Push(std::move(t));
     }
     root.Add("tiles", std::move(arr));
