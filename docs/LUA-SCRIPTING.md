@@ -460,7 +460,7 @@ pairs cost no per-shape math and never fire events.
 
 | Component | Key fields | Notes |
 | --------- | ---------- | ----- |
-| `ParticleSystem` | `maxParticles`, `emissionRate`, `lifetimeMin/Max`, `startSpeedMin/Max`, `startSizeMin/Max`, `dirAngleMinDeg/MaxDeg`, `startColor`, `endColor`, `gravity`, `playOnStart`, `loop` | Entity-attached 2D emitter. Ticks under the same Play-mode gate as audio + animators; renders coloured quads in `DrawEntities` after sprite/tilemap. See `particle.*` for the script-side hooks (`emit` / `clear` / `set_emission_rate` / `get_count` / `set_playing` / `is_playing`) |
+| `ParticleSystem` | `maxParticles`, `emissionRate`, `lifetimeMin/Max`, `startSpeedMin/Max`, `startSizeMin/Max`, `dirAngleMinDeg/MaxDeg`, `startColor`, `endColor`, `gravity`, `texture` (M9c4), `playOnStart`, `loop` | Entity-attached 2D emitter. Ticks under the same Play-mode gate as audio + animators; renders coloured quads in `DrawEntities` after sprite/tilemap. An invalid `texture` GUID (the default) keeps the M9c2 untextured `AddRectFilled` path -- sharp ember / spark look. A valid Texture asset routes through `AddImageQuad` with the whole texture mapped onto each particle quad, tinted by the lerped colour, so an alpha-channel PNG of a smoke puff + `endColor.a = 0` gives a soft particle. Sub-sprite / spritesheet-cell selection is future-work. See `particle.*` for script hooks |
 
 For script-driven SFX (footsteps, gunfire, jump SFX) use
 `audio.play` / `audio.spawn` from Lua directly. `AudioSource`

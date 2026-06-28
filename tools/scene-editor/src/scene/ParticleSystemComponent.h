@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../asset/AssetGuid.h"
 #include "Component.h"
 
 #include <NaraGame/assets/MiniJson.h>
@@ -56,6 +57,16 @@ public:
     // Y is the default falling direction the rest of the
     // engine uses (Y+ is up).
     NaraGame::Vec2 gravity { 0.0f, -2.0f };
+
+    // M9c4 optional texture. Invalid GUID (the default) keeps
+    // the M9c2 untextured-rect path; a valid Texture asset
+    // makes the renderer route through AddImageQuad with the
+    // whole texture mapped onto each particle quad. Sub-sprite
+    // / spritesheet-cell selection is future-work; today the
+    // whole texture is tinted by the lerped colour the same way
+    // the rect path is, so an alpha-channel PNG of a smoke
+    // puff + alpha-fading endColor gives a clean soft particle.
+    AssetGuid texture;
 
     // Lifecycle flags. `playOnStart` mirrors the M8c7 audio
     // source pattern: rising-edge auto-play when the editor

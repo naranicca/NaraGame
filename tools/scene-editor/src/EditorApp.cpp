@@ -7135,6 +7135,49 @@ private:
             ps.gravity = { gv[0], gv[1] };
         }
 
+        // M9c4 texture picker. Same combo + drag-drop shape
+        // as the SpriteRenderer's sprite field. Empty = the
+        // untextured AddRectFilled path (the M9c2 default).
+        std::string texLabel = "(none)";
+        if (ps.texture.IsValid()) {
+            if (const auto* en = m_assetDb.FindByGuid(ps.texture)) {
+                texLabel = en->relPath;
+            } else {
+                texLabel = ps.texture.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Texture", texLabel.c_str())) {
+            if (ImGui::Selectable("(none)", !ps.texture.IsValid())) {
+                UndoSnapshot();
+                ps.texture = SceneEditor::AssetGuid{};
+            }
+            for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
+                if (a.typeName != "Texture") continue;
+                const bool sel = (a.guid == ps.texture);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    UndoSnapshot();
+                    ps.texture = a.guid;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p =
+                    ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                if (p->DataSize == sizeof(SceneEditor::AssetGuid)) {
+                    SceneEditor::AssetGuid guid;
+                    std::memcpy(&guid, p->Data, sizeof(guid));
+                    if (const auto* en = m_assetDb.FindByGuid(guid)) {
+                        if (en->typeName == "Texture") {
+                            UndoSnapshot();
+                            ps.texture = guid;
+                        }
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+
         if (ImGui::Checkbox("Play On Start", &ps.playOnStart)) {
             UndoSnapshot();
         }
@@ -9284,12 +9327,33 @@ private:
         // units) and tinted by lerping startColor -> endColor
         // across age/lifetime. Drawn after sprites/tilemaps
         // so smoke / sparks naturally sit on top of the scene.
+        // M9c4: when the component carries a valid texture
+        // GUID, route through AddImageQuad with the whole
+        // texture mapped onto each particle (premultiplied by
+        // the lerped tint) so an alpha PNG of a smoke puff
+        // gives a real soft particle. The untextured
+        // AddRectFilled fallback stays the default for the
+        // common "spark" / "ember" sharp-pixel look.
+        const ImVec2 uvFull0{0.0f, 0.0f};
+        const ImVec2 uvFull1{1.0f, 0.0f};
+        const ImVec2 uvFull2{1.0f, 1.0f};
+        const ImVec2 uvFull3{0.0f, 1.0f};
         for (SceneEditor::EntityId id : ids) {
             const auto* e = m_scene.Get(id);
             if (!e || !e->enabled) continue;
             const auto* ps =
                 e->GetComponent<SceneEditor::ParticleSystemComponent>();
             if (!ps || ps->_liveCount <= 0) continue;
+            NaraGame::RHITexture* tex = nullptr;
+            ImTextureID texId = (ImTextureID)0;
+            if (ps->texture.IsValid()) {
+                tex = m_assetDb.GetTexture(GetDevice(), ps->texture);
+                if (tex) {
+                    texId = static_cast<ImTextureID>(
+                        reinterpret_cast<uintptr_t>(
+                            tex->GetNativeView()));
+                }
+            }
             for (int i = 0; i < ps->_liveCount; ++i) {
                 const auto& p = ps->_pool[size_t(i)];
                 const float t = (p.lifetime > 0.0f)
@@ -9313,10 +9377,20 @@ private:
                     int(g * 255.0f),
                     int(b * 255.0f),
                     int(clA * 255.0f));
-                dl->AddRectFilled(
-                    ImVec2{sc.x - half, sc.y - half},
-                    ImVec2{sc.x + half, sc.y + half},
-                    col);
+                if (tex) {
+                    const ImVec2 pTL{sc.x - half, sc.y - half};
+                    const ImVec2 pTR{sc.x + half, sc.y - half};
+                    const ImVec2 pBR{sc.x + half, sc.y + half};
+                    const ImVec2 pBL{sc.x - half, sc.y + half};
+                    dl->AddImageQuad(texId,
+                        pTL, pTR, pBR, pBL,
+                        uvFull0, uvFull1, uvFull2, uvFull3, col);
+                } else {
+                    dl->AddRectFilled(
+                        ImVec2{sc.x - half, sc.y - half},
+                        ImVec2{sc.x + half, sc.y + half},
+                        col);
+                }
             }
         }
 
