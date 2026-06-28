@@ -280,6 +280,82 @@ static int LuaSceneEntityCount(lua_State* L) {
     lua_pushinteger(L, count);
     return 1;
 }
+// scene.broadcast(method, ...) -> int. Calls the matching
+// lifecycle-style handler on every enabled entity that carries
+// a ScriptComponent. Method-name resolution mirrors the M6c5
+// rule: try `<entryFunction>_<method>` first, fall back to the
+// bare global `On<method>`. Receivers get `(entityName, ...)`
+// with the broadcast's caller-supplied trailing args verbatim.
+// Returns the number of dispatches that completed without a
+// Lua error.
+static int LuaSceneBroadcast(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushinteger(L, 0); return 1;
+    }
+    const char* method = luaL_checkstring(L, 1);
+    const int numArgs  = lua_gettop(L) - 1;
+    const int argBase  = 2;  // Lua positions argBase..argBase+numArgs-1
+    Scene* scene = host->BoundScene();
+    int dispatched = 0;
+    std::vector<EntityId> stack(scene->Roots().begin(),
+                                scene->Roots().end());
+    while (!stack.empty()) {
+        EntityId id = stack.back(); stack.pop_back();
+        Entity* e = scene->Get(id);
+        if (!e) continue;
+        for (EntityId childId : e->children) stack.push_back(childId);
+        if (!e->enabled) continue;
+        auto* sc = e->GetComponent<ScriptComponent>();
+        if (!sc) continue;
+        // Resolve the target function name through the same
+        // entry-prefixed-then-bare-global rule as
+        // PushLifecycleHook in CallOn*.
+        std::string fn;
+        if (!sc->entryFunction.empty()) {
+            const std::string entryName =
+                sc->entryFunction + "_" + method;
+            lua_getglobal(L, entryName.c_str());
+            if (lua_isfunction(L, -1)) {
+                fn = entryName;
+            } else {
+                lua_pop(L, 1);
+            }
+        }
+        if (fn.empty()) {
+            const std::string bare = std::string("On") + method;
+            lua_getglobal(L, bare.c_str());
+            if (!lua_isfunction(L, -1)) {
+                lua_pop(L, 1);
+                continue;
+            }
+            fn = bare;
+        }
+        // Push the receiver's entity name + replay the trailing
+        // args from the original call. lua_pushvalue copies the
+        // stack slot so each loop iteration gets a fresh
+        // duplicate.
+        lua_pushstring(L, e->name.c_str());
+        for (int i = 0; i < numArgs; ++i) {
+            lua_pushvalue(L, argBase + i);
+        }
+        // Track the dispatching entity so a callee that calls
+        // scene.destroy_self() targets the right one.
+        host->SetDispatchEntity(e->name);
+        if (lua_pcall(L, 1 + numArgs, 0, 0) != LUA_OK) {
+            const char* err = lua_tostring(L, -1);
+            host->AppendLine("[lua-error] " + fn + ": " +
+                             (err ? err : "<no message>"));
+            lua_pop(L, 1);
+        } else {
+            ++dispatched;
+        }
+        host->SetDispatchEntity("");
+    }
+    lua_pushinteger(L, dispatched);
+    return 1;
+}
+
 // scene.find_by_component(type_name) -> table of strings. DFS
 // walks the entity graph + returns every entity whose
 // components vector contains an entry whose TypeName() matches.
@@ -1092,6 +1168,7 @@ ScriptHost::ScriptHost() {
         {"destroy_self",      LuaSceneDestroySelf},
         {"entity_at",         LuaSceneEntityAt},
         {"find_by_component", LuaSceneFindByComponent},
+        {"broadcast",         LuaSceneBroadcast},
         {nullptr,             nullptr},
     };
     lua_newtable(L);

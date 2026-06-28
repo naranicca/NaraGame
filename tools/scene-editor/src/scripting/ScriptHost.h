@@ -106,6 +106,13 @@ public:
     // `scene.destroy_self` + future "self"-style helpers read it
     // so scripts don't have to round-trip the entity argument.
     const std::string& DispatchEntity() const { return m_dispatchEntity; }
+    // Lua-side broadcast helpers track the dispatching entity
+    // explicitly because they don't run through Call* (no
+    // PushLifecycleHook wrapper). Public so the static
+    // callbacks can update it without a friend declaration.
+    void SetDispatchEntity(const std::string& name) {
+        m_dispatchEntity = name;
+    }
 
 private:
     std::vector<std::string> m_outputLog;
