@@ -21,6 +21,11 @@ public:
     NaraGame::Vec2 size   { 1.0f, 1.0f };
     NaraGame::Vec2 offset { 0.0f, 0.0f };
     bool           isTrigger = true;
+    // M7c11: project-level collision layer. The runtime checks
+    // Project::CollisionLayersCollide(this.layer, other.layer)
+    // before any overlap test. Defaults to "Default" so legacy
+    // scenes keep colliding as before.
+    std::string    layer = "Default";
 
     static const char* StaticTypeName() { return "BoxCollider"; }
     const char* TypeName() const override { return StaticTypeName(); }

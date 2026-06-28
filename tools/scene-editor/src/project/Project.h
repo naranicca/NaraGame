@@ -64,6 +64,26 @@ public:
 
     static std::vector<std::string> DefaultSortingLayers();
 
+    // M7c11: Collision layers + the NxN matrix the runtime checks
+    // before generating any overlap pair. Layers default to
+    // {Default, Player, Enemy, Item} + everything collides; a
+    // pair is skipped when CollisionLayersCollide(a, b) returns
+    // false. The matrix is symmetric -- writing (a, b) also
+    // writes (b, a).
+    const std::vector<std::string>& CollisionLayers() const { return m_collisionLayers; }
+    void SetCollisionLayers(std::vector<std::string> layers);
+
+    // Layer-pair query. Unknown layer names fall back to
+    // "Default" the same way LayerPriority does. Returns true
+    // when nothing in the matrix forbids the pair.
+    bool CollisionLayersCollide(const std::string& a,
+                                const std::string& b) const;
+    void SetCollisionLayersCollide(const std::string& a,
+                                   const std::string& b,
+                                   bool collide);
+
+    static std::vector<std::string> DefaultCollisionLayers();
+
 private:
     bool EnsureFolderTree() const;
     bool WriteProjectJson() const;
@@ -73,6 +93,11 @@ private:
     std::string m_name;
     std::string m_version = "0.1.0";
     std::vector<std::string> m_sortingLayers = DefaultSortingLayers();
+    std::vector<std::string> m_collisionLayers = DefaultCollisionLayers();
+    // 2D bit-set indexed by layer pair (i, j) with i <= j. A
+    // missing entry is "true" (collide); SetCollisionLayersCollide
+    // populates it when the user un-ticks a pair.
+    std::vector<std::pair<std::string, std::string>> m_collisionMatrixOff;
 };
 
 } // namespace SceneEditor

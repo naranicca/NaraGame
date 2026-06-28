@@ -300,6 +300,7 @@ public:
         DrawTilePalettePanel();
         DrawNewProjectModal();
         DrawSortingLayersModal();
+        DrawCollisionMatrixModal();
         DrawSpriteEditorWindow();
         DrawTilesetEditorWindow();
         DrawAutotileEditorWindow();
@@ -556,6 +557,8 @@ private:
             // for a fast falling ball would point through the
             // floor + out the underside).
             float                   vx, vy;
+            // M7c11: collision layer for filtering.
+            std::string             layer;
         };
         std::vector<ColliderInfo> infos;
         infos.reserve(32);
@@ -583,6 +586,7 @@ private:
                 const float halfY = bc->size.y * 0.5f * tr->scale.y;
                 ci.kind      = ColliderKind::Box;
                 ci.isTrigger = bc->isTrigger;
+                ci.layer     = bc->layer;
                 ci.cx        = tr->position.x + bc->offset.x;
                 ci.cy        = tr->position.y + bc->offset.y;
                 ci.radius    = 0.0f;
@@ -595,6 +599,7 @@ private:
                     (tr->scale.x + tr->scale.y) * 0.5f;
                 ci.kind      = ColliderKind::Circle;
                 ci.isTrigger = cc->isTrigger;
+                ci.layer     = cc->layer;
                 ci.cx        = tr->position.x + cc->offset.x;
                 ci.cy        = tr->position.y + cc->offset.y;
                 ci.radius    = cc->radius * scaleAvg;
@@ -769,6 +774,13 @@ private:
                 // screen space.
                 if (a.maxX < b.minX || b.maxX < a.minX ||
                     a.maxY < b.minY || b.maxY < a.minY) continue;
+                // M7c11: layer matrix filter. Pairs whose two
+                // layers are un-ticked in the Project's
+                // collision matrix never generate Enter / Stay
+                // / Exit / push-out -- they pass right through
+                // each other.
+                if (!m_project.CollisionLayersCollide(a.layer, b.layer))
+                    continue;
                 if (!Overlap(a, b)) continue;
                 const auto key =
                     a.id < b.id
@@ -1692,6 +1704,10 @@ private:
             if (ImGui::MenuItem("Sorting Layers...", nullptr, false,
                                 m_project.IsOpen())) {
                 m_openLayersModal = true;
+            }
+            if (ImGui::MenuItem("Collision Matrix...", nullptr, false,
+                                m_project.IsOpen())) {
+                m_openCollisionMatrixModal = true;
             }
             ImGui::EndMenu();
         }
@@ -4983,6 +4999,97 @@ private:
         ImGui::EndPopup();
     }
 
+    // Collision layer + NxN collide-matrix editor. Layers are a
+    // separate concept from Sorting Layers (this is for physics
+    // filtering, that's for draw order). The matrix is rendered
+    // as a symmetric grid of checkboxes; tick = pair collides,
+    // unticked = pair passes through.
+    void DrawCollisionMatrixModal() {
+        if (m_openCollisionMatrixModal) {
+            ImGui::OpenPopup("Collision Matrix");
+            m_openCollisionMatrixModal = false;
+        }
+        if (!ImGui::BeginPopupModal("Collision Matrix", nullptr,
+                                     ImGuiWindowFlags_AlwaysAutoResize)) {
+            return;
+        }
+        ImGui::TextUnformatted("Collider pairs whose two layers are "
+                               "un-ticked don't generate overlap events\n"
+                               "or push-out at runtime.");
+        ImGui::Separator();
+        std::vector<std::string> layers = m_project.CollisionLayers();
+        bool layersChanged = false;
+        int removeAt = -1;
+        for (int i = 0; i < int(layers.size()); ++i) {
+            ImGui::PushID(i);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%s", layers[i].c_str());
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputText("##cname", buf, sizeof(buf))) {
+                layers[i] = buf;
+                layersChanged = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove") && layers.size() > 1) {
+                removeAt = i;
+            }
+            ImGui::PopID();
+        }
+        if (removeAt >= 0) {
+            layers.erase(layers.begin() + removeAt);
+            layersChanged = true;
+        }
+        if (ImGui::Button("Add Layer")) {
+            layers.push_back("NewLayer");
+            layersChanged = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Restore Defaults")) {
+            layers = SceneEditor::Project::DefaultCollisionLayers();
+            layersChanged = true;
+        }
+        if (layersChanged) {
+            m_project.SetCollisionLayers(std::move(layers));
+            m_project.Save();
+            layers = m_project.CollisionLayers();
+        }
+        ImGui::Separator();
+        // Symmetric NxN matrix. Column headers run vertically;
+        // each cell is a checkbox keyed by the row-column pair.
+        if (ImGui::BeginTable("##cmatrix", int(layers.size()) + 1,
+                              ImGuiTableFlags_Borders |
+                              ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("");
+            for (const std::string& col : layers) {
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(col.c_str());
+            }
+            for (int i = 0; i < int(layers.size()); ++i) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(layers[i].c_str());
+                for (int j = 0; j < int(layers.size()); ++j) {
+                    ImGui::TableNextColumn();
+                    ImGui::PushID(i * 256 + j);
+                    bool on = m_project.CollisionLayersCollide(
+                        layers[i], layers[j]);
+                    if (ImGui::Checkbox("##c", &on)) {
+                        m_project.SetCollisionLayersCollide(
+                            layers[i], layers[j], on);
+                        m_project.Save();
+                    }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
     void DrawNewProjectModal() {
         if (m_openNewProjectModal) {
             ImGui::OpenPopup("New Project");
@@ -5339,6 +5446,31 @@ private:
                 "without a physical response. Solid collisions\n"
                 "(non-trigger) ship in a follow-up commit.");
         }
+        DrawColliderLayerCombo(bc.layer);
+    }
+
+    // Shared layer combo for both box + circle inspectors. Pulls
+    // the live list from Project::CollisionLayers + writes the
+    // selection back through UndoSnapshot.
+    void DrawColliderLayerCombo(std::string& layer) {
+        const auto& layers = m_project.CollisionLayers();
+        if (ImGui::BeginCombo("Layer", layer.c_str())) {
+            for (const std::string& name : layers) {
+                const bool sel = (name == layer);
+                if (ImGui::Selectable(name.c_str(), sel)) {
+                    UndoSnapshot();
+                    layer = name;
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Collision layer. Pairs whose two layers are\n"
+                "un-ticked in Edit > Collision Matrix are\n"
+                "filtered out of every overlap test.");
+        }
     }
 
     // Same shape as DrawBoxColliderEditor but with a single
@@ -5361,6 +5493,7 @@ private:
             UndoSnapshot();
             cc.isTrigger = trig;
         }
+        DrawColliderLayerCombo(cc.layer);
     }
 
     // ScriptComponent inspector. Combo over every Script asset in
@@ -8096,6 +8229,7 @@ private:
 
     // Modal trigger flags.
     bool                m_openLayersModal = false;
+    bool                m_openCollisionMatrixModal = false;
     // Sprite Editor state. m_spriteEditorOpen drives the window's
     // visibility; activating it via OpenSpriteEditor pre-focuses the
     // window so a stale floating instance doesn't get lost behind a

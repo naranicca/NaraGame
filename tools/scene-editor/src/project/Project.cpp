@@ -3,6 +3,7 @@
 #include <NaraGame/assets/MiniJson.h>
 #include <NaraGame/core/Log.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -48,6 +49,65 @@ std::vector<std::string> Project::AssetSubfolders() {
 
 std::vector<std::string> Project::DefaultSortingLayers() {
     return { "Background", "Default", "Foreground", "UI" };
+}
+
+std::vector<std::string> Project::DefaultCollisionLayers() {
+    return { "Default", "Player", "Enemy", "Item" };
+}
+
+void Project::SetCollisionLayers(std::vector<std::string> layers) {
+    if (layers.empty()) layers = DefaultCollisionLayers();
+    m_collisionLayers = std::move(layers);
+    // Drop matrix entries that reference layers that no longer
+    // exist so the file doesn't accumulate dead pairs across
+    // rename / remove cycles.
+    auto exists = [&](const std::string& name) {
+        for (const std::string& l : m_collisionLayers) {
+            if (l == name) return true;
+        }
+        return false;
+    };
+    m_collisionMatrixOff.erase(
+        std::remove_if(m_collisionMatrixOff.begin(),
+                       m_collisionMatrixOff.end(),
+                       [&](const auto& kv) {
+                           return !exists(kv.first) || !exists(kv.second);
+                       }),
+        m_collisionMatrixOff.end());
+}
+
+namespace {
+std::pair<std::string, std::string> CanonLayerPair(
+        const std::string& a, const std::string& b) {
+    return (a <= b) ? std::pair<std::string, std::string>{a, b}
+                    : std::pair<std::string, std::string>{b, a};
+}
+}
+
+bool Project::CollisionLayersCollide(const std::string& a,
+                                     const std::string& b) const {
+    const auto key = CanonLayerPair(a, b);
+    for (const auto& kv : m_collisionMatrixOff) {
+        if (kv == key) return false;
+    }
+    return true;
+}
+
+void Project::SetCollisionLayersCollide(const std::string& a,
+                                        const std::string& b,
+                                        bool collide) {
+    const auto key = CanonLayerPair(a, b);
+    auto it = std::find(m_collisionMatrixOff.begin(),
+                        m_collisionMatrixOff.end(), key);
+    if (collide) {
+        if (it != m_collisionMatrixOff.end()) {
+            m_collisionMatrixOff.erase(it);
+        }
+    } else {
+        if (it == m_collisionMatrixOff.end()) {
+            m_collisionMatrixOff.push_back(key);
+        }
+    }
 }
 
 void Project::SetSortingLayers(std::vector<std::string> layers) {
@@ -178,6 +238,19 @@ bool Project::WriteProjectJson() const {
         layers.Push(Value::MakeString(l));
     }
     root.Add("sortingLayers", std::move(layers));
+    Value clayers = Value::MakeArray();
+    for (const std::string& l : m_collisionLayers) {
+        clayers.Push(Value::MakeString(l));
+    }
+    root.Add("collisionLayers", std::move(clayers));
+    Value cmatrix = Value::MakeArray();
+    for (const auto& kv : m_collisionMatrixOff) {
+        Value pair = Value::MakeArray();
+        pair.Push(Value::MakeString(kv.first));
+        pair.Push(Value::MakeString(kv.second));
+        cmatrix.Push(std::move(pair));
+    }
+    root.Add("collisionMatrixOff", std::move(cmatrix));
     const std::string out = NaraGame::MiniJson::Write(root);
     if (!WriteFileText(ProjectJsonPath(), out)) {
         NARAGAME_ERROR("Project: cannot write '%s'", ProjectJsonPath().c_str());
@@ -213,6 +286,29 @@ bool Project::ReadProjectJson() {
         if (m_sortingLayers.empty()) m_sortingLayers = DefaultSortingLayers();
     } else {
         m_sortingLayers = DefaultSortingLayers();
+    }
+    const NaraGame::MiniJson::Value* clayers = root.Find("collisionLayers");
+    m_collisionLayers.clear();
+    if (clayers && clayers->IsArray()) {
+        for (const NaraGame::MiniJson::Value& v : clayers->arrayValue) {
+            if (v.IsString()) m_collisionLayers.push_back(v.stringValue);
+        }
+    }
+    if (m_collisionLayers.empty()) {
+        m_collisionLayers = DefaultCollisionLayers();
+    }
+    m_collisionMatrixOff.clear();
+    const NaraGame::MiniJson::Value* cmatrix = root.Find("collisionMatrixOff");
+    if (cmatrix && cmatrix->IsArray()) {
+        for (const NaraGame::MiniJson::Value& pair : cmatrix->arrayValue) {
+            if (pair.IsArray() && pair.arrayValue.size() >= 2 &&
+                pair.arrayValue[0].IsString() &&
+                pair.arrayValue[1].IsString()) {
+                m_collisionMatrixOff.push_back(
+                    CanonLayerPair(pair.arrayValue[0].stringValue,
+                                   pair.arrayValue[1].stringValue));
+            }
+        }
     }
     return true;
 }

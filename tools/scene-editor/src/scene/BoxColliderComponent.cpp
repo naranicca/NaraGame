@@ -14,6 +14,7 @@ void BoxColliderComponent::Serialize(Value& out) const {
     off.Push(Value::MakeNumber(offset.y));
     out.Add("offset", std::move(off));
     out.Add("isTrigger", Value::MakeBool(isTrigger));
+    out.Add("layer", Value::MakeString(layer));
 }
 
 void BoxColliderComponent::Deserialize(const Value& obj) {
@@ -36,6 +37,7 @@ void BoxColliderComponent::Deserialize(const Value& obj) {
         }
     }
     isTrigger = obj.GetBool("isTrigger", true);
+    layer     = obj.GetString("layer", "Default");
 }
 
 } // namespace SceneEditor

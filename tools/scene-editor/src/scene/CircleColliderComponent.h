@@ -17,6 +17,8 @@ public:
     float          radius   = 0.5f;
     NaraGame::Vec2 offset { 0.0f, 0.0f };
     bool           isTrigger = true;
+    // M7c11: see BoxColliderComponent::layer.
+    std::string    layer = "Default";
 
     static const char* StaticTypeName() { return "CircleCollider"; }
     const char* TypeName() const override { return StaticTypeName(); }
