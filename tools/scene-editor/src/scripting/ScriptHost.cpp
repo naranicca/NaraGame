@@ -280,6 +280,38 @@ static int LuaSceneEntityCount(lua_State* L) {
     lua_pushinteger(L, count);
     return 1;
 }
+// scene.find_by_component(type_name) -> table of strings. DFS
+// walks the entity graph + returns every entity whose
+// components vector contains an entry whose TypeName() matches.
+// Lets scripts iterate "every entity with an Animator" /
+// "every Tilemap" / "every Script" without keeping a manual
+// registry in Lua. Returns an empty table for unknown types or
+// when nothing matches.
+static int LuaSceneFindByComponent(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    lua_newtable(L);
+    if (!host || !host->BoundScene()) return 1;
+    const char* typeName = luaL_checkstring(L, 1);
+    Scene* scene = host->BoundScene();
+    int idx = 1;
+    std::vector<EntityId> stack(scene->Roots().begin(),
+                                scene->Roots().end());
+    while (!stack.empty()) {
+        EntityId id = stack.back(); stack.pop_back();
+        Entity* e = scene->Get(id);
+        if (!e) continue;
+        for (EntityId childId : e->children) stack.push_back(childId);
+        for (const auto& c : e->components) {
+            if (c && std::strcmp(c->TypeName(), typeName) == 0) {
+                lua_pushstring(L, e->name.c_str());
+                lua_rawseti(L, -2, idx++);
+                break;
+            }
+        }
+    }
+    return 1;
+}
+
 // scene.entity_at(x, y) -> string. Walks every enabled entity
 // that carries a SpriteRenderer + tests its world-space AABB
 // against the (x, y) point. Returns the topmost hit by
@@ -1059,6 +1091,7 @@ ScriptHost::ScriptHost() {
         {"set_parent",        LuaSceneSetParent},
         {"destroy_self",      LuaSceneDestroySelf},
         {"entity_at",         LuaSceneEntityAt},
+        {"find_by_component", LuaSceneFindByComponent},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
