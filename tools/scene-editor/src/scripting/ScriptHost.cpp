@@ -493,6 +493,124 @@ static int LuaSceneRaycast(lua_State* L) {
     return 4;
 }
 
+// scene.overlap_box(cx, cy, w, h) -> table of entity names.
+// Tests a virtual world-space AABB centred at (cx, cy) with
+// full size (w, h) against every enabled entity that carries a
+// Box or Circle collider. Useful for area-of-effect queries
+// (explosion, AoE buff, trigger sensor) that don't need to be
+// attached to a permanent entity.
+static int LuaSceneOverlapBox(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    lua_newtable(L);
+    if (!host || !host->BoundScene()) return 1;
+    const float cx = float(luaL_checknumber(L, 1));
+    const float cy = float(luaL_checknumber(L, 2));
+    const float w  = float(luaL_checknumber(L, 3));
+    const float h  = float(luaL_checknumber(L, 4));
+    const float minX = cx - w * 0.5f;
+    const float maxX = cx + w * 0.5f;
+    const float minY = cy - h * 0.5f;
+    const float maxY = cy + h * 0.5f;
+    Scene* scene = host->BoundScene();
+    int idx = 1;
+    std::vector<EntityId> stack(scene->Roots().begin(),
+                                scene->Roots().end());
+    while (!stack.empty()) {
+        EntityId id = stack.back(); stack.pop_back();
+        Entity* e = scene->Get(id);
+        if (!e) continue;
+        for (EntityId childId : e->children) stack.push_back(childId);
+        if (!e->enabled) continue;
+        auto* tr = e->GetComponent<TransformComponent>();
+        if (!tr) continue;
+        auto* bc = e->GetComponent<BoxColliderComponent>();
+        auto* cc = e->GetComponent<CircleColliderComponent>();
+        if (!bc && !cc) continue;
+        bool hit = false;
+        if (bc) {
+            const float halfX = bc->size.x * 0.5f * tr->scale.x;
+            const float halfY = bc->size.y * 0.5f * tr->scale.y;
+            const float ex = tr->position.x + bc->offset.x;
+            const float ey = tr->position.y + bc->offset.y;
+            hit = !(ex + halfX < minX || ex - halfX > maxX ||
+                    ey + halfY < minY || ey - halfY > maxY);
+        } else {
+            const float scaleAvg =
+                (tr->scale.x + tr->scale.y) * 0.5f;
+            const float ex = tr->position.x + cc->offset.x;
+            const float ey = tr->position.y + cc->offset.y;
+            const float r  = cc->radius * scaleAvg;
+            const float qx = std::clamp(ex, minX, maxX);
+            const float qy = std::clamp(ey, minY, maxY);
+            const float ddx = ex - qx;
+            const float ddy = ey - qy;
+            hit = (ddx * ddx + ddy * ddy) <= r * r;
+        }
+        if (hit) {
+            lua_pushstring(L, e->name.c_str());
+            lua_rawseti(L, -2, idx++);
+        }
+    }
+    return 1;
+}
+
+// scene.overlap_circle(cx, cy, r) -> table of entity names.
+// Same area-query shape as overlap_box but with a virtual
+// circle. Box colliders use the nearest-point-on-box clamp,
+// circle colliders use centre distance vs summed radii.
+static int LuaSceneOverlapCircle(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    lua_newtable(L);
+    if (!host || !host->BoundScene()) return 1;
+    const float cx = float(luaL_checknumber(L, 1));
+    const float cy = float(luaL_checknumber(L, 2));
+    const float r  = float(luaL_checknumber(L, 3));
+    const float r2 = r * r;
+    Scene* scene = host->BoundScene();
+    int idx = 1;
+    std::vector<EntityId> stack(scene->Roots().begin(),
+                                scene->Roots().end());
+    while (!stack.empty()) {
+        EntityId id = stack.back(); stack.pop_back();
+        Entity* e = scene->Get(id);
+        if (!e) continue;
+        for (EntityId childId : e->children) stack.push_back(childId);
+        if (!e->enabled) continue;
+        auto* tr = e->GetComponent<TransformComponent>();
+        if (!tr) continue;
+        auto* bc = e->GetComponent<BoxColliderComponent>();
+        auto* cc = e->GetComponent<CircleColliderComponent>();
+        if (!bc && !cc) continue;
+        bool hit = false;
+        if (bc) {
+            const float halfX = bc->size.x * 0.5f * tr->scale.x;
+            const float halfY = bc->size.y * 0.5f * tr->scale.y;
+            const float ex = tr->position.x + bc->offset.x;
+            const float ey = tr->position.y + bc->offset.y;
+            const float qx = std::clamp(cx, ex - halfX, ex + halfX);
+            const float qy = std::clamp(cy, ey - halfY, ey + halfY);
+            const float ddx = cx - qx;
+            const float ddy = cy - qy;
+            hit = (ddx * ddx + ddy * ddy) <= r2;
+        } else {
+            const float scaleAvg =
+                (tr->scale.x + tr->scale.y) * 0.5f;
+            const float ex = tr->position.x + cc->offset.x;
+            const float ey = tr->position.y + cc->offset.y;
+            const float er = cc->radius * scaleAvg;
+            const float ddx = cx - ex;
+            const float ddy = cy - ey;
+            const float sum = r + er;
+            hit = (ddx * ddx + ddy * ddy) <= sum * sum;
+        }
+        if (hit) {
+            lua_pushstring(L, e->name.c_str());
+            lua_rawseti(L, -2, idx++);
+        }
+    }
+    return 1;
+}
+
 // scene.find_by_component(type_name) -> table of strings. DFS
 // walks the entity graph + returns every entity whose
 // components vector contains an entry whose TypeName() matches.
@@ -1375,6 +1493,8 @@ ScriptHost::ScriptHost() {
         {"find_by_component", LuaSceneFindByComponent},
         {"broadcast",         LuaSceneBroadcast},
         {"raycast",           LuaSceneRaycast},
+        {"overlap_box",       LuaSceneOverlapBox},
+        {"overlap_circle",    LuaSceneOverlapCircle},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
