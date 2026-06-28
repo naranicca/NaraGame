@@ -61,7 +61,7 @@ add_executable(scene-editor
     src/scene/TransformComponent.cpp
     src/scripting/ScriptHost.cpp)
 target_include_directories(scene-editor PRIVATE src)
-target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui winmm)
+target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui xaudio2)
 set_target_properties(scene-editor PROPERTIES FOLDER "tools")
 
 # ---------------------------------------------------------------------------

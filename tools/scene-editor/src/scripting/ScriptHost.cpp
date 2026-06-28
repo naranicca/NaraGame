@@ -880,18 +880,25 @@ static int LuaSceneFindPath(lua_State* L) {
     return 1;
 }
 
-// audio.play(path) -> bool. M8c1 single-voice WAV playback
-// via Windows PlaySound. The path is taken absolute if it
+// audio.play(path [, volume]) -> bool. M8c2 XAudio2-backed
+// playback -- many overlapping voices, optional volume in
+// [0, 1] (default 1). The path is taken absolute if it
 // starts with a drive letter ("C:\\..." / "/...") or a
 // backslash root, otherwise it's resolved against the
-// project's Assets directory the same way the asset DB
-// does -- "Sounds/coin.wav" works out of any project.
-// Returns true if PlaySound accepted the request; missing
-// or malformed WAVs silently fail to make sound.
+// project's Assets directory.
+//
+// Honest failure semantics: a missing or malformed WAV now
+// returns false (the M8c1 PlaySound returned true even for
+// typo'd paths). Only PCM WAVs are accepted; compressed
+// formats fail until a decoder lands in a later commit.
 static int LuaAudioPlay(lua_State* L) {
     ScriptHost* host = HostFromUpvalue(L);
     AssetDatabase* db = host ? host->BoundAssetDatabase() : nullptr;
     const char* path = luaL_checkstring(L, 1);
+    float volume = 1.0f;
+    if (lua_gettop(L) >= 2 && !lua_isnoneornil(L, 2)) {
+        volume = float(luaL_checknumber(L, 2));
+    }
     std::string resolved = path;
     const bool isAbs =
         (resolved.size() >= 2 && resolved[1] == ':') ||
@@ -908,7 +915,7 @@ static int LuaAudioPlay(lua_State* L) {
             resolved.append(path);
         }
     }
-    const bool ok = Audio::Play(resolved);
+    const bool ok = Audio::Play(resolved, volume);
     lua_pushboolean(L, ok ? 1 : 0);
     return 1;
 }
