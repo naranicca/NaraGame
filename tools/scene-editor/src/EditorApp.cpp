@@ -904,6 +904,106 @@ private:
             outNy =  dx / len;
         };
 
+        // M7c24: triangle-vs-OBB SAT for the slope-vs-box
+        // case. Five candidate axes -- the box's two local
+        // axes + the triangle's three edge normals. For each
+        // edge we compute a perpendicular + flip toward the
+        // outward side (away from the opposite vertex). The
+        // axis with the smallest projection overlap drives the
+        // MTV; the sign is oriented so the result pushes the
+        // box (the second argument) away from the triangle
+        // (the first argument). Caller flips the sign as needed
+        // to match ComputeMTV's "move `a` away from `b`"
+        // convention.
+        auto TriangleVertices = [&SlopeHeights](
+                                const ColliderInfo& slope,
+                                float v[3][2]) {
+            float leftH, rightH;
+            SlopeHeights(slope.slope, leftH, rightH);
+            const float fullH = 2.0f * slope.halfY;
+            const float bl_x = slope.cx - slope.halfX;
+            const float bl_y = slope.cy - slope.halfY;
+            const float br_x = slope.cx + slope.halfX;
+            const float br_y = slope.cy - slope.halfY;
+            v[0][0] = bl_x;
+            v[0][1] = bl_y;
+            v[1][0] = br_x;
+            v[1][1] = br_y;
+            // Third vertex is whichever side rose to the slope's
+            // upper endpoint -- it lies on the cell's left or
+            // right edge depending on the shape.
+            if (leftH > rightH) {
+                v[2][0] = bl_x;
+                v[2][1] = bl_y + leftH * fullH;
+            } else {
+                v[2][0] = br_x;
+                v[2][1] = br_y + rightH * fullH;
+            }
+        };
+        auto SatTriBox = [&ProjectBox, &TriangleVertices](
+                            const ColliderInfo& tri,
+                            const ColliderInfo& box,
+                            float& mtvX, float& mtvY) {
+            float v[3][2];
+            TriangleVertices(tri, v);
+            // 5 axes: box X, box Y, 3 edge normals.
+            float axes[5][2];
+            axes[0][0] =  box.cosR; axes[0][1] =  box.sinR;
+            axes[1][0] = -box.sinR; axes[1][1] =  box.cosR;
+            for (int i = 0; i < 3; ++i) {
+                const float ex = v[(i + 1) % 3][0] - v[i][0];
+                const float ey = v[(i + 1) % 3][1] - v[i][1];
+                // Perpendicular -- pick the side pointing away
+                // from the opposite vertex so the normal is
+                // outward from the filled triangle.
+                float nx = -ey, ny = ex;
+                const float ox = v[(i + 2) % 3][0] - v[i][0];
+                const float oy = v[(i + 2) % 3][1] - v[i][1];
+                if (nx * ox + ny * oy > 0.0f) {
+                    nx = -nx; ny = -ny;
+                }
+                const float len = std::sqrt(nx * nx + ny * ny);
+                if (len < 1e-6f) { nx = 1.0f; ny = 0.0f; }
+                else             { nx /= len; ny /= len; }
+                axes[2 + i][0] = nx;
+                axes[2 + i][1] = ny;
+            }
+            float minOverlap = std::numeric_limits<float>::infinity();
+            float bestNx = 0.0f, bestNy = 0.0f;
+            for (int i = 0; i < 5; ++i) {
+                const float ax = axes[i][0];
+                const float ay = axes[i][1];
+                // Project triangle onto axis (min / max of the
+                // 3 vertex projections).
+                float triMin = v[0][0] * ax + v[0][1] * ay;
+                float triMax = triMin;
+                for (int k = 1; k < 3; ++k) {
+                    const float p = v[k][0] * ax + v[k][1] * ay;
+                    triMin = std::min(triMin, p);
+                    triMax = std::max(triMax, p);
+                }
+                float boxMin, boxMax;
+                ProjectBox(box, ax, ay, boxMin, boxMax);
+                const float overlap = std::min(triMax, boxMax) -
+                                      std::max(triMin, boxMin);
+                if (overlap < 0.0f) return false;
+                if (overlap < minOverlap) {
+                    minOverlap = overlap;
+                    bestNx = ax; bestNy = ay;
+                }
+            }
+            // Orient the MTV so it pushes the BOX away from the
+            // triangle's centroid.
+            const float triCx = (v[0][0] + v[1][0] + v[2][0]) / 3.0f;
+            const float triCy = (v[0][1] + v[1][1] + v[2][1]) / 3.0f;
+            const float d = (box.cx - triCx) * bestNx +
+                            (box.cy - triCy) * bestNy;
+            if (d < 0.0f) { bestNx = -bestNx; bestNy = -bestNy; }
+            mtvX = bestNx * minOverlap;
+            mtvY = bestNy * minOverlap;
+            return true;
+        };
+
         // M7c22: slope-vs-circle MTV. Pushes the circle out
         // perpendicular to the slope hypotenuse + radial at
         // segment endpoints. Returned vector moves `a` away
@@ -949,14 +1049,14 @@ private:
             outY = pushY * pen;
         };
 
-        auto ComputeMTV = [&SatBoxBox, &SlopeCircleMtv](
+        auto ComputeMTV = [&SatBoxBox, &SlopeCircleMtv, &SatTriBox](
                             const ColliderInfo& a,
                             const ColliderInfo& b,
                             float& dx, float& dy) {
             dx = 0.0f; dy = 0.0f;
             // M7c22: slope vs circle is its own MTV path.
-            // Slope vs box falls through to SAT below (acts
-            // like AABB) for the same reason Overlap does.
+            // M7c24: slope vs box runs the dedicated triangle-
+            // vs-OBB SAT instead of the M7c22 AABB approximation.
             const bool aSlope =
                 a.slope != ColliderInfo::SlopeShape::None;
             const bool bSlope =
@@ -974,6 +1074,23 @@ private:
                 float pushX, pushY;
                 SlopeCircleMtv(b, a, pushX, pushY);
                 dx = pushX; dy = pushY;
+                return;
+            }
+            if (aSlope && b.kind == ColliderKind::Box) {
+                // SatTriBox returns MTV pushing box out of
+                // triangle. We want `a` (slope) moved away
+                // from `b` (box) -- flip sign.
+                float pushX, pushY;
+                if (SatTriBox(a, b, pushX, pushY)) {
+                    dx = -pushX; dy = -pushY;
+                }
+                return;
+            }
+            if (bSlope && a.kind == ColliderKind::Box) {
+                float pushX, pushY;
+                if (SatTriBox(b, a, pushX, pushY)) {
+                    dx = pushX; dy = pushY;
+                }
                 return;
             }
             if (a.kind == ColliderKind::Box &&
@@ -1104,14 +1221,13 @@ private:
             return ddx * ddx + ddy * ddy <=
                    circ.radius * circ.radius;
         };
-        auto Overlap = [&SatBoxBox, &SlopeCircleOverlap]
+        auto Overlap = [&SatBoxBox, &SlopeCircleOverlap, &SatTriBox]
                        (const ColliderInfo& a, const ColliderInfo& b) {
             // M7c22: slope vs circle takes its own path.
-            // Slope vs box falls through to the existing SAT
-            // approximation (treats the slope cell as its
-            // bounding box) -- acceptable for box bodies on
-            // wide platforms but circle bodies get the real
-            // triangle clamp.
+            // M7c24: slope vs box runs the dedicated triangle-
+            // vs-OBB SAT instead of the M7c22 bounding-AABB
+            // approximation, so box bodies finally feel the
+            // slope's diagonal face.
             const bool aSlope =
                 a.slope != ColliderInfo::SlopeShape::None;
             const bool bSlope =
@@ -1121,6 +1237,14 @@ private:
             }
             if (bSlope && a.kind == ColliderKind::Circle) {
                 return SlopeCircleOverlap(b, a);
+            }
+            if (aSlope && b.kind == ColliderKind::Box) {
+                float dxIgn = 0.0f, dyIgn = 0.0f;
+                return SatTriBox(a, b, dxIgn, dyIgn);
+            }
+            if (bSlope && a.kind == ColliderKind::Box) {
+                float dxIgn = 0.0f, dyIgn = 0.0f;
+                return SatTriBox(b, a, dxIgn, dyIgn);
             }
             if (a.kind == ColliderKind::Box &&
                 b.kind == ColliderKind::Box) {
