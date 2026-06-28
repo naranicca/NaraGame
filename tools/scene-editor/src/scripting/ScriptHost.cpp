@@ -2,6 +2,7 @@
 
 #include "../asset/AnimatorController.h"
 #include "../asset/AssetDatabase.h"
+#include "../audio/Audio.h"
 #include "../scene/AnimatorComponent.h"
 #include "../scene/BoxColliderComponent.h"
 #include "../scene/CircleColliderComponent.h"
@@ -877,6 +878,46 @@ static int LuaSceneFindPath(lua_State* L) {
         lua_rawseti(L, -2, int(i + 1));
     }
     return 1;
+}
+
+// audio.play(path) -> bool. M8c1 single-voice WAV playback
+// via Windows PlaySound. The path is taken absolute if it
+// starts with a drive letter ("C:\\..." / "/...") or a
+// backslash root, otherwise it's resolved against the
+// project's Assets directory the same way the asset DB
+// does -- "Sounds/coin.wav" works out of any project.
+// Returns true if PlaySound accepted the request; missing
+// or malformed WAVs silently fail to make sound.
+static int LuaAudioPlay(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    AssetDatabase* db = host ? host->BoundAssetDatabase() : nullptr;
+    const char* path = luaL_checkstring(L, 1);
+    std::string resolved = path;
+    const bool isAbs =
+        (resolved.size() >= 2 && resolved[1] == ':') ||
+        (!resolved.empty() && (resolved[0] == '/' ||
+                                 resolved[0] == '\\'));
+    if (!isAbs && db) {
+        const std::string& root = db->AssetsRoot();
+        if (!root.empty()) {
+            const char sep =
+                (root.back() == '/' || root.back() == '\\')
+                    ? '\0' : '/';
+            resolved = root;
+            if (sep) resolved.push_back(sep);
+            resolved.append(path);
+        }
+    }
+    const bool ok = Audio::Play(resolved);
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+// audio.stop() -> nil. Silences the currently-playing voice.
+static int LuaAudioStop(lua_State* L) {
+    (void)L;
+    Audio::Stop();
+    return 0;
 }
 
 // scene.overlap_circle(cx, cy, r) -> table of entity names.
@@ -1860,6 +1901,19 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kTimeApi, 1);
     lua_setglobal(L, "time");
+    // M8c1 audio table -- single-voice PlaySound MVP. The
+    // closure carries `this` so the binding can resolve
+    // project-relative paths through the asset DB without
+    // bouncing through a global.
+    static const luaL_Reg kAudioApi[] = {
+        {"play", LuaAudioPlay},
+        {"stop", LuaAudioStop},
+        {nullptr, nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kAudioApi, 1);
+    lua_setglobal(L, "audio");
     static const luaL_Reg kSceneApi[] = {
         {"create_entity",     LuaSceneCreateEntity},
         {"destroy_entity",    LuaSceneDestroyEntity},

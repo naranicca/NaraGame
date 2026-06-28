@@ -49,6 +49,7 @@ add_executable(scene-editor
     src/scene/BoxColliderComponent.cpp
     src/scene/CapsuleColliderComponent.cpp
     src/scene/CircleColliderComponent.cpp
+    src/audio/Audio.cpp
     src/scene/Component.cpp
     src/scene/EdgeColliderComponent.cpp
     src/scene/PolygonColliderComponent.cpp
@@ -60,7 +61,7 @@ add_executable(scene-editor
     src/scene/TransformComponent.cpp
     src/scripting/ScriptHost.cpp)
 target_include_directories(scene-editor PRIVATE src)
-target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui)
+target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui winmm)
 set_target_properties(scene-editor PROPERTIES FOLDER "tools")
 
 # ---------------------------------------------------------------------------
