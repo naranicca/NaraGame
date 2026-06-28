@@ -16,6 +16,7 @@
 #include "scene/AnimatorComponent.h"
 #include "scene/BoxColliderComponent.h"
 #include "audio/Audio.h"
+#include "scene/AudioSourceComponent.h"
 #include "scene/CapsuleColliderComponent.h"
 #include "scene/CircleColliderComponent.h"
 #include "scene/EdgeColliderComponent.h"
@@ -295,6 +296,10 @@ public:
         TickScripts (ImGui::GetIO().DeltaTime);
         TickPhysics (ImGui::GetIO().DeltaTime);
         TickAnimators(ImGui::GetIO().DeltaTime);
+        // M8c7: AudioSource auto-play. Fires on the rising
+        // edge of Play (m_animPlaying false -> true) for any
+        // enabled source flagged playOnStart.
+        TickAudioSources(ImGui::GetIO().DeltaTime);
         // M8c5: top up the music stream's buffer queue so a
         // streamed OGG / WAV keeps decoding past the
         // PlayMusic pre-fill (~280 ms of headroom at the
@@ -2266,6 +2271,57 @@ private:
     // play toggle is on) and push the sampled frame's sub-sprite name
     // into the entity's SpriteRenderer. Tickless when m_animPlaying is
     // false so the viewport snaps to whatever frame was last sampled.
+    // M8c7: AudioSource auto-play tick. Fires the
+    // playOnStart clip on the rising edge of Play. The
+    // `_started` flag on each source is reset whenever
+    // Play exits (m_animPlaying false) so the next press
+    // re-triggers exactly once.
+    void TickAudioSources(float /*dt*/) {
+        std::vector<SceneEditor::EntityId> ids;
+        ids.reserve(64);
+        CollectAllEntities(m_scene.Roots(), ids);
+        if (!m_animPlaying) {
+            for (SceneEditor::EntityId id : ids) {
+                SceneEditor::Entity* e = m_scene.Get(id);
+                if (!e) continue;
+                auto* as = e->GetComponent<
+                    SceneEditor::AudioSourceComponent>();
+                if (!as) continue;
+                as->_started = false;
+            }
+            return;
+        }
+        for (SceneEditor::EntityId id : ids) {
+            SceneEditor::Entity* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* as = e->GetComponent<
+                SceneEditor::AudioSourceComponent>();
+            if (!as || as->_started) continue;
+            as->_started = true;
+            if (!as->playOnStart || !as->clip.IsValid()) {
+                continue;
+            }
+            const auto* entry = m_assetDb.FindByGuid(as->clip);
+            if (!entry || entry->typeName != "Audio") continue;
+            const std::string& root = m_assetDb.AssetsRoot();
+            std::string abs = root;
+            if (!abs.empty() &&
+                abs.back() != '/' && abs.back() != '\\') {
+                abs.push_back('/');
+            }
+            abs.append(entry->relPath);
+            if (as->loop) {
+                SceneEditor::Audio::PlayMusic(
+                    abs, as->volume, true);
+            } else {
+                SceneEditor::Audio::Play(abs, as->volume);
+            }
+            m_scriptHost.AppendLine(
+                std::string("[audio-source] ") + e->name +
+                " -> " + entry->relPath);
+        }
+    }
+
     void TickAnimators(float dt) {
         if (!m_animPlaying) return;
         std::vector<SceneEditor::EntityId> ids;
@@ -6637,6 +6693,8 @@ private:
             DrawAnimatorEditor(entity, *an);
         } else if (auto* sc = dynamic_cast<SceneEditor::ScriptComponent*>(comp)) {
             DrawScriptEditor(entity, *sc);
+        } else if (auto* as = dynamic_cast<SceneEditor::AudioSourceComponent*>(comp)) {
+            DrawAudioSourceEditor(entity, *as);
         } else if (auto* bc = dynamic_cast<SceneEditor::BoxColliderComponent*>(comp)) {
             DrawBoxColliderEditor(entity, *bc);
         } else if (auto* cc = dynamic_cast<SceneEditor::CircleColliderComponent*>(comp)) {
@@ -6905,6 +6963,58 @@ private:
             pgc.isTrigger = trig;
         }
         DrawColliderLayerCombo(pgc.layer);
+    }
+
+    // M8c7 AudioSource inspector. Clip combo over the asset
+    // DB's Audio entries + the standard 0-1 volume slider +
+    // two policy checkboxes (Play On Start / Loop). Loop
+    // routes through PlayMusic (streaming) since the M8c2
+    // SFX cache is one-shot.
+    void DrawAudioSourceEditor(SceneEditor::Entity& /*entity*/,
+                                SceneEditor::AudioSourceComponent& as) {
+        std::string current = "(none)";
+        if (as.clip.IsValid()) {
+            if (const auto* e = m_assetDb.FindByGuid(as.clip)) {
+                current = e->relPath;
+            } else {
+                current = as.clip.ToString();
+            }
+        }
+        if (ImGui::BeginCombo("Clip", current.c_str())) {
+            if (ImGui::Selectable("(none)", !as.clip.IsValid())) {
+                UndoSnapshot();
+                as.clip = SceneEditor::AssetGuid{};
+            }
+            for (const SceneEditor::AssetEntry& a :
+                     m_assetDb.Entries()) {
+                if (a.typeName != "Audio") continue;
+                const bool sel = (a.guid == as.clip);
+                if (ImGui::Selectable(a.relPath.c_str(), sel)) {
+                    UndoSnapshot();
+                    as.clip = a.guid;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::SliderFloat("Volume", &as.volume,
+                                0.0f, 1.0f, "%.2f")) {
+            UndoSnapshot();
+            if (as.volume < 0.0f) as.volume = 0.0f;
+            if (as.volume > 1.0f) as.volume = 1.0f;
+        }
+        bool pos = as.playOnStart;
+        if (ImGui::Checkbox("Play On Start", &pos)) {
+            UndoSnapshot();
+            as.playOnStart = pos;
+        }
+        bool lp = as.loop;
+        if (ImGui::Checkbox("Loop (streams via PlayMusic)", &lp)) {
+            UndoSnapshot();
+            as.loop = lp;
+        }
+        ImGui::TextDisabled(
+            "Loop routes through the streaming voice; non-loop "
+            "fires the cached SFX path.");
     }
 
     // Same shape as DrawBoxColliderEditor but with a single

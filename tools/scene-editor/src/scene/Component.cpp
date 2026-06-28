@@ -1,6 +1,7 @@
 #include "Component.h"
 
 #include "AnimatorComponent.h"
+#include "AudioSourceComponent.h"
 #include "BoxColliderComponent.h"
 #include "CapsuleColliderComponent.h"
 #include "CircleColliderComponent.h"
@@ -51,6 +52,8 @@ void RegisterBuiltinComponents() {
                [] { return std::make_unique<TilemapComponent>(); });
     r.Register(AnimatorComponent::StaticTypeName(),
                [] { return std::make_unique<AnimatorComponent>(); });
+    r.Register(AudioSourceComponent::StaticTypeName(),
+               [] { return std::make_unique<AudioSourceComponent>(); });
     r.Register(ScriptComponent::StaticTypeName(),
                [] { return std::make_unique<ScriptComponent>(); });
     r.Register(BoxColliderComponent::StaticTypeName(),

@@ -50,6 +50,7 @@ add_executable(scene-editor
     src/scene/CapsuleColliderComponent.cpp
     src/scene/CircleColliderComponent.cpp
     src/audio/Audio.cpp
+    src/scene/AudioSourceComponent.cpp
     src/scene/Component.cpp
     src/scene/EdgeColliderComponent.cpp
     src/scene/PolygonColliderComponent.cpp
