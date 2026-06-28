@@ -14,6 +14,9 @@ void Rigidbody2DComponent::Serialize(Value& out) const {
     grav.Push(Value::MakeNumber(gravity.y));
     out.Add("gravity", std::move(grav));
     out.Add("drag", Value::MakeNumber(drag));
+    out.Add("mass", Value::MakeNumber(mass));
+    out.Add("restitution", Value::MakeNumber(restitution));
+    out.Add("friction", Value::MakeNumber(friction));
 }
 
 void Rigidbody2DComponent::Deserialize(const Value& obj) {
@@ -30,7 +33,11 @@ void Rigidbody2DComponent::Deserialize(const Value& obj) {
     };
     readVec2("velocity", velocity);
     readVec2("gravity",  gravity);
-    drag = float(obj.GetNumber("drag", 0.0));
+    drag        = float(obj.GetNumber("drag", 0.0));
+    mass        = float(obj.GetNumber("mass", 1.0));
+    if (mass <= 0.0f) mass = 1.0f;
+    restitution = float(obj.GetNumber("restitution", 0.0));
+    friction    = float(obj.GetNumber("friction", 0.0));
 }
 
 } // namespace SceneEditor

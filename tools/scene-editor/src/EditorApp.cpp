@@ -548,6 +548,14 @@ private:
             float                   cx, cy;
             float                   minX, maxX, minY, maxY;
             float                   radius;
+            // Cached velocity from the entity's Rigidbody2D
+            // (zero for static colliders). ComputeMTV consults
+            // it when the closest-point clamp degenerates --
+            // the deep-tunnel case has to push back the way the
+            // body came in, not toward the nearest face (which
+            // for a fast falling ball would point through the
+            // floor + out the underside).
+            float                   vx, vy;
         };
         std::vector<ColliderInfo> infos;
         infos.reserve(32);
@@ -562,11 +570,14 @@ private:
             auto* cc = e->GetComponent<SceneEditor::CircleColliderComponent>();
             if (!bc && !cc) continue;
             auto* sc = e->GetComponent<SceneEditor::ScriptComponent>();
+            auto* rbInfo = e->GetComponent<SceneEditor::Rigidbody2DComponent>();
             ColliderInfo ci;
             ci.id            = id;
             ci.name          = e->name;
             ci.hasScript     = (sc != nullptr);
             ci.entryFunction = sc ? sc->entryFunction : std::string{};
+            ci.vx            = rbInfo ? rbInfo->velocity.x : 0.0f;
+            ci.vy            = rbInfo ? rbInfo->velocity.y : 0.0f;
             if (bc) {
                 const float halfX = bc->size.x * 0.5f * tr->scale.x;
                 const float halfY = bc->size.y * 0.5f * tr->scale.y;
@@ -637,28 +648,75 @@ private:
             float ex = cir.cx - cx2;
             float ey = cir.cy - cy2;
             float dist = std::sqrt(ex * ex + ey * ey);
+            float pushX = 0.0f, pushY = 0.0f;
             if (dist < 1e-6f) {
-                // Circle centre is inside the box; pick the
-                // nearest face.
+                // Circle centre deep inside the box. The
+                // closest-point clamp degenerates -- "nearest
+                // face" isn't safe because for a fast falling
+                // ball that overshot, the floor's *bottom* face
+                // is now the closest one + pushing toward it
+                // would complete the tunnel. We use the
+                // relative-velocity direction (circle minus box)
+                // to pick the face on the *entry* side instead:
+                // whichever face has its outward normal pointing
+                // most opposite to the circle's incoming motion.
+                // (M7c4 / M7c10 latent bug -- caught when a
+                // bouncing ball with restitution=0.8 stopped
+                // bouncing after the first impact.)
+                const float relVx = cir.vx - box.vx;
+                const float relVy = cir.vy - box.vy;
                 const float toLeft   = cir.cx - box.minX;
                 const float toRight  = box.maxX - cir.cx;
                 const float toBottom = cir.cy - box.minY;
                 const float toTop    = box.maxY - cir.cy;
-                const float minH = std::min(toLeft, toRight);
-                const float minV = std::min(toBottom, toTop);
-                if (minH <= minV) {
-                    ex = (toLeft < toRight) ? -1.0f : 1.0f;
-                    ey = 0.0f;
-                    dist = 1.0f;
-                } else {
-                    ex = 0.0f;
-                    ey = (toBottom < toTop) ? -1.0f : 1.0f;
-                    dist = 1.0f;
+                // For each candidate face, the post-push exit
+                // depth is "face distance + radius". Score by
+                // (vel dot exit-normal): an inward velocity
+                // (component opposite to the face normal) gives
+                // a positive score. The face with the highest
+                // positive score is the one the body entered
+                // through, so we push along its normal.
+                struct Face {
+                    float nx, ny;   // outward normal
+                    float depth;    // exit push magnitude
+                };
+                const Face faces[4] = {
+                    { -1.0f,  0.0f, toLeft   + cir.radius },
+                    {  1.0f,  0.0f, toRight  + cir.radius },
+                    {  0.0f, -1.0f, toBottom + cir.radius },
+                    {  0.0f,  1.0f, toTop    + cir.radius },
+                };
+                int bestIdx = -1;
+                float bestScore = -1.0f;
+                for (int i = 0; i < 4; ++i) {
+                    const Face& f = faces[i];
+                    const float score = -(relVx * f.nx + relVy * f.ny);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestIdx = i;
+                    }
                 }
+                if (bestScore <= 0.0f) {
+                    // No clear velocity hint (body sitting at
+                    // rest somehow ended up inside) -- fall back
+                    // to the shallowest face.
+                    bestIdx = 0;
+                    float bestDepth = faces[0].depth;
+                    for (int i = 1; i < 4; ++i) {
+                        if (faces[i].depth < bestDepth) {
+                            bestDepth = faces[i].depth;
+                            bestIdx = i;
+                        }
+                    }
+                }
+                const Face& chosen = faces[bestIdx];
+                pushX = chosen.nx * chosen.depth;
+                pushY = chosen.ny * chosen.depth;
+            } else {
+                const float pen = cir.radius - dist;
+                pushX = ex / dist * pen;
+                pushY = ey / dist * pen;
             }
-            const float pen = cir.radius - dist;
-            const float pushX = ex / dist * pen;
-            const float pushY = ey / dist * pen;
             // mtv we built pushes the circle out of the box. If
             // A is the circle the result is direct; otherwise
             // flip the sign.
@@ -737,62 +795,74 @@ private:
                     auto* tbC = eb
                         ? eb->GetComponent<SceneEditor::TransformComponent>()
                         : nullptr;
-                    // M7c7: an entity without a Rigidbody2D is
-                    // treated as static -- it neither integrates
-                    // velocity nor accepts collision push-out.
-                    // The dynamic side absorbs the full MTV; if
-                    // both sides are dynamic the MTV splits
-                    // half-half as before. Both static = no push,
-                    // events still fire.
-                    const bool aDyn = ea &&
-                        ea->GetComponent<SceneEditor::Rigidbody2DComponent>();
-                    const bool bDyn = eb &&
-                        eb->GetComponent<SceneEditor::Rigidbody2DComponent>();
+                    // M7c10: collision response now reads
+                    // mass / restitution / friction off each
+                    // dynamic side. MTV splits by inverse mass
+                    // (lighter body moves more), the inward
+                    // normal velocity component reflects by the
+                    // combined restitution (max of both), and
+                    // the tangent component damps by the
+                    // combined friction (max). Without a
+                    // Rigidbody2D the body is treated as
+                    // infinite mass / static (matches M7c7).
+                    auto* rbA = ea
+                        ? ea->GetComponent<SceneEditor::Rigidbody2DComponent>()
+                        : nullptr;
+                    auto* rbB = eb
+                        ? eb->GetComponent<SceneEditor::Rigidbody2DComponent>()
+                        : nullptr;
+                    const float invA = rbA && rbA->mass > 0.0f
+                        ? 1.0f / rbA->mass : 0.0f;
+                    const float invB = rbB && rbB->mass > 0.0f
+                        ? 1.0f / rbB->mass : 0.0f;
+                    const float invSum = invA + invB;
                     float aShare = 0.0f, bShare = 0.0f;
-                    if (aDyn && bDyn) { aShare = 0.5f; bShare = 0.5f; }
-                    else if (aDyn)    { aShare = 1.0f;                 }
-                    else if (bDyn)    {                 bShare = 1.0f; }
-                    if (taC && aShare > 0.0f) {
-                        taC->position.x += dx * aShare;
-                        taC->position.y += dy * aShare;
-                        // Zero the velocity component along the
-                        // MTV so the body doesn't keep pushing
-                        // into the wall every frame. Tangent
-                        // velocity (e.g. horizontal slide along
-                        // a floor) survives.
-                        if (auto* rb = ea
-                                ->GetComponent<SceneEditor::Rigidbody2DComponent>()) {
-                            const float mag = std::sqrt(dx * dx + dy * dy);
-                            if (mag > 1e-6f) {
-                                const float nx = dx / mag;
-                                const float ny = dy / mag;
-                                const float vn = rb->velocity.x * nx +
-                                                 rb->velocity.y * ny;
-                                if (vn < 0.0f) {
-                                    rb->velocity.x -= vn * nx;
-                                    rb->velocity.y -= vn * ny;
-                                }
-                            }
-                        }
+                    if (invSum > 0.0f) {
+                        aShare = invA / invSum;
+                        bShare = invB / invSum;
                     }
-                    if (tbC && bShare > 0.0f) {
-                        tbC->position.x -= dx * bShare;
-                        tbC->position.y -= dy * bShare;
-                        if (auto* rb = eb
-                                ->GetComponent<SceneEditor::Rigidbody2DComponent>()) {
-                            const float mag = std::sqrt(dx * dx + dy * dy);
-                            if (mag > 1e-6f) {
-                                const float nx = -dx / mag;
-                                const float ny = -dy / mag;
-                                const float vn = rb->velocity.x * nx +
-                                                 rb->velocity.y * ny;
-                                if (vn < 0.0f) {
-                                    rb->velocity.x -= vn * nx;
-                                    rb->velocity.y -= vn * ny;
-                                }
-                            }
+                    const float e =
+                        std::max(rbA ? rbA->restitution : 0.0f,
+                                 rbB ? rbB->restitution : 0.0f);
+                    const float mu =
+                        std::max(rbA ? rbA->friction : 0.0f,
+                                 rbB ? rbB->friction : 0.0f);
+                    const float mag = std::sqrt(dx * dx + dy * dy);
+                    const float nx = mag > 1e-6f ? dx / mag : 0.0f;
+                    const float ny = mag > 1e-6f ? dy / mag : 0.0f;
+                    auto Resolve = [&](SceneEditor::TransformComponent* tr,
+                                       SceneEditor::Rigidbody2DComponent* rb,
+                                       float share,
+                                       float pushX, float pushY) {
+                        if (!tr || share <= 0.0f) return;
+                        tr->position.x += pushX * share;
+                        tr->position.y += pushY * share;
+                        if (!rb || mag < 1e-6f) return;
+                        // Normal points in the same direction as
+                        // pushX/pushY (away from the other body).
+                        const float pnx = pushX / mag;
+                        const float pny = pushY / mag;
+                        const float vn = rb->velocity.x * pnx +
+                                         rb->velocity.y * pny;
+                        if (vn < 0.0f) {
+                            // Inward -- bounce by (1 + e) so the
+                            // normal component flips from vn to
+                            // -e*vn.
+                            const float jn = -(1.0f + e) * vn;
+                            rb->velocity.x += jn * pnx;
+                            rb->velocity.y += jn * pny;
                         }
-                    }
+                        // Tangential damping. Tangent direction
+                        // is perpendicular to the normal.
+                        const float tx = -pny;
+                        const float ty =  pnx;
+                        const float vt = rb->velocity.x * tx +
+                                         rb->velocity.y * ty;
+                        rb->velocity.x -= vt * mu * tx;
+                        rb->velocity.y -= vt * mu * ty;
+                    };
+                    Resolve(taC, rbA, aShare,  dx,  dy);
+                    Resolve(tbC, rbB, bShare, -dx, -dy);
                     if (!wasContact) {
                         if (a.hasScript) m_scriptHost.CallOnCollisionEnter(
                             a.name, b.name, a.entryFunction);
@@ -5205,6 +5275,38 @@ private:
             ImGui::SetTooltip(
                 "Per-frame damping. velocity *= max(0, 1 - drag * dt)\n"
                 "0 = none; ~5 stops a 1 u/s body in ~0.2 s.");
+        }
+        if (ImGui::DragFloat("Mass", &rb.mass, 0.05f, 0.01f, 0.0f,
+                              "%.2f")) {
+            UndoSnapshot();
+            if (rb.mass <= 0.0f) rb.mass = 0.01f;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Inertia. Collision push-out splits inversely\n"
+                "with mass: a 1-kg ball hitting a 10-kg crate\n"
+                "moves 10x as far as the crate does.");
+        }
+        if (ImGui::DragFloat("Restitution", &rb.restitution,
+                              0.01f, 0.0f, 1.0f, "%.2f")) {
+            UndoSnapshot();
+            rb.restitution = std::clamp(rb.restitution, 0.0f, 1.0f);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Bounciness [0..1]. 0 absorbs the inward velocity\n"
+                "(M7c7 default); 1 reflects it perfectly.");
+        }
+        if (ImGui::DragFloat("Friction", &rb.friction,
+                              0.01f, 0.0f, 1.0f, "%.2f")) {
+            UndoSnapshot();
+            rb.friction = std::clamp(rb.friction, 0.0f, 1.0f);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Per-contact tangential damping [0..1]. 0 = the\n"
+                "body slides along the surface unaffected;\n"
+                "1 = tangent motion stops on contact.");
         }
     }
 

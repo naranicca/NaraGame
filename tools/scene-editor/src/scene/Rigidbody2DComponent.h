@@ -22,6 +22,24 @@ public:
     NaraGame::Vec2 velocity { 0.0f, 0.0f };
     NaraGame::Vec2 gravity  { 0.0f, 0.0f };
     float          drag     = 0.0f;
+    // M7c10 -- richer collision response.
+    // `mass` controls how much each body absorbs during the
+    // push-out + how the impulse splits. Two equal-mass bodies
+    // share the MTV 50/50 (matches M7c5 behaviour); a 1-kg ball
+    // hitting a 10-kg crate gives the ball 10/11 of the push.
+    // mass = 0 is invalid -- the Component falls back to 1.0 to
+    // avoid divide-by-zero in TickColliders. Mark a body
+    // "infinite mass" by removing the Rigidbody2D entirely
+    // (M7c7 already treats no-Rigidbody = static).
+    // `restitution` is the bounciness in [0, 1]. 0 absorbs the
+    // inward velocity (M7c7 default); 1 reflects it 1:1; 0.5 is
+    // a typical rubber ball.
+    // `friction` is the per-collision tangential damping in
+    // [0, 1]. 0 lets the body slide freely along the surface;
+    // 1 stops tangential motion the instant contact lands.
+    float          mass        = 1.0f;
+    float          restitution = 0.0f;
+    float          friction    = 0.0f;
 
     static const char* StaticTypeName() { return "Rigidbody2D"; }
     const char* TypeName() const override { return StaticTypeName(); }
