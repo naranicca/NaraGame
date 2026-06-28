@@ -44,9 +44,10 @@ void TilesetAsset::FromJson(const Value& root) {
         td.collides  = t.GetBool("collides",  false);
         td.isTrigger = t.GetBool("isTrigger", false);
         const std::string shapeStr = t.GetString("shape", "Box");
-        td.shape = (shapeStr == "OneWay")
-            ? TileColliderShape::OneWay
-            : TileColliderShape::Box;
+        if      (shapeStr == "OneWay")     td.shape = TileColliderShape::OneWay;
+        else if (shapeStr == "SlopeRight") td.shape = TileColliderShape::SlopeRight;
+        else if (shapeStr == "SlopeLeft")  td.shape = TileColliderShape::SlopeLeft;
+        else                                td.shape = TileColliderShape::Box;
         tiles[idx] = td;
     }
 }
@@ -63,9 +64,14 @@ Value TilesetAsset::ToJson() const {
         t.Add("index",     Value::MakeNumber(kv.first));
         t.Add("collides",  Value::MakeBool(kv.second.collides));
         t.Add("isTrigger", Value::MakeBool(kv.second.isTrigger));
-        t.Add("shape",     Value::MakeString(
-            kv.second.shape == TileColliderShape::OneWay
-                ? "OneWay" : "Box"));
+        const char* shapeStr = "Box";
+        switch (kv.second.shape) {
+            case TileColliderShape::OneWay:     shapeStr = "OneWay";     break;
+            case TileColliderShape::SlopeRight: shapeStr = "SlopeRight"; break;
+            case TileColliderShape::SlopeLeft:  shapeStr = "SlopeLeft";  break;
+            case TileColliderShape::Box:        default:                 break;
+        }
+        t.Add("shape", Value::MakeString(shapeStr));
         arr.Push(std::move(t));
     }
     root.Add("tiles", std::move(arr));

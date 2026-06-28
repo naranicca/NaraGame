@@ -588,6 +588,15 @@ private:
             // sideways or downward, so jump-through platforms
             // pass when the body's MTV doesn't point up.
             bool                    oneWay = false;
+            // M7c22: tile-driven 45-degree slope shape. Box +
+            // Circle bodies hitting a slope cell get pushed
+            // perpendicular to the hypotenuse instead of along
+            // the AABB faces.
+            //   None  = not a slope (default)
+            //   Right = / hypotenuse, filled bottom-right
+            //   Left  = \ hypotenuse, filled bottom-left
+            enum class SlopeShape { None, Right, Left };
+            SlopeShape              slope = SlopeShape::None;
         };
         std::vector<ColliderInfo> infos;
         infos.reserve(32);
@@ -719,6 +728,16 @@ private:
                     !tileTrigger &&
                     tIt->second.shape ==
                         SceneEditor::TileColliderShape::OneWay;
+                ColliderInfo::SlopeShape tileSlope =
+                    ColliderInfo::SlopeShape::None;
+                if (!tileTrigger) {
+                    if (tIt->second.shape ==
+                        SceneEditor::TileColliderShape::SlopeRight)
+                        tileSlope = ColliderInfo::SlopeShape::Right;
+                    else if (tIt->second.shape ==
+                        SceneEditor::TileColliderShape::SlopeLeft)
+                        tileSlope = ColliderInfo::SlopeShape::Left;
+                }
                 // Cell centre in entity-local coordinates, then
                 // rotate into world.
                 const float lx = (float(gx) + 0.5f) * cellWorldW;
@@ -734,6 +753,7 @@ private:
                 ci.entryFunction.clear();
                 ci.isTrigger     = tileTrigger;
                 ci.oneWay        = tileOneWay;
+                ci.slope         = tileSlope;
                 ci.kind          = ColliderKind::Box;
                 ci.layer         = tm->collisionLayer;
                 ci.cx            = wx;
@@ -819,10 +839,95 @@ private:
         // moving entity A by (dx, dy) separates it from B.
         // Caller pushes B by the opposite vector. Used by the
         // solid (non-trigger) push-out path.
-        auto ComputeMTV = [&SatBoxBox](const ColliderInfo& a,
-                                       const ColliderInfo& b,
-                                       float& dx, float& dy) {
+        // M7c22: slope-vs-circle MTV. Pushes the circle out
+        // perpendicular to the slope hypotenuse + radial at
+        // segment endpoints. Returned vector moves `a` away
+        // from `b`; when `a` is the slope (static), Resolve's
+        // share=0 logic drops the slope-side push + the circle
+        // gets pushed by the opposite vector.
+        auto SlopeCircleMtv = [](const ColliderInfo& slope,
+                                 const ColliderInfo& circ,
+                                 float& outX, float& outY) {
+            // Re-derive hypotenuse + outward normal in one
+            // place (avoids dragging another lambda capture
+            // through the closure list).
+            const float bl_x = slope.cx - slope.halfX;
+            const float bl_y = slope.cy - slope.halfY;
+            const float br_x = slope.cx + slope.halfX;
+            const float br_y = slope.cy - slope.halfY;
+            const float tl_x = slope.cx - slope.halfX;
+            const float tl_y = slope.cy + slope.halfY;
+            const float tr_x = slope.cx + slope.halfX;
+            const float tr_y = slope.cy + slope.halfY;
+            const float invSqrt2 = 0.70710678118f;
+            float P0x, P0y, P1x, P1y, nx, ny;
+            if (slope.slope == ColliderInfo::SlopeShape::Right) {
+                P0x = bl_x; P0y = bl_y; P1x = tr_x; P1y = tr_y;
+                nx = -invSqrt2; ny = invSqrt2;
+            } else {
+                P0x = br_x; P0y = br_y; P1x = tl_x; P1y = tl_y;
+                nx = invSqrt2;  ny = invSqrt2;
+            }
+            const float sx = P1x - P0x;
+            const float sy = P1y - P0y;
+            const float segLenSq = sx * sx + sy * sy;
+            float t = ((circ.cx - P0x) * sx + (circ.cy - P0y) * sy)
+                       / segLenSq;
+            t = std::clamp(t, 0.0f, 1.0f);
+            const float pcx = P0x + t * sx;
+            const float pcy = P0y + t * sy;
+            const float ddx = circ.cx - pcx;
+            const float ddy = circ.cy - pcy;
+            const float dist = std::sqrt(ddx * ddx + ddy * ddy);
+            const float pen  = circ.radius - dist;
+            // pen <= 0 means no real penetration but the
+            // contact pair predicate still tripped due to
+            // numerical edges; emit a tiny zero MTV.
+            if (pen <= 0.0f) { outX = 0.0f; outY = 0.0f; return; }
+            // The push direction for the circle is the outward
+            // normal when t is in the segment interior + the
+            // radial direction (away from the endpoint) when
+            // clamped to an endpoint.
+            float pushX, pushY;
+            if (t > 0.0f && t < 1.0f) {
+                pushX = nx; pushY = ny;
+            } else if (dist > 1e-6f) {
+                pushX = ddx / dist;
+                pushY = ddy / dist;
+            } else {
+                pushX = nx; pushY = ny;
+            }
+            outX = pushX * pen;
+            outY = pushY * pen;
+        };
+
+        auto ComputeMTV = [&SatBoxBox, &SlopeCircleMtv](
+                            const ColliderInfo& a,
+                            const ColliderInfo& b,
+                            float& dx, float& dy) {
             dx = 0.0f; dy = 0.0f;
+            // M7c22: slope vs circle is its own MTV path.
+            // Slope vs box falls through to SAT below (acts
+            // like AABB) for the same reason Overlap does.
+            const bool aSlope =
+                a.slope != ColliderInfo::SlopeShape::None;
+            const bool bSlope =
+                b.slope != ColliderInfo::SlopeShape::None;
+            if (aSlope && b.kind == ColliderKind::Circle) {
+                float pushX, pushY;
+                SlopeCircleMtv(a, b, pushX, pushY);
+                // Circle gets pushed by +push; for the function
+                // to push `a` out of `b` we negate, so Resolve's
+                // -dx/-dy for b matches the circle's push.
+                dx = -pushX; dy = -pushY;
+                return;
+            }
+            if (bSlope && a.kind == ColliderKind::Circle) {
+                float pushX, pushY;
+                SlopeCircleMtv(b, a, pushX, pushY);
+                dx = pushX; dy = pushY;
+                return;
+            }
             if (a.kind == ColliderKind::Box &&
                 b.kind == ColliderKind::Box) {
                 // SAT does the orientation work; the result is
@@ -925,7 +1030,71 @@ private:
         // pass; circle-vs-circle compares centre distance to
         // summed radii; box-vs-circle uses the same local-frame
         // clamp the rotated MTV path uses.
-        auto Overlap = [&SatBoxBox](const ColliderInfo& a, const ColliderInfo& b) {
+        // M7c22: slope-vs-circle helper. Projects the circle
+        // centre onto the slope's hypotenuse segment, clamps t
+        // to [0, 1] so a ball that drifts past the cell's
+        // corners doesn't fake-contact the infinite line, and
+        // returns true when the closest-point distance is less
+        // than the circle radius. The outward normal points
+        // toward the unfilled triangle.
+        auto SlopeHypotenuse = [](const ColliderInfo& slope,
+                                  float& P0x, float& P0y,
+                                  float& P1x, float& P1y,
+                                  float& outNx, float& outNy) {
+            const float bl_x = slope.cx - slope.halfX;
+            const float bl_y = slope.cy - slope.halfY;
+            const float br_x = slope.cx + slope.halfX;
+            const float br_y = slope.cy - slope.halfY;
+            const float tl_x = slope.cx - slope.halfX;
+            const float tl_y = slope.cy + slope.halfY;
+            const float tr_x = slope.cx + slope.halfX;
+            const float tr_y = slope.cy + slope.halfY;
+            const float invSqrt2 = 0.70710678118f;
+            if (slope.slope == ColliderInfo::SlopeShape::Right) {
+                P0x = bl_x; P0y = bl_y; P1x = tr_x; P1y = tr_y;
+                outNx = -invSqrt2; outNy = invSqrt2;
+            } else {
+                P0x = br_x; P0y = br_y; P1x = tl_x; P1y = tl_y;
+                outNx = invSqrt2;  outNy = invSqrt2;
+            }
+        };
+        auto SlopeCircleOverlap = [&SlopeHypotenuse](
+                const ColliderInfo& slope,
+                const ColliderInfo& circ) {
+            float P0x, P0y, P1x, P1y, nx, ny;
+            SlopeHypotenuse(slope, P0x, P0y, P1x, P1y, nx, ny);
+            const float dx = P1x - P0x;
+            const float dy = P1y - P0y;
+            const float segLenSq = dx * dx + dy * dy;
+            if (segLenSq < 1e-6f) return false;
+            float t = ((circ.cx - P0x) * dx + (circ.cy - P0y) * dy)
+                       / segLenSq;
+            t = std::clamp(t, 0.0f, 1.0f);
+            const float pcx = P0x + t * dx;
+            const float pcy = P0y + t * dy;
+            const float ddx = circ.cx - pcx;
+            const float ddy = circ.cy - pcy;
+            return ddx * ddx + ddy * ddy <=
+                   circ.radius * circ.radius;
+        };
+        auto Overlap = [&SatBoxBox, &SlopeCircleOverlap]
+                       (const ColliderInfo& a, const ColliderInfo& b) {
+            // M7c22: slope vs circle takes its own path.
+            // Slope vs box falls through to the existing SAT
+            // approximation (treats the slope cell as its
+            // bounding box) -- acceptable for box bodies on
+            // wide platforms but circle bodies get the real
+            // triangle clamp.
+            const bool aSlope =
+                a.slope != ColliderInfo::SlopeShape::None;
+            const bool bSlope =
+                b.slope != ColliderInfo::SlopeShape::None;
+            if (aSlope && b.kind == ColliderKind::Circle) {
+                return SlopeCircleOverlap(a, b);
+            }
+            if (bSlope && a.kind == ColliderKind::Circle) {
+                return SlopeCircleOverlap(b, a);
+            }
             if (a.kind == ColliderKind::Box &&
                 b.kind == ColliderKind::Box) {
                 // SAT yields a yes/no plus a throwaway MTV --
@@ -4570,8 +4739,8 @@ private:
         const int texCols = int(tex->Width())  / ts->cellPixelW;
         const int texRows = int(tex->Height()) / ts->cellPixelH;
         ImGui::TextDisabled("%d x %d tiles  -- click cycles "
-                            "blank -> solid -> one-way -> trigger "
-                            "-> blank",
+                            "blank -> Box -> OneWay -> SlopeR -> "
+                            "SlopeL -> Trigger -> blank",
                             texCols, texRows);
 
         // Preview area.
@@ -4632,8 +4801,32 @@ private:
                 fill = IM_COL32(220,  60,  60,  90);
                 edge = IM_COL32(255, 100, 100, 255);
             }
-            dl->AddRectFilled(a, b, fill);
-            dl->AddRect(a, b, edge, 0.0f, 0, 2.0f);
+            // Slope tiles draw as triangles to communicate
+            // which half of the cell is filled. Other modes
+            // stay as a full rect.
+            const auto shape = kv.second.shape;
+            if (!kv.second.isTrigger &&
+                shape == SceneEditor::TileColliderShape::SlopeRight) {
+                // Filled bottom-right triangle (screen Y down).
+                dl->AddTriangleFilled(
+                    ImVec2{a.x, b.y}, ImVec2{b.x, b.y},
+                    ImVec2{b.x, a.y}, fill);
+                dl->AddTriangle(
+                    ImVec2{a.x, b.y}, ImVec2{b.x, b.y},
+                    ImVec2{b.x, a.y}, edge, 2.0f);
+            } else if (!kv.second.isTrigger &&
+                       shape == SceneEditor::TileColliderShape::SlopeLeft) {
+                // Filled bottom-left triangle.
+                dl->AddTriangleFilled(
+                    ImVec2{a.x, b.y}, ImVec2{b.x, b.y},
+                    ImVec2{a.x, a.y}, fill);
+                dl->AddTriangle(
+                    ImVec2{a.x, b.y}, ImVec2{b.x, b.y},
+                    ImVec2{a.x, a.y}, edge, 2.0f);
+            } else {
+                dl->AddRectFilled(a, b, fill);
+                dl->AddRect(a, b, edge, 0.0f, 0, 2.0f);
+            }
         }
 
         if (clicked) {
@@ -4643,33 +4836,34 @@ private:
             const int col = px / ts->cellPixelW;
             const int row = py / ts->cellPixelH;
             if (col >= 0 && col < texCols && row >= 0 && row < texRows) {
-                // M7c21: cycle blank -> solid Box -> solid OneWay
-                // -> trigger -> blank. The four-state cycle stays
-                // single-click + the runtime branches on the
-                // composed flags (collides + isTrigger + shape)
-                // without per-cell branching elsewhere.
+                // M7c22: 6-state cycle blank -> Box -> OneWay
+                // -> SlopeRight -> SlopeLeft -> Trigger -> blank.
+                // The runtime branches on the composed flags
+                // (collides + isTrigger + shape) without
+                // per-cell branching outside this helper.
                 const int idx = row * texCols + col;
                 auto it = ts->tiles.find(idx);
+                using Shape = SceneEditor::TileColliderShape;
                 if (it == ts->tiles.end()) {
                     SceneEditor::TilesetTile t;
                     t.collides  = true;
                     t.isTrigger = false;
-                    t.shape     = SceneEditor::TileColliderShape::Box;
+                    t.shape     = Shape::Box;
                     ts->tiles[idx] = t;
                 } else if (!it->second.isTrigger &&
-                           it->second.shape ==
-                               SceneEditor::TileColliderShape::Box) {
-                    // solid Box -> solid OneWay
-                    it->second.shape =
-                        SceneEditor::TileColliderShape::OneWay;
+                           it->second.shape == Shape::Box) {
+                    it->second.shape = Shape::OneWay;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::OneWay) {
+                    it->second.shape = Shape::SlopeRight;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeRight) {
+                    it->second.shape = Shape::SlopeLeft;
                 } else if (!it->second.isTrigger) {
-                    // solid OneWay -> trigger (Box-shape trigger;
-                    // OneWay + trigger doesn't make sense)
+                    // SlopeLeft -> Trigger (Box-shape trigger).
                     it->second.isTrigger = true;
-                    it->second.shape =
-                        SceneEditor::TileColliderShape::Box;
+                    it->second.shape = Shape::Box;
                 } else {
-                    // trigger -> blank
                     ts->tiles.erase(it);
                 }
                 dirty = true;

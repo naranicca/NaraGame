@@ -21,6 +21,16 @@ namespace SceneEditor {
 enum class TileColliderShape {
     Box,
     OneWay,
+    // M7c22: 45-degree slope tiles. The hypotenuse runs corner-
+    // to-corner of the cell + the bottom triangle is filled,
+    // so a body rolling into the slope from the side climbs
+    // along the diagonal.
+    //   SlopeRight (/): hypotenuse bottom-left -> top-right;
+    //                   filled bottom-right triangle.
+    //   SlopeLeft  (\): hypotenuse bottom-right -> top-left;
+    //                   filled bottom-left triangle.
+    SlopeRight,
+    SlopeLeft,
 };
 
 struct TilesetTile {
