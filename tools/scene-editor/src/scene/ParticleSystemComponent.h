@@ -48,6 +48,20 @@ public:
     float dirAngleMinDeg = 45.0f;
     float dirAngleMaxDeg = 135.0f;
 
+    // M9c7 rotation. Initial rotation (degrees, CCW around the
+    // quad's centre) is sampled per emit from [startRotationMin,
+    // startRotationMax]. Angular speed (degrees/sec) is sampled
+    // the same way + integrated into the particle's rotation
+    // every tick. `velocityAlign = true` overrides both -- the
+    // renderer instead rotates the quad to match each particle's
+    // current velocity direction (typical for sparks / debris
+    // that should streak in the direction of travel).
+    float startRotationMinDeg = 0.0f;
+    float startRotationMaxDeg = 0.0f;
+    float angularSpeedMinDeg  = 0.0f;
+    float angularSpeedMaxDeg  = 0.0f;
+    bool  velocityAlign       = false;
+
     // Tinting over the particle's life. The runtime lerps
     // RGBA from startColor at age 0 to endColor at age =
     // lifetime, so fading to alpha = 0 gives a clean tail-out.
@@ -111,9 +125,15 @@ public:
     struct Particle {
         NaraGame::Vec2 pos { 0.0f, 0.0f };
         NaraGame::Vec2 vel { 0.0f, 0.0f };
-        float age      = 0.0f;
-        float lifetime = 1.0f;
-        float size     = 0.1f;
+        float age        = 0.0f;
+        float lifetime   = 1.0f;
+        float size       = 0.1f;
+        // M9c7. Stored in radians so the draw path's
+        // cos/sin doesn't have to convert every frame.
+        // `angularVel` is also radians/sec; both are
+        // ignored when the emitter's velocityAlign flag is on.
+        float rotation   = 0.0f;
+        float angularVel = 0.0f;
     };
     std::vector<Particle> _pool;          // sized to maxParticles lazily
     int                   _liveCount    = 0;

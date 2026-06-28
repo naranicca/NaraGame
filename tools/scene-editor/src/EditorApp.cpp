@@ -2514,6 +2514,19 @@ private:
                                   ps->lifetimeMax));
                     p.size     = frand(ps->_rng,
                         ps->startSizeMin, ps->startSizeMax);
+                    // M9c7 sample initial rotation + angular
+                    // speed in radians. Stored even when
+                    // velocityAlign is on so toggling the
+                    // flag mid-run doesn't snap every live
+                    // particle to a random angle.
+                    constexpr float kDeg2Rad =
+                        3.14159265358979323846f / 180.0f;
+                    p.rotation = frand(ps->_rng,
+                        ps->startRotationMinDeg,
+                        ps->startRotationMaxDeg) * kDeg2Rad;
+                    p.angularVel = frand(ps->_rng,
+                        ps->angularSpeedMinDeg,
+                        ps->angularSpeedMaxDeg) * kDeg2Rad;
                 }
             }
             // Integrate + cull. Iterate while shrinking
@@ -2526,6 +2539,7 @@ private:
                 p.vel.y += ps->gravity.y * dt;
                 p.pos.x += p.vel.x * dt;
                 p.pos.y += p.vel.y * dt;
+                p.rotation += p.angularVel * dt;
                 p.age   += dt;
                 if (p.age >= p.lifetime) {
                     p = ps->_pool[size_t(--ps->_liveCount)];
@@ -7135,6 +7149,42 @@ private:
             ps.gravity = { gv[0], gv[1] };
         }
 
+        // M9c7 rotation block. Velocity-align dominates -- when
+        // it's on the start/spin ranges are still serialised
+        // (toggling the flag off snaps live particles back to
+        // their stored angles instead of all to 0) but they
+        // don't affect what the user sees on screen.
+        float rotRange[2] = { ps.startRotationMinDeg,
+                              ps.startRotationMaxDeg };
+        if (ImGui::DragFloat2("Start Rotation (deg, min/max)",
+                               rotRange, 1.0f, -720.0f, 720.0f,
+                               "%.0f")) {
+            UndoSnapshot();
+            if (rotRange[1] < rotRange[0]) rotRange[1] = rotRange[0];
+            ps.startRotationMinDeg = rotRange[0];
+            ps.startRotationMaxDeg = rotRange[1];
+        }
+        float spinRange[2] = { ps.angularSpeedMinDeg,
+                                ps.angularSpeedMaxDeg };
+        if (ImGui::DragFloat2("Angular Speed (deg/s, min/max)",
+                               spinRange, 2.0f, -3600.0f, 3600.0f,
+                               "%.0f")) {
+            UndoSnapshot();
+            if (spinRange[1] < spinRange[0]) spinRange[1] = spinRange[0];
+            ps.angularSpeedMinDeg = spinRange[0];
+            ps.angularSpeedMaxDeg = spinRange[1];
+        }
+        if (ImGui::Checkbox("Velocity Align", &ps.velocityAlign)) {
+            UndoSnapshot();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "When on, each particle's quad rotates to face\n"
+                "its velocity direction (good for sparks /\n"
+                "debris streaks). Overrides the start rotation\n"
+                "+ angular speed for the live render path.");
+        }
+
         // M9c4 texture picker. Same combo + drag-drop shape
         // as the SpriteRenderer's sprite field. Empty = the
         // untextured AddRectFilled path (the M9c2 default).
@@ -9541,11 +9591,32 @@ private:
                     int(g * 255.0f),
                     int(b * 255.0f),
                     int(clA * 255.0f));
+                // M9c7 rotation: project the 4 corners
+                // through cos/sin around the particle centre.
+                // Velocity-align overrides the stored angle
+                // with atan2(vy, vx) -- screen-Y points down
+                // so we flip the y component to keep the
+                // sprite's "forward" facing world-up when vy
+                // is positive.
+                float rotRad = p.rotation;
+                if (ps->velocityAlign) {
+                    rotRad = std::atan2(p.vel.y, p.vel.x);
+                }
+                const float cR = std::cos(rotRad);
+                const float sR = std::sin(rotRad);
+                // World-space local corners. Y-flip for the
+                // screen happens inside the projection so
+                // rotation direction stays CCW in world space.
+                auto Project = [&](float lx, float ly) {
+                    const float rx = cR * lx - sR * ly;
+                    const float ry = sR * lx + cR * ly;
+                    return ImVec2{sc.x + rx, sc.y - ry};
+                };
+                const ImVec2 pTL = Project(-half,  half);
+                const ImVec2 pTR = Project( half,  half);
+                const ImVec2 pBR = Project( half, -half);
+                const ImVec2 pBL = Project(-half, -half);
                 if (tex) {
-                    const ImVec2 pTL{sc.x - half, sc.y - half};
-                    const ImVec2 pTR{sc.x + half, sc.y - half};
-                    const ImVec2 pBR{sc.x + half, sc.y + half};
-                    const ImVec2 pBL{sc.x - half, sc.y + half};
                     // M9c6 per-particle frame select. Each
                     // particle's age maps to a frame index
                     // independently, so two particles spawned
@@ -9569,10 +9640,11 @@ private:
                         pTL, pTR, pBR, pBL,
                         uv.a, uv.b, uv.c, uv.d, col);
                 } else {
-                    dl->AddRectFilled(
-                        ImVec2{sc.x - half, sc.y - half},
-                        ImVec2{sc.x + half, sc.y + half},
-                        col);
+                    // Untextured rect path picks up the same
+                    // rotation through AddQuadFilled. When
+                    // rotation is 0 the result is identical to
+                    // the M9c2 AddRectFilled output.
+                    dl->AddQuadFilled(pTL, pTR, pBR, pBL, col);
                 }
             }
         }

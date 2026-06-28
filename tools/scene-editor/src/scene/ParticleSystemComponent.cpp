@@ -57,6 +57,11 @@ void ParticleSystemComponent::Serialize(Value& out) const {
     out.Add("startSizeMax",   Value::MakeNumber(startSizeMax));
     out.Add("dirAngleMinDeg", Value::MakeNumber(dirAngleMinDeg));
     out.Add("dirAngleMaxDeg", Value::MakeNumber(dirAngleMaxDeg));
+    out.Add("startRotationMinDeg", Value::MakeNumber(startRotationMinDeg));
+    out.Add("startRotationMaxDeg", Value::MakeNumber(startRotationMaxDeg));
+    out.Add("angularSpeedMinDeg",  Value::MakeNumber(angularSpeedMinDeg));
+    out.Add("angularSpeedMaxDeg",  Value::MakeNumber(angularSpeedMaxDeg));
+    out.Add("velocityAlign",       Value::MakeBool(velocityAlign));
     out.Add("startColor",     ColorToJson(startColor));
     out.Add("endColor",       ColorToJson(endColor));
     out.Add("gravity",        Vec2ToJson(gravity));
@@ -84,6 +89,11 @@ void ParticleSystemComponent::Deserialize(const Value& obj) {
     startSizeMax   = float(obj.GetNumber("startSizeMax",    0.18));
     dirAngleMinDeg = float(obj.GetNumber("dirAngleMinDeg", 45.0));
     dirAngleMaxDeg = float(obj.GetNumber("dirAngleMaxDeg", 135.0));
+    startRotationMinDeg = float(obj.GetNumber("startRotationMinDeg", 0.0));
+    startRotationMaxDeg = float(obj.GetNumber("startRotationMaxDeg", 0.0));
+    angularSpeedMinDeg  = float(obj.GetNumber("angularSpeedMinDeg",  0.0));
+    angularSpeedMaxDeg  = float(obj.GetNumber("angularSpeedMaxDeg",  0.0));
+    velocityAlign       = obj.GetBool("velocityAlign", false);
     startColor     = JsonToColor(obj.Find("startColor"),
                                   NaraGame::Color::White());
     endColor       = JsonToColor(obj.Find("endColor"),
