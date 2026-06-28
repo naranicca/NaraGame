@@ -53,19 +53,32 @@ sequence matches Unity's MonoBehaviour:
 | `OnDisable(entity)`                                 | `Entity.enabled` flips true -> false (incl. destroy teardown) |
 | `OnDestroy(entity)`                                 | Entity is being destroyed (after OnDisable)                   |
 | `OnAnimationEvent(entity, anim, event, s, f, i, b, vx, vy, r, g, bc, a)` | An animation event crosses the play cursor                    |
+| `OnTriggerEnter(entity, other)`                     | A trigger collider just started overlapping `other`           |
+| `OnTriggerStay(entity, other)`                      | A trigger collider continues to overlap `other` (every frame) |
+| `OnTriggerExit(entity, other)`                      | A trigger collider stopped overlapping `other`                |
+| `OnCollisionEnter(entity, other)`                   | A solid collider just contacted `other` (push-out applied)    |
+| `OnCollisionStay(entity, other)`                    | A solid collider continues to contact `other` (every frame)   |
+| `OnCollisionExit(entity, other)`                    | A solid collider just separated from `other`                  |
 
 `OnAnimationEvent` carries the M5c19 payload: a string, a float,
 an int, a bool, a `(vec2.x, vec2.y)` pair, and a
 `(color.r, color.g, color.b, color.a)` quad.
 
+`OnTrigger*` fires when **either** collider in the pair is
+flagged `isTrigger`; `OnCollision*` fires when **both** are
+solid (`isTrigger=false`). Each side of the pair receives its
+own dispatch with the *other* entity name as the second
+argument.
+
 ## API surface
 
-The host registers seven global tables: `animator`, `transform`,
-`sprite`, `input`, `time`, `scene`, `math` (extension methods on
-the stdlib `math` table). Every API entry takes the target
-entity's name as its first argument (when applicable). Missing
-entities and missing components are silent no-ops that return a
-sensible default rather than raising errors.
+The host registers eight global tables: `animator`, `transform`,
+`sprite`, `rigidbody`, `input`, `time`, `scene`, `math`
+(extension methods on the stdlib `math` table). Every API entry
+takes the target entity's name as its first argument (when
+applicable). Missing entities and missing components are silent
+no-ops that return a sensible default rather than raising
+errors.
 
 ### `animator.*`
 
@@ -86,6 +99,8 @@ Reads and writes `AnimatorComponent` parameters.
 | `animator.get_color(entity, name)`          | r, g, b, a | (0, 0, 0, 0) default |
 | `animator.set_string(entity, name, value)`  | -    |                            |
 | `animator.get_string(entity, name)`         | str  | "" default                 |
+| `animator.current_state(entity)`            | str  | Current AnimatorController state name; "" when no controller / unknown |
+| `animator.in_state(entity, name)`           | bool | Shorthand `current_state(...) == name` |
 
 ### `transform.*`
 
@@ -101,6 +116,31 @@ z-axis-degrees float `TransformComponent::rotation` already uses.
 | `transform.set_scale(entity, x, y, z)`    | -        |
 | `transform.get_scale(entity)`             | x, y, z  |
 | `transform.translate(entity, dx, dy, dz)` | -        |
+
+### `rigidbody.*`
+
+Reads and writes `Rigidbody2DComponent`. The host's
+`TickRigidbodies` integrates velocity with semi-implicit Euler
+(`vel += gravity * dt; vel *= max(0, 1 - drag * dt);
+pos += vel * dt`); collisions then reflect / damp velocity
+based on `restitution` / `friction`. Entities without a
+Rigidbody2D are treated as infinite-mass static colliders --
+they don't move and don't carry impulse.
+
+| Function | Returns |
+| -------- | ------- |
+| `rigidbody.set_velocity(entity, x, y)`  | -    |
+| `rigidbody.get_velocity(entity)`        | x, y |
+| `rigidbody.add_force(entity, fx, fy)`   | -    (impulse: `vel += force`) |
+| `rigidbody.set_gravity(entity, x, y)`   | -    |
+| `rigidbody.get_gravity(entity)`         | x, y |
+| `rigidbody.set_drag(entity, d)`         | -    |
+| `rigidbody.get_drag(entity)`            | num  |
+
+Inspector-only fields (no Lua getters/setters yet): `mass`
+(splits MTV inversely by mass; 0 invalid, falls back to 1),
+`restitution` (0..1; 0 absorbs, 1 fully reflects), `friction`
+(0..1; per-contact tangential damping).
 
 ### `sprite.*`
 
@@ -158,9 +198,9 @@ one of the named keys: `Space`, `Enter`/`Return`, `Escape`/`Esc`,
 
 ### `scene.*`
 
-Twenty entries for entity / component / hierarchy / picking +
-broadcast. Every callback resolves the entity by name through
-the bound `Scene`.
+Twenty-three entries spanning entity / component / hierarchy /
+picking / broadcast / physics queries. Every callback resolves
+the entity by name through the bound `Scene`.
 
 | Function | Returns |
 | -------- | ------- |
@@ -181,10 +221,41 @@ the bound `Scene`.
 | `scene.children_of(entity)`                | table (1-indexed strings) |
 | `scene.set_parent(entity, parent?)`        | bool (empty parent = detach to root; missing parent name = false) |
 | `scene.broadcast(method, ...)`             | int (count of successful dispatches) |
+| `scene.raycast(x0, y0, x1, y1)`            | str, hx, hy, dist  ("" on miss; nearest collider wins along the segment) |
+| `scene.overlap_box(cx, cy, w, h)`          | table (1-indexed strings) of every collider intersecting a virtual AABB |
+| `scene.overlap_circle(cx, cy, r)`          | table (1-indexed strings) of every collider intersecting a virtual circle |
 
 Component type names match the C++ `Component::TypeName()`
 strings: `"Transform"`, `"SpriteRenderer"`, `"Tilemap"`,
-`"Animator"`, `"Script"`.
+`"Animator"`, `"Script"`, `"BoxCollider"`, `"CircleCollider"`,
+`"Rigidbody2D"`.
+
+### Physics components
+
+Three physics components plug into the same overlap / event
+plumbing. Layer filtering, push-out, and velocity reflection
+all happen in `TickColliders` before any Lua dispatch fires.
+
+| Component | Key fields | Notes |
+| --------- | ---------- | ----- |
+| `BoxCollider` | `size`, `offset`, `isTrigger`, `layer` | Axis-aligned bounding box |
+| `CircleCollider` | `radius`, `offset`, `isTrigger`, `layer` | Centre + radius |
+| `Rigidbody2D` | `velocity`, `gravity`, `drag`, `mass`, `restitution`, `friction` | See `rigidbody.*` |
+
+Mixed Box-vs-Circle pairs use the standard nearest-point-on-box
+clamp. The runtime fires `OnTrigger*` when **either** side is
+flagged trigger and `OnCollision*` when both are solid; the
+solid path also push-outs along the MTV + reflects velocity by
+the combined restitution.
+
+#### Collision layers + matrix
+
+Each collider tags itself with a project-level layer (default
+`"Default"` plus `"Player"` / `"Enemy"` / `"Item"` out of the
+box). The **Window > Collision Matrix...** modal renders an
+NxN checkbox grid -- un-ticking a row/column pair tells the
+runtime to silently skip that layer combination. Filtered
+pairs cost no per-shape math and never fire events.
 
 ### `math.*` (extensions)
 
@@ -295,6 +366,89 @@ end
 `scene.create_entity` auto-adds a `TransformComponent`, so the
 spawned entity is immediately ready for `transform.*` calls.
 
+### Collision-driven AnimatorController transitions
+
+```lua
+function Runner_Start(entity)
+    animator.set_bool(entity, "running", true)
+end
+
+function Runner_CollisionEnter(entity, other)
+    -- Hit something solid: pop back to idle.
+    animator.set_bool(entity, "running", false)
+end
+
+function Runner_Update(entity, dt)
+    -- React to the state machine rather than driving it blind.
+    if animator.in_state(entity, "idle") then
+        sprite.set_color(entity, 0.6, 0.6, 0.6, 1)
+    else
+        sprite.set_color(entity, 1, 1, 1, 1)
+    end
+end
+```
+
+`animator.current_state` walks the controller asset to resolve
+the current `state.name`. Useful for "I just entered Hit"
+branches or "tint sprite while in Stunned" loops without
+keeping a parallel state machine in Lua.
+
+### Gravity + bounce + ground contact
+
+```lua
+-- Ball has Rigidbody2D{gravity=(0, -9.8), restitution=0.8} +
+-- a solid CircleCollider. Floor is a static solid BoxCollider.
+function Ball_CollisionEnter(entity, other)
+    if other == "Floor" then
+        local _, vy = rigidbody.get_velocity(entity)
+        print(("Bounce vy=%.2f"):format(vy))   -- already reflected
+    end
+end
+
+-- Apply an upward "jump" impulse on Space.
+function Ball_Update(entity, dt)
+    if input.is_key_pressed("Space") then
+        rigidbody.add_force(entity, 0, 6)
+    end
+end
+```
+
+The runtime applies the bounce + push-out **before** firing
+`OnCollisionEnter`, so `rigidbody.get_velocity` inside the
+handler reads the post-bounce value. `add_force` is treated as
+an instantaneous impulse (the integrator already handles
+gravity each tick).
+
+### Line-of-sight + AoE queries
+
+```lua
+function Enemy_Update(entity, dt)
+    -- Can I see the Player from here?
+    local ex, ey = transform.get_position(entity)
+    local px, py = transform.get_position("Player")
+    local who, hx, hy, dist = scene.raycast(ex, ey, px, py)
+    if who == "Player" then
+        animator.set_trigger(entity, "Attack")
+    end
+end
+
+-- Explosion damages everything in a radius around the bomb.
+function Bomb_OnAnimationEvent(entity, _, evt)
+    if evt.name == "explode" then
+        local bx, by = transform.get_position(entity)
+        local hits = scene.overlap_circle(bx, by, 3)
+        for _, target in ipairs(hits) do
+            scene.broadcast("Damage", 25, "fire")
+        end
+    end
+end
+```
+
+`scene.raycast` returns the nearest collider hit along the
+segment; `scene.overlap_box` / `scene.overlap_circle` return
+every collider that intersects a virtual shape, without
+needing a permanent sensor entity in the scene.
+
 ## IDE tools
 
 | Tool | Where |
@@ -304,20 +458,34 @@ spawned entity is immediately ready for `transform.*` calls.
 | **REPL** | Console pane bottom row. Single-line Lua; Up/Down history. |
 | **Edit > Reload Scripts** | Force re-scan + reload every Script asset. |
 | **File watcher** | Polls `last_write_time` every 1 s; covers Script + Animation + AnimatorController + Texture + Tileset + Autotile. |
+| **Window > Sorting Layers...** | Edit the SpriteRenderer draw order layers (rename / add / reorder). |
+| **Window > Collision Matrix...** | Edit collision layers + the NxN collide/skip matrix. |
+| **Viewport collider gizmos** | Every Box / Circle collider renders an outline; the M7c2 gizmo colour shifts from green to amber while the pair is overlapping. |
 
 ## Limitations + future work
 
-- `transform.rotation` round-trips fine, but the M5 SpriteRenderer
-  draw path doesn't honor rotation yet -- the picker (`entity_at`)
-  uses axis-aligned bounds for the same reason.
+- M7c12 ships sprite rotation for the SpriteRenderer's Simple
+  draw mode; Sliced + Tiled draw modes still render axis-
+  aligned. Colliders (Box / Circle) and `entity_at` keep AABB
+  semantics for now -- rotated OBB collision (SAT) is a
+  follow-up.
+- `rigidbody.*` doesn't expose mass / restitution / friction
+  yet; tweak those through the inspector or scene JSON. The
+  runtime reads them every tick so live edits work without
+  reloads.
 - Sprite GUID swaps + draw mode + sorting layer aren't in the
   `sprite.*` table; use the inspector instead.
 - `entity_at` returns one entity. A future `entities_at(x, y)`
   could return the full overlap list when the use case shows up.
 - Custom components (beyond Transform / SpriteRenderer / Tilemap /
-  Animator / Script) aren't registered yet; `add_component` only
-  works for the built-in set.
+  Animator / Script / BoxCollider / CircleCollider / Rigidbody2D)
+  aren't registered yet; `add_component` only works for the
+  built-in set.
 - Scene + Prefab files don't hot-reload through the M6c24 watcher
   -- the data flow is too entangled with the editor's live state
   (selection, undo stack, runtime ScriptComponent flags) for a
   silent reload to do the right thing.
+- Fast bodies can tunnel through thin colliders within a single
+  60-FPS step; the M7c10 inside-box fallback resolves bodies
+  caught penetrating but a CCD / sub-step pass would prevent
+  the penetration in the first place.
