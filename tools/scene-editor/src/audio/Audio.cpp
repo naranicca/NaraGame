@@ -415,7 +415,7 @@ void Audio::Stop() {
 namespace {
 
 struct MusicStream {
-    enum class Fmt { Wav, Ogg };
+    enum class Fmt { Wav, Ogg, Mp3 };
     Fmt              format        = Fmt::Wav;
     // WAV streaming state.
     FILE*            wavFile       = nullptr;
@@ -423,6 +423,10 @@ struct MusicStream {
     DWORD            wavDataLeft   = 0;
     // OGG streaming state (stb_vorbis*).
     void*            oggHandle     = nullptr;
+    // M8c10 MP3 streaming state (heap-allocated
+    // mp3dec_ex_t -- the struct is large + we don't
+    // want to pollute MusicStream with the full type).
+    void*            mp3Handle     = nullptr;
     // XAudio2 voice + format.
     IXAudio2SourceVoice* voice     = nullptr;
     WAVEFORMATEX     wfx{};
@@ -522,6 +526,22 @@ bool DecodeChunk(MusicStream& s, std::vector<uint8_t>& out,
         return true;
     }
 #endif
+#if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
+    if (s.format == MusicStream::Fmt::Mp3 && s.mp3Handle) {
+        auto* m = reinterpret_cast<mp3dec_ex_t*>(s.mp3Handle);
+        // mp3dec_ex_read takes total int16 samples, returns
+        // how many it produced. 0 means EOF.
+        const size_t maxSamples =
+            size_t(framesPerCh) * size_t(channels);
+        const size_t got = mp3dec_ex_read(
+            m,
+            reinterpret_cast<mp3d_sample_t*>(out.data()),
+            maxSamples);
+        if (got == 0) return false;
+        out.resize(got * sizeof(mp3d_sample_t));
+        return true;
+    }
+#endif
     return false;
 }
 
@@ -543,6 +563,16 @@ void RestartStream(MusicStream& s) {
     if (s.format == MusicStream::Fmt::Ogg && s.oggHandle) {
         stb_vorbis_seek_start(
             reinterpret_cast<stb_vorbis*>(s.oggHandle));
+        return;
+    }
+#endif
+#if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
+    if (s.format == MusicStream::Fmt::Mp3 && s.mp3Handle) {
+        // Seek to sample 0 -- requires MP3D_SEEK_TO_SAMPLE
+        // flag at open time, which we set in PlayMusic.
+        mp3dec_ex_seek(
+            reinterpret_cast<mp3dec_ex_t*>(s.mp3Handle), 0);
+        return;
     }
 #endif
 }
@@ -606,6 +636,26 @@ bool Audio::PlayMusic(const std::string& path, float volume,
                          int(info.sample_rate));
     }
 #endif
+#if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
+    else if (endsWith(".mp3")) {
+        s->format = MusicStream::Fmt::Mp3;
+        // Heap-allocated so MusicStream stays slim + the
+        // mp3dec_ex_t lifetime is bound to s.
+        auto* m = new mp3dec_ex_t{};
+        // MP3D_SEEK_TO_SAMPLE costs a one-time scan but
+        // lets us loop precisely on EOF.
+        if (mp3dec_ex_open(m, path.c_str(),
+                            MP3D_SEEK_TO_SAMPLE) != 0 ||
+            m->info.channels <= 0 || m->info.hz == 0) {
+            mp3dec_ex_close(m);
+            delete m;
+            return false;
+        }
+        s->mp3Handle = m;
+        FillPcmFormatEx(s->wfx, m->info.channels,
+                         int(m->info.hz));
+    }
+#endif
     else {
         return false;
     }
@@ -621,6 +671,13 @@ bool Audio::PlayMusic(const std::string& path, float volume,
 #if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
         if (s->oggHandle)
             stb_vorbis_close(reinterpret_cast<stb_vorbis*>(s->oggHandle));
+#endif
+#if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
+        if (s->mp3Handle) {
+            auto* m = reinterpret_cast<mp3dec_ex_t*>(s->mp3Handle);
+            mp3dec_ex_close(m);
+            delete m;
+        }
 #endif
         return false;
     }
@@ -658,6 +715,13 @@ void Audio::StopMusic() {
             reinterpret_cast<stb_vorbis*>(g_music->oggHandle));
     }
 #endif
+#if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
+    if (g_music->mp3Handle) {
+        auto* m = reinterpret_cast<mp3dec_ex_t*>(g_music->mp3Handle);
+        mp3dec_ex_close(m);
+        delete m;
+    }
+#endif
     g_music.reset();
 }
 
@@ -688,6 +752,13 @@ void Audio::UpdateMusic() {
         if (g_music->oggHandle) {
             stb_vorbis_close(
                 reinterpret_cast<stb_vorbis*>(g_music->oggHandle));
+        }
+#endif
+#if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
+        if (g_music->mp3Handle) {
+            auto* m = reinterpret_cast<mp3dec_ex_t*>(g_music->mp3Handle);
+            mp3dec_ex_close(m);
+            delete m;
         }
 #endif
         g_music.reset();
