@@ -200,10 +200,12 @@ void SetWindowTitle(HWND hwnd, const std::string& title) {
 
 class EditorApp : public Application {
 public:
-    EditorApp(std::string startupProject, std::string startupScene)
+    EditorApp(std::string startupProject, std::string startupScene,
+              bool standalone)
         : Application(MakeConfig()),
           m_startupProjectPath(std::move(startupProject)),
-          m_startupScenePath(std::move(startupScene)) {}
+          m_startupScenePath(std::move(startupScene)),
+          m_standalone(standalone) {}
 
     void OnStart() override {
         // COM apartment for IFileOpenDialog. ole32 is already linked
@@ -268,6 +270,12 @@ public:
             m_currentScenePath = m_startupScenePath;
             UpdateWindowTitle();
         }
+        // M9c1 standalone: force Play on after the scene is loaded
+        // so the user gets a running game immediately. The same
+        // tick-physics / tick-scripts / audio paths the editor
+        // uses fire from here on; the only difference is the
+        // viewport-only OnRender path below.
+        if (m_standalone) m_animPlaying = true;
     }
 
     void OnStop() override {
@@ -287,6 +295,23 @@ public:
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+
+        // M9c1 standalone runtime path. No dockspace, no menu, no
+        // editor chrome -- just the viewport at full window size +
+        // the simulation ticks the editor's Play mode runs. Modals
+        // (Sorting Layers, Audio Mixer, etc.) are also skipped
+        // since none of them belong in a shipped game build.
+        if (m_standalone) {
+            TickScripts (ImGui::GetIO().DeltaTime);
+            TickPhysics (ImGui::GetIO().DeltaTime);
+            TickAnimators(ImGui::GetIO().DeltaTime);
+            TickAudioSources(ImGui::GetIO().DeltaTime);
+            SceneEditor::Audio::UpdateMusic();
+            DrawViewportPanel();
+            ImGui::Render();
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+            return;
+        }
 
         const ImGuiID dockId =
             ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
@@ -8130,23 +8155,49 @@ private:
     }
 
     void DrawViewportPanel() {
-        ImGui::Begin("Viewport");
+        // M9c1 standalone: full-window borderless viewport. The
+        // editor's toolbar (Reset View / Frame Selected / Play
+        // checkbox) is suppressed -- a shipped game doesn't have
+        // those controls. The window covers the whole client
+        // area + skips title bar / resize affordances so
+        // ImGui's draw list lands directly on the back buffer.
+        if (m_standalone) {
+            const ImGuiViewport* vp = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(vp->WorkPos);
+            ImGui::SetNextWindowSize(vp->WorkSize);
+            const ImGuiWindowFlags flags =
+                ImGuiWindowFlags_NoTitleBar |
+                ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoCollapse |
+                ImGuiWindowFlags_NoBringToFrontOnFocus |
+                ImGuiWindowFlags_NoNavFocus |
+                ImGuiWindowFlags_NoScrollbar |
+                ImGuiWindowFlags_NoScrollWithMouse;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                                 ImVec2(0, 0));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            ImGui::Begin("##StandaloneViewport", nullptr, flags);
+            ImGui::PopStyleVar(2);
+        } else {
+            ImGui::Begin("Viewport");
 
-        // Toolbar row: zoom / camera controls at a glance.
-        ImGui::Text("Zoom %.0f px/u  |  Centre (%.2f, %.2f)",
-                    m_viewCam.zoom, m_viewCam.center.x, m_viewCam.center.y);
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Reset View")) {
-            m_viewCam = ViewportCamera{};
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Frame Selected") && m_selection) {
-            if (const auto* e = m_scene.Get(m_selection)) {
-                m_viewCam.center = EntityWorldPos(*e);
+            // Toolbar row: zoom / camera controls at a glance.
+            ImGui::Text("Zoom %.0f px/u  |  Centre (%.2f, %.2f)",
+                        m_viewCam.zoom, m_viewCam.center.x, m_viewCam.center.y);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset View")) {
+                m_viewCam = ViewportCamera{};
             }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Frame Selected") && m_selection) {
+                if (const auto* e = m_scene.Get(m_selection)) {
+                    m_viewCam.center = EntityWorldPos(*e);
+                }
+            }
+            ImGui::SameLine();
+            ImGui::Checkbox("Play", &m_animPlaying);
         }
-        ImGui::SameLine();
-        ImGui::Checkbox("Play", &m_animPlaying);
 
         const ImVec2 panelMin  = ImGui::GetCursorScreenPos();
         const ImVec2 panelSize = ImGui::GetContentRegionAvail();
@@ -8194,9 +8245,12 @@ private:
                                  panelMin.y + panelSize.y},
                           IM_COL32(28, 30, 34, 255));
 
-        DrawGrid(dl, panelMin, panelSize);
+        // Skip the editor-only chrome in standalone mode: no
+        // grid, no selection gizmo. The viewport just paints
+        // the scene + lets gameplay drive what the player sees.
+        if (!m_standalone) DrawGrid(dl, panelMin, panelSize);
         DrawEntities(dl, panelMin, panelSize);
-        DrawGizmo(dl, panelMin, panelSize);
+        if (!m_standalone) DrawGizmo(dl, panelMin, panelSize);
 
         dl->PopClipRect();
         ImGui::End();
@@ -9465,8 +9519,10 @@ private:
                 minX = std::min(minX, p.x);
                 maxY = std::max(maxY, p.y);
             }
-            dl->AddText(ImVec2{minX, maxY + 2.0f},
-                        IM_COL32(220, 220, 220, 255), e.name.c_str());
+            if (!m_standalone) {
+                dl->AddText(ImVec2{minX, maxY + 2.0f},
+                            IM_COL32(220, 220, 220, 255), e.name.c_str());
+            }
         }
     }
 
@@ -9664,9 +9720,11 @@ private:
             maxY = std::max(maxY, p.y);
             minX = std::min(minX, p.x);
         }
-        dl->AddText(ImVec2{minX, maxY + 2.0f},
-                    IM_COL32(220, 220, 220, 255),
-                    e.name.c_str());
+        if (!m_standalone) {
+            dl->AddText(ImVec2{minX, maxY + 2.0f},
+                        IM_COL32(220, 220, 220, 255),
+                        e.name.c_str());
+        }
     }
 
     // M7c16: rotation-aware AddImage helper. Projects a world
@@ -9801,9 +9859,11 @@ private:
             minX = std::min(minX, p.x);
             maxY = std::max(maxY, p.y);
         }
-        dl->AddText(ImVec2{minX, maxY + 2.0f},
-                    IM_COL32(220, 220, 220, 255),
-                    e.name.c_str());
+        if (!m_standalone) {
+            dl->AddText(ImVec2{minX, maxY + 2.0f},
+                        IM_COL32(220, 220, 220, 255),
+                        e.name.c_str());
+        }
     }
 
     // Tile a source pixel rect across a world-space destination rect.
@@ -9972,9 +10032,11 @@ private:
             minX = std::min(minX, p.x);
             maxY = std::max(maxY, p.y);
         }
-        dl->AddText(ImVec2{minX, maxY + 2.0f},
-                    IM_COL32(220, 220, 220, 255),
-                    e.name.c_str());
+        if (!m_standalone) {
+            dl->AddText(ImVec2{minX, maxY + 2.0f},
+                        IM_COL32(220, 220, 220, 255),
+                        e.name.c_str());
+        }
     }
 
     // ImGui callback for the REPL input. Up/Down cycle through
@@ -10666,16 +10728,32 @@ private:
 
     std::string m_startupProjectPath;
     std::string m_startupScenePath;
+    // M9c1 standalone runtime mode. When true the editor boots
+    // straight into a viewport-only window with Play forced on
+    // -- no menu bar, no panels, no dockspace. Used to ship a
+    // playable build from the same exe; long-term this will
+    // split into its own `game` target with packed assets.
+    bool        m_standalone = false;
 };
 
 } // namespace
 
 Application* NaraGame::CreateApplication(int argc, char** argv) {
     std::string project, scene;
+    bool standalone = false;
+    // Two-pass parse: the flag arg lives on its own (no value),
+    // the project/scene args eat the next argv. Keep the same
+    // "i + 1 < argc" guard from before for the pair-style flags +
+    // a separate scan for the bare --standalone toggle so a user
+    // can put it anywhere on the command line.
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--standalone") standalone = true;
+    }
     for (int i = 1; i + 1 < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--project") project = argv[++i];
         else if (a == "--scene") scene = argv[++i];
     }
-    return new EditorApp(std::move(project), std::move(scene));
+    return new EditorApp(std::move(project), std::move(scene), standalone);
 }
