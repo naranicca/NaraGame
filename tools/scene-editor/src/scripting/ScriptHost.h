@@ -7,6 +7,7 @@
 
 namespace SceneEditor {
 
+class AssetDatabase;
 class Scene;
 
 // Editor-side scripting host. M6c2 wires up a real Lua 5.4
@@ -118,6 +119,12 @@ public:
     // mutate the contents in place, so the pointer stays valid.
     void   BindScene(Scene* scene) { m_scene = scene; }
     Scene* BoundScene() const      { return m_scene; }
+    // M7c9: AssetDatabase binding so the Lua API can resolve
+    // controller GUIDs (animator.current_state walks the
+    // controller's states[] table for the current index's
+    // name).
+    void           BindAssetDatabase(AssetDatabase* db) { m_assetDb = db; }
+    AssetDatabase* BoundAssetDatabase() const           { return m_assetDb; }
 
     // EditorApp calls Tick once per editor frame (right before
     // TickScripts) so the host can keep running totals the Lua
@@ -148,6 +155,7 @@ private:
     // Set by EditorApp at startup so the Lua `animator` API can
     // look up entities by name.
     Scene* m_scene = nullptr;
+    AssetDatabase* m_assetDb = nullptr;
     // Running totals the Lua `time` API surfaces. Tick() bumps
     // them every editor frame; nothing else mutates them.
     double    m_elapsed    = 0.0;

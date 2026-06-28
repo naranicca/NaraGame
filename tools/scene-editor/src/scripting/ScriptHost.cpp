@@ -1,5 +1,7 @@
 #include "ScriptHost.h"
 
+#include "../asset/AnimatorController.h"
+#include "../asset/AssetDatabase.h"
 #include "../scene/AnimatorComponent.h"
 #include "../scene/BoxColliderComponent.h"
 #include "../scene/CircleColliderComponent.h"
@@ -1284,6 +1286,49 @@ static int LuaAnimatorGetString(lua_State* L) {
     return 1;
 }
 
+// animator.current_state(entity) -> string. Returns the name of
+// the AnimatorController's currently-active state, or "" when
+// the entity has no animator / no controller / a controller-
+// less Animator that just plays a single clip. Lets scripts
+// react to state-machine transitions ("did I just enter the
+// Hit state?") without rebuilding the controller graph in Lua.
+static int LuaAnimatorCurrentState(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    auto* an = FindAnimator(host, luaL_checkstring(L, 1));
+    if (!an || an->currentState < 0 || !an->controller.IsValid()) {
+        lua_pushstring(L, ""); return 1;
+    }
+    AssetDatabase* db = host ? host->BoundAssetDatabase() : nullptr;
+    if (!db) { lua_pushstring(L, ""); return 1; }
+    AnimatorControllerAsset* ctrl = db->GetAnimatorController(an->controller);
+    if (!ctrl || an->currentState >= int(ctrl->states.size())) {
+        lua_pushstring(L, ""); return 1;
+    }
+    lua_pushstring(L, ctrl->states[an->currentState].name.c_str());
+    return 1;
+}
+
+// animator.in_state(entity, name) -> bool. Convenience over
+// current_state for the common "are we still in this state?"
+// branch.
+static int LuaAnimatorInState(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    auto* an = FindAnimator(host, luaL_checkstring(L, 1));
+    const char* want = luaL_checkstring(L, 2);
+    if (!an || an->currentState < 0 || !an->controller.IsValid()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    AssetDatabase* db = host ? host->BoundAssetDatabase() : nullptr;
+    if (!db) { lua_pushboolean(L, 0); return 1; }
+    AnimatorControllerAsset* ctrl = db->GetAnimatorController(an->controller);
+    if (!ctrl || an->currentState >= int(ctrl->states.size())) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    lua_pushboolean(L,
+        ctrl->states[an->currentState].name == want ? 1 : 0);
+    return 1;
+}
+
 // `print(...)` in script land lands here. Concatenates the args
 // like the stock Lua print does + pushes the joined line into the
 // host's output log.
@@ -1388,8 +1433,10 @@ ScriptHost::ScriptHost() {
         {"get_vec2",    LuaAnimatorGetVec2},
         {"set_color",   LuaAnimatorSetColor},
         {"get_color",   LuaAnimatorGetColor},
-        {"set_string",  LuaAnimatorSetString},
-        {"get_string",  LuaAnimatorGetString},
+        {"set_string",    LuaAnimatorSetString},
+        {"get_string",    LuaAnimatorGetString},
+        {"current_state", LuaAnimatorCurrentState},
+        {"in_state",      LuaAnimatorInState},
         {nullptr,       nullptr},
     };
     lua_newtable(L);

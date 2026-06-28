@@ -209,6 +209,7 @@ public:
         // app's lifetime -- scene swaps reuse the same Scene
         // instance + just rebuild its contents.
         m_scriptHost.BindScene(&m_scene);
+        m_scriptHost.BindAssetDatabase(&m_assetDb);
 
         HWND hwnd = static_cast<HWND>(GetWindow().NativeHandle());
         auto* dev = static_cast<ID3D11Device*>(GetDevice().GetNativeDevice());
