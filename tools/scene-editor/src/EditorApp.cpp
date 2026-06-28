@@ -4876,8 +4876,41 @@ private:
             DrawAnimatorEditor(entity, *an);
         } else if (auto* sc = dynamic_cast<SceneEditor::ScriptComponent*>(comp)) {
             DrawScriptEditor(entity, *sc);
+        } else if (auto* bc = dynamic_cast<SceneEditor::BoxColliderComponent*>(comp)) {
+            DrawBoxColliderEditor(entity, *bc);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
+        }
+    }
+
+    // BoxCollider inspector. size + offset are DragFloat2s in
+    // world units; isTrigger flips between "overlap-only event
+    // surface" (the M7c1 default) and "future solid response"
+    // (not yet wired into the runtime).
+    void DrawBoxColliderEditor(SceneEditor::Entity& /*entity*/,
+                               SceneEditor::BoxColliderComponent& bc) {
+        float sz[2] = { bc.size.x, bc.size.y };
+        if (ImGui::DragFloat2("Size", sz, 0.05f, 0.0f, 0.0f,
+                               "%.2f")) {
+            UndoSnapshot();
+            bc.size = { sz[0], sz[1] };
+        }
+        float off[2] = { bc.offset.x, bc.offset.y };
+        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
+                               "%.2f")) {
+            UndoSnapshot();
+            bc.offset = { off[0], off[1] };
+        }
+        bool trig = bc.isTrigger;
+        if (ImGui::Checkbox("Is Trigger", &trig)) {
+            UndoSnapshot();
+            bc.isTrigger = trig;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "When set, overlap fires OnTriggerEnter / Exit\n"
+                "without a physical response. Solid collisions\n"
+                "(non-trigger) ship in a follow-up commit.");
         }
     }
 
@@ -6533,6 +6566,52 @@ private:
             const ImVec2 wp = EntityWorldPos(*e);
             const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
             DrawMarkerEntity(dl, *e, c, id == m_selection);
+        }
+
+        // BoxCollider gizmos. One outlined rectangle per enabled
+        // collider; colour gates on the M7c1 overlap state:
+        //   yellow  = currently overlapping another collider
+        //   green   = no contact
+        //   selected entity gets thicker stroke + brighter alpha
+        // Triggers render dashed (alternating stippled segments
+        // would be ideal but ImGui DrawList doesn't ship one --
+        // we use AddRect with a thinner outline + outline-only
+        // fill instead so triggers read as "boundary" + solids
+        // (future) can render with a filled wash).
+        for (SceneEditor::EntityId id : ids) {
+            const auto* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            const auto* tr =
+                e->GetComponent<SceneEditor::TransformComponent>();
+            const auto* bc =
+                e->GetComponent<SceneEditor::BoxColliderComponent>();
+            if (!tr || !bc) continue;
+            const float halfX = bc->size.x * 0.5f * tr->scale.x;
+            const float halfY = bc->size.y * 0.5f * tr->scale.y;
+            const float cx = tr->position.x + bc->offset.x;
+            const float cy = tr->position.y + bc->offset.y;
+            const ImVec2 tl = WorldToScreen(
+                ImVec2(cx - halfX, cy + halfY), panelMin, panelSize);
+            const ImVec2 br = WorldToScreen(
+                ImVec2(cx + halfX, cy - halfY), panelMin, panelSize);
+            bool overlapping = false;
+            for (const auto& key : m_collisionPairs) {
+                if (key.first == id || key.second == id) {
+                    overlapping = true; break;
+                }
+            }
+            const bool sel = (id == m_selection);
+            const ImU32 col = overlapping
+                ? (sel ? IM_COL32(255, 220, 80, 255)
+                       : IM_COL32(255, 200, 60, 200))
+                : (sel ? IM_COL32(120, 255, 140, 255)
+                       : IM_COL32(80,  220, 100, 180));
+            const float thickness = sel ? 2.5f : 1.5f;
+            dl->AddRect(tl, br, col, 0.0f, 0, thickness);
+            // Centre tick to mark the offset origin.
+            const ImVec2 origin = WorldToScreen(
+                ImVec2(cx, cy), panelMin, panelSize);
+            dl->AddCircleFilled(origin, 2.5f, col);
         }
     }
 
