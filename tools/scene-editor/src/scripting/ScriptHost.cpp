@@ -1030,6 +1030,42 @@ static int LuaAudioStopMusic(lua_State* L) {
     return 0;
 }
 
+// audio.set_bus_volume(name, volume) -> bool.
+// audio.get_bus_volume(name) -> number.
+// `name` is "master" | "sfx" | "music". Unknown buses
+// return false / nil so callers can probe support.
+static bool ParseBus(const char* name, Audio::Bus& out) {
+    if (!name) return false;
+    if (std::strcmp(name, "master") == 0) {
+        out = Audio::Bus::Master; return true;
+    }
+    if (std::strcmp(name, "sfx") == 0) {
+        out = Audio::Bus::Sfx; return true;
+    }
+    if (std::strcmp(name, "music") == 0) {
+        out = Audio::Bus::Music; return true;
+    }
+    return false;
+}
+static int LuaAudioSetBusVolume(lua_State* L) {
+    Audio::Bus bus;
+    if (!ParseBus(luaL_checkstring(L, 1), bus)) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    const float vol = float(luaL_checknumber(L, 2));
+    Audio::SetBusVolume(bus, vol);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+static int LuaAudioGetBusVolume(lua_State* L) {
+    Audio::Bus bus;
+    if (!ParseBus(luaL_checkstring(L, 1), bus)) {
+        lua_pushnil(L); return 1;
+    }
+    lua_pushnumber(L, Audio::GetBusVolume(bus));
+    return 1;
+}
+
 // scene.overlap_circle(cx, cy, r) -> table of entity names.
 // Same area-query shape as overlap_box but with a virtual
 // circle. Box colliders use the nearest-point-on-box clamp,
@@ -2016,11 +2052,13 @@ ScriptHost::ScriptHost() {
     // project-relative paths through the asset DB without
     // bouncing through a global.
     static const luaL_Reg kAudioApi[] = {
-        {"play",       LuaAudioPlay},
-        {"stop",       LuaAudioStop},
-        {"play_music", LuaAudioPlayMusic},
-        {"stop_music", LuaAudioStopMusic},
-        {nullptr,      nullptr},
+        {"play",            LuaAudioPlay},
+        {"stop",            LuaAudioStop},
+        {"play_music",      LuaAudioPlayMusic},
+        {"stop_music",      LuaAudioStopMusic},
+        {"set_bus_volume",  LuaAudioSetBusVolume},
+        {"get_bus_volume",  LuaAudioGetBusVolume},
+        {nullptr,           nullptr},
     };
     lua_newtable(L);
     lua_pushlightuserdata(L, this);

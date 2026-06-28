@@ -87,6 +87,16 @@ struct VoiceCallback : public IXAudio2VoiceCallback {
 // Initialize() is called lazily from Play().
 IXAudio2*                                  g_engine  = nullptr;
 IXAudio2MasteringVoice*                    g_master  = nullptr;
+// M8c9 submix voices. SFX + music route through these so
+// the user can balance the two categories independently.
+IXAudio2SubmixVoice*                       g_sfxSubmix   = nullptr;
+IXAudio2SubmixVoice*                       g_musicSubmix = nullptr;
+// Cached bus volumes -- queried via GetBusVolume even when
+// the engine hasn't initialised yet (e.g. inside a Lua
+// boot sequence that runs before any audio plays).
+float                                      g_masterVolume = 1.0f;
+float                                      g_sfxVolume    = 1.0f;
+float                                      g_musicVolume  = 1.0f;
 VoiceCallback                              g_callback;
 std::unordered_map<std::string, SoundClip> g_cache;
 std::mutex                                 g_cacheMutex;
@@ -112,8 +122,42 @@ bool Initialize() {
         g_initFailed = true;
         return false;
     }
+    // M8c9 submix voices. Match the master's sample rate +
+    // a stereo bus so panned mono + native stereo both
+    // land cleanly. Skip the create-failure abort path --
+    // if either submix fails we fall back to the master
+    // bus + log nothing, which still keeps audio audible.
+    XAUDIO2_VOICE_DETAILS masterDetails{};
+    g_master->GetVoiceDetails(&masterDetails);
+    g_engine->CreateSubmixVoice(
+        &g_sfxSubmix, 2, masterDetails.InputSampleRate);
+    g_engine->CreateSubmixVoice(
+        &g_musicSubmix, 2, masterDetails.InputSampleRate);
+    // Apply any pre-Initialize SetBusVolume calls.
+    if (g_master)     g_master->SetVolume(g_masterVolume);
+    if (g_sfxSubmix)  g_sfxSubmix->SetVolume(g_sfxVolume);
+    if (g_musicSubmix)g_musicSubmix->SetVolume(g_musicVolume);
     return true;
 }
+
+// Helper: build the send list pointing at a single submix
+// for the CreateSourceVoice pSendList parameter. Returning
+// a struct keeps lifetime obvious + avoids pointer-into-
+// stack subtleties at the call site.
+struct SubmixSend {
+    XAUDIO2_SEND_DESCRIPTOR desc{};
+    XAUDIO2_VOICE_SENDS     sends{};
+    explicit SubmixSend(IXAudio2SubmixVoice* target) {
+        if (target) {
+            desc.pOutputVoice = target;
+            sends.SendCount = 1;
+            sends.pSends    = &desc;
+        }
+    }
+    const XAUDIO2_VOICE_SENDS* AsParam() const {
+        return sends.SendCount > 0 ? &sends : nullptr;
+    }
+};
 
 // Helper to fill a WAVEFORMATEX from a (channels,
 // sample_rate) pair (16-bit PCM). All decoders produce
@@ -281,10 +325,11 @@ bool Audio::Play(const std::string& absolutePath, float volume) {
         clip = &it->second;
     }
     IXAudio2SourceVoice* voice = nullptr;
+    SubmixSend           sfxRoute(g_sfxSubmix);
     HRESULT hr = g_engine->CreateSourceVoice(
         &voice, &clip->format, 0,
         XAUDIO2_DEFAULT_FREQ_RATIO,
-        &g_callback, nullptr, nullptr);
+        &g_callback, sfxRoute.AsParam(), nullptr);
     if (FAILED(hr) || !voice) return false;
     // Clamp + apply volume. XAudio2's volume range is
     // [-XAUDIO2_MAX_VOLUME_LEVEL, XAUDIO2_MAX_VOLUME_LEVEL]
@@ -323,10 +368,11 @@ bool Audio::PlayPositional(const std::string& absolutePath,
         clip = &it->second;
     }
     IXAudio2SourceVoice* voice = nullptr;
+    SubmixSend           sfxRoute(g_sfxSubmix);
     HRESULT hr = g_engine->CreateSourceVoice(
         &voice, &clip->format, 0,
         XAUDIO2_DEFAULT_FREQ_RATIO,
-        &g_callback, nullptr, nullptr);
+        &g_callback, sfxRoute.AsParam(), nullptr);
     if (FAILED(hr) || !voice) return false;
     if (volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
@@ -565,10 +611,11 @@ bool Audio::PlayMusic(const std::string& path, float volume,
     }
     if (volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
+    SubmixSend musicRoute(g_musicSubmix);
     HRESULT hr = g_engine->CreateSourceVoice(
         &s->voice, &s->wfx, 0,
         XAUDIO2_DEFAULT_FREQ_RATIO,
-        nullptr, nullptr, nullptr);
+        nullptr, musicRoute.AsParam(), nullptr);
     if (FAILED(hr) || !s->voice) {
         if (s->wavFile) fclose(s->wavFile);
 #if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
@@ -647,8 +694,44 @@ void Audio::UpdateMusic() {
     }
 }
 
+void Audio::SetBusVolume(Bus bus, float volume) {
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    switch (bus) {
+    case Bus::Master:
+        g_masterVolume = volume;
+        if (g_master) g_master->SetVolume(volume);
+        break;
+    case Bus::Sfx:
+        g_sfxVolume = volume;
+        if (g_sfxSubmix) g_sfxSubmix->SetVolume(volume);
+        break;
+    case Bus::Music:
+        g_musicVolume = volume;
+        if (g_musicSubmix) g_musicSubmix->SetVolume(volume);
+        break;
+    }
+}
+
+float Audio::GetBusVolume(Bus bus) {
+    switch (bus) {
+    case Bus::Master: return g_masterVolume;
+    case Bus::Sfx:    return g_sfxVolume;
+    case Bus::Music:  return g_musicVolume;
+    }
+    return 1.0f;
+}
+
 void Audio::Shutdown() {
     StopMusic();
+    if (g_sfxSubmix) {
+        g_sfxSubmix->DestroyVoice();
+        g_sfxSubmix = nullptr;
+    }
+    if (g_musicSubmix) {
+        g_musicSubmix->DestroyVoice();
+        g_musicSubmix = nullptr;
+    }
     if (g_master) {
         g_master->DestroyVoice();
         g_master = nullptr;

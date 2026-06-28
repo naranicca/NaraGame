@@ -67,6 +67,23 @@ public:
     // before this matters, so it's safe to call once per
     // render frame even at 30 Hz.
     static void UpdateMusic();
+
+    // M8c9 submix bus volumes. Every SFX voice routes
+    // through the Sfx submix, every music stream routes
+    // through the Music submix, both submixes feed the
+    // mastering voice. Per-bus volume composes
+    // multiplicatively with the per-voice volume the
+    // caller passes to Play / PlayMusic, so a Lua slider
+    // can fade just SFX without touching music.
+    //
+    // Master volume is applied to the mastering voice
+    // directly; everything ends up scaled by it.
+    // GetBusVolume returns the last value set (or the
+    // default of 1.0); calling it before Initialize is
+    // safe.
+    enum class Bus { Master, Sfx, Music };
+    static void  SetBusVolume(Bus bus, float volume);
+    static float GetBusVolume(Bus bus);
 };
 
 } // namespace SceneEditor
