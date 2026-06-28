@@ -72,8 +72,8 @@ argument.
 
 ## API surface
 
-The host registers eight global tables: `animator`, `transform`,
-`sprite`, `rigidbody`, `input`, `time`, `scene`, `math`
+The host registers nine global tables: `animator`, `transform`,
+`sprite`, `rigidbody`, `input`, `time`, `audio`, `scene`, `math`
 (extension methods on the stdlib `math` table). Every API entry
 takes the target entity's name as its first argument (when
 applicable). Missing entities and missing components are silent
@@ -196,11 +196,99 @@ one of the named keys: `Space`, `Enter`/`Return`, `Escape`/`Esc`,
 | `time.frame_count()` | Running long long |
 | `time.fps()`         | ImGui::GetIO().Framerate (smoothed) |
 
+### `audio.*`
+
+XAudio2-backed playback (M8). Three playback flavours -- one-
+shot SFX (fire-and-forget), pooled SFX with handles (per-voice
+control), and streaming music (decoded chunk by chunk so multi-
+minute clips don't blow up memory). The engine boots lazily on
+the first call so projects that don't use audio pay no cost.
+
+**Path resolution** is consistent across every binding that
+takes a sound: a 36-char dashed GUID is looked up in the asset
+DB (must point at an `Audio` asset); an absolute path is used
+verbatim; everything else is joined to the project's
+`Assets/` folder. So `audio.play("Sounds/coin.wav")` and
+`audio.play("a1b2c3d4-...")` both work and survive a file
+rename.
+
+**Bus structure** (M8c9 + M8c13):
+
+```
+                       Master
+                         ^
+            +-----+------+------+
+            |     |             |
+          Music  SFX  ------>  Reverb (wet send)
+            ^     ^             ^
+            |     |             |
+        play_music play / spawn / play_positional
+```
+
+Master / SFX / Music are per-bus volumes (multiplicative on
+top of per-voice volume); Reverb is a wet send level on the
+SFX submix that feeds an I3DL2 Living-Room preset. All four
+are edited through **Window > Audio Mixer...** (M8c12) and
+persist in `ProjectSettings/project.json` under `audioMixer`.
+
+#### One-shot SFX
+
+| Function | Returns |
+| -------- | ------- |
+| `audio.play(path_or_guid, volume?)`                          | bool (volume default 1.0) |
+| `audio.stop()`                                                | -- (silences every active SFX voice) |
+| `audio.play_positional(path_or_guid, vol, pan, freq_ratio?)` | bool. `pan` in [-1, 1] (mono sources only; stereo skips the matrix). `freq_ratio` default 1.0; M8c13 doppler -- clamped to [0.25, 2.0] |
+
+#### Pooled voices (per-voice control, M8c11)
+
+A 64-slot voice pool plus a generation counter on each slot --
+recycled slots get a fresh generation so a stale handle silently
+rejects instead of controlling the wrong voice. Handle `0` is
+reserved for failure (full pool, missing file, etc.) and maps to
+`nil` in Lua.
+
+| Function | Returns |
+| -------- | ------- |
+| `audio.spawn(path_or_guid, volume?)`        | int handle (truthy) on success; `nil` on failure |
+| `audio.stop_voice(h)`                       | bool |
+| `audio.pause_voice(h)`                      | bool |
+| `audio.resume_voice(h)`                     | bool |
+| `audio.set_voice_volume(h, v)`              | bool |
+| `audio.is_voice_playing(h)`                 | bool |
+
+#### Streaming music (M8c5 / M8c10)
+
+WAV / OGG / MP3 streamed through a 3-buffer ring (~93 ms each
+at 44.1 kHz). One slot only -- a second `play_music` cleanly
+stops the previous one. Pre-fill at start time gives ~280 ms
+of slack before `UpdateMusic` per-frame matters.
+
+| Function | Returns |
+| -------- | ------- |
+| `audio.play_music(path_or_guid, volume?, loop?)` | bool |
+| `audio.stop_music()`                              | -- |
+
+#### Mixer + reverb (M8c12 / M8c13)
+
+| Function | Returns |
+| -------- | ------- |
+| `audio.set_bus_volume(name, v)` | bool. `name` is `"master"`, `"sfx"`, or `"music"`. Unknown names return `false` so callers can probe support. |
+| `audio.get_bus_volume(name)`    | num (or `nil` on unknown name) |
+| `audio.set_reverb_wet(wet)`     | -- (clamped to [0, 1]; live-applied via SetOutputMatrix) |
+| `audio.get_reverb_wet()`        | num |
+
+The mixer values that Lua writes are **live engine state**,
+not project state -- they survive until the next
+`ApplyProjectAudioMixer()` (project re-open / new project)
+pushes the persisted JSON values back in. Wire a settings UI
+through the modal if you want persistence; use `audio.*` from
+script land for transient ducking / fades.
+
 ### `scene.*`
 
-Twenty-three entries spanning entity / component / hierarchy /
-picking / broadcast / physics queries. Every callback resolves
-the entity by name through the bound `Scene`.
+Twenty-four entries spanning entity / component / hierarchy /
+picking / broadcast / physics queries / pathfinding. Every
+callback resolves the entity by name through the bound `Scene`.
 
 | Function | Returns |
 | -------- | ------- |
@@ -224,22 +312,30 @@ the entity by name through the bound `Scene`.
 | `scene.raycast(x0, y0, x1, y1)`            | str, hx, hy, dist  ("" on miss; nearest collider wins along the segment) |
 | `scene.overlap_box(cx, cy, w, h)`          | table (1-indexed strings) of every collider intersecting a virtual AABB |
 | `scene.overlap_circle(cx, cy, r)`          | table (1-indexed strings) of every collider intersecting a virtual circle |
+| `scene.find_path(sx, sy, ex, ey, smooth?)` | table of `{x=..., y=...}` waypoints (1-indexed); `nil` when no walkable Tilemap exists or no path was found. `smooth` defaults to `true` (M7c30 line-of-sight string-pulling); pass `false` to inspect the raw A* cell path. |
 
 Component type names match the C++ `Component::TypeName()`
 strings: `"Transform"`, `"SpriteRenderer"`, `"Tilemap"`,
 `"Animator"`, `"Script"`, `"BoxCollider"`, `"CircleCollider"`,
-`"Rigidbody2D"`.
+`"CapsuleCollider"`, `"PolygonCollider"`, `"EdgeCollider"`,
+`"Rigidbody2D"`, `"AudioSource"`, `"AudioListener"`.
 
 ### Physics components
 
-Three physics components plug into the same overlap / event
-plumbing. Layer filtering, push-out, and velocity reflection
-all happen in `TickColliders` before any Lua dispatch fires.
+Six collider components + Rigidbody2D + Tilemap plug into the
+same overlap / event plumbing. Layer filtering, push-out, and
+velocity reflection all happen in `TickColliders` before any
+Lua dispatch fires. Every shape interacts with every other
+through one common ColliderInfo + SAT path -- there's no
+N x M dispatch matrix to keep in sync as new shapes ship.
 
 | Component | Key fields | Notes |
 | --------- | ---------- | ----- |
 | `BoxCollider` | `size`, `offset`, `isTrigger`, `layer` | Oriented bounding box -- inherits the owning Transform's rotation (M7c13) |
 | `CircleCollider` | `radius`, `offset`, `isTrigger`, `layer` | Centre + radius; rotation-invariant |
+| `CapsuleCollider` | `radius`, `halfLength`, `offset`, `isTrigger`, `layer` | Vertical spine + 2 hemispherical caps (M7c27). Local height = 2 * (halfLength + radius); width = 2 * radius. Decomposed into a core OBB + 2 endcap circles for collision; rotates with Transform |
+| `PolygonCollider` | `vertices` (CCW Vec2 list), `offset`, `isTrigger`, `layer` | Convex polygon in local space (M7c28). Default = regular pentagon, radius 0.4. Runs through the same n-gon SAT used by slope tiles -- no upper vertex count beyond what the inspector can edit |
+| `EdgeCollider` | `vertices`, `closed`, `offset`, `isTrigger`, `layer` | Polyline / chain collider (M7c32). Each adjacent pair contributes one segment; `closed = true` adds the wrap-around. Implemented as per-segment thin-OBB decomposition (0.02 unit thickness); a ~r residual penetration at the deepest contact is the known cost, swap-out for closed-form segment-vs-shape distance is future-work |
 | `Rigidbody2D` | `velocity`, `gravity`, `drag`, `mass`, `restitution`, `friction` | See `rigidbody.*` |
 | `Tilemap` | `tileset`, `cellPixelW/H`, `cells`, `sortingLayer`, `orderInLayer`, `collisionLayer` | Per-tile collider synthesis when `tileset` points at a `.ntileset` asset; layer + cell shapes drive collision (M7c18 / c19 / c20 / c21 / c22 / c23 / c25) |
 
@@ -326,6 +422,19 @@ box). The **Window > Collision Matrix...** modal renders an
 NxN checkbox grid -- un-ticking a row/column pair tells the
 runtime to silently skip that layer combination. Filtered
 pairs cost no per-shape math and never fire events.
+
+### Audio components (M8c7 / M8c8)
+
+| Component | Key fields | Notes |
+| --------- | ---------- | ----- |
+| `AudioSource` | `clip` (Audio GUID), `volume`, `playOnStart`, `loop`, `is3D`, `minDistance`, `maxDistance` | Auto-plays its clip on rising-edge play-mode entry. `loop = true` routes through `play_music` (streaming + loop); `loop = false` uses the SFX cache. `is3D` toggles distance attenuation + stereo pan against the active AudioListener (M8c8). `is3D + loop` is silently ignored -- streaming voices don't update as the entity moves yet |
+| `AudioListener` | -- (marker component) | Attach to the player / camera / follow-target. The runtime takes the listener's Transform position as the reference point for 3D source attenuation + stereo pan. First enabled entity carrying the component wins -- only one active per scene |
+
+For script-driven SFX (footsteps, gunfire, jump SFX) use
+`audio.play` / `audio.spawn` from Lua directly. `AudioSource`
+is the declarative auto-play path -- ambient sound, BGM that
+follows a scene, looping environment loops, one-shot SFX on
+spawn. The two paths share the same SFX cache and submix bus.
 
 ### `math.*` (extensions)
 
@@ -527,6 +636,68 @@ it sits outside the AABB. The price for that precision is
 roughly one extra dot-product per box-pair / box-point
 test -- still O(1) per candidate.
 
+### Tilemap pathfinding (M7c29 / M7c30)
+
+```lua
+-- Enemy walks along an A*-smoothed path to the player.
+function Enemy_Update(entity, dt)
+    local ex, ey = transform.get_position(entity)
+    local px, py = transform.get_position("Player")
+    local path = scene.find_path(ex, ey, px, py)  -- smoothed
+    if not path or #path < 2 then return end
+    -- Step toward the next waypoint (skip path[1] = our cell).
+    local next = path[2]
+    local dx = next.x - ex
+    local dy = next.y - ey
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len > 1e-3 then
+        local speed = 2.0
+        transform.translate(entity,
+            (dx / len) * speed * dt,
+            (dy / len) * speed * dt, 0)
+    end
+end
+```
+
+`find_path` runs A* (octile heuristic + corner-cut prevention)
+across the first walkable Tilemap it finds in the scene. The
+smoothed path drops the cell-step jitter via line-of-sight
+string pulling -- visually you get diagonals and long
+straightaways instead of zig-zags. Pass `false` as the 5th arg
+when you want to inspect the raw cell path (debugging /
+visualisation).
+
+### Doppler-shifted SFX
+
+```lua
+-- Per-entity prev-position store for velocity sampling.
+local lastPos = {}
+local SPEED_OF_SOUND = 8.0  -- units / second, game-tuned
+
+function Car_Update(entity, dt)
+    if dt <= 0 then return end
+    local ex, ey = transform.get_position(entity)
+    local lx, ly = transform.get_position("Listener")
+    -- Source velocity from frame-over-frame delta.
+    local prev = lastPos[entity] or { x = ex, y = ey }
+    local svx = (ex - prev.x) / dt
+    local svy = (ey - prev.y) / dt
+    lastPos[entity] = { x = ex, y = ey }
+    -- Approach speed along the source -> listener axis.
+    local dx = lx - ex
+    local dy = ly - ey
+    local len = math.sqrt(dx * dx + dy * dy) + 1e-6
+    local approach = (svx * dx + svy * dy) / len
+    local ratio = (SPEED_OF_SOUND + approach) / SPEED_OF_SOUND
+    audio.play_positional("Sounds/engine.wav",
+        0.8, dx / len, ratio)
+end
+```
+
+Approaching sources get `ratio > 1` (raised pitch); receding
+sources get `ratio < 1`. Clamped to `[0.25, 2.0]` internally
+so a runaway delta won't blow the source voice.
+
 ## IDE tools
 
 | Tool | Where |
@@ -538,6 +709,7 @@ test -- still O(1) per candidate.
 | **File watcher** | Polls `last_write_time` every 1 s; covers Script + Animation + AnimatorController + Texture + Tileset + Autotile. |
 | **Window > Sorting Layers...** | Edit the SpriteRenderer draw order layers (rename / add / reorder). |
 | **Window > Collision Matrix...** | Edit collision layers + the NxN collide/skip matrix. |
+| **Window > Audio Mixer...** | Master / SFX / Music bus sliders + Reverb (Wet) send. Live-applied to the engine + persisted into `ProjectSettings/project.json` under `audioMixer` (M8c12 / M8c13). |
 | **Viewport collider gizmos** | Every Box / Circle collider renders an outline; the M7c2 gizmo colour shifts from green to amber while the pair is overlapping. M7c13 traces the rotated rect for Box colliders so the gizmo matches the SAT footprint. |
 | **Tileset editor** | Project pane > double-click a `.ntileset` row. Click a cell to cycle through the 10 collider shapes (blank / Box / OneWay / 6 slope variants / Trigger). Overlay paints solid red, OneWay orange, trigger blue, slope filled triangles + trapezoids. |
 
@@ -605,3 +777,21 @@ read it via `transform.get_rotation`).
   60-FPS step; the M7c10 inside-box fallback resolves bodies
   caught penetrating but a CCD / sub-step pass would prevent
   the penetration in the first place.
+- `EdgeCollider` uses a thin-OBB decomposition per segment
+  (0.02 unit thickness) routed through the M7c13 SAT path; the
+  geometry leaves a ~r residual penetration at the deepest
+  contact. A closed-form segment-vs-shape distance pass would
+  remove the bump entirely.
+- `AudioSource.is3D + loop` is silently ignored. The streaming
+  voice path doesn't recompute pan / attenuation as the entity
+  moves yet, so a looping 3D source would stay frozen at its
+  fire-time position. Wire X3DAudio + per-frame voice updates
+  when "music that tracks a 3D object" shows up as a real use
+  case.
+- Doppler (M8c13) lives only on `audio.play_positional`'s
+  optional `freq_ratio` arg; per-voice updates (Spawn + retune)
+  aren't exposed yet. Game-driven doppler that follows a
+  long-running sound has to re-Spawn on each pitch change.
+- Reverb (M8c13) is a fixed I3DL2 Living-Room preset routed off
+  the SFX submix. Music + per-voice spawns bypass it; switching
+  presets / wiring per-source send levels is future-work.
