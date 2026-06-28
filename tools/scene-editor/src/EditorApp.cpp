@@ -7408,12 +7408,30 @@ private:
         const ImTextureID texId =
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                 tex->GetNativeView()));
+        // M7c17: Tilemap rotation. Every cell is drawn through
+        // the same rigid-body rotation matrix the M7c12-c16
+        // sprite paths use; the whole tilemap rotates around
+        // the entity origin (gridX=0, gridY=0).
+        const auto* trans =
+            e.GetComponent<SceneEditor::TransformComponent>();
+        const float rotDeg = trans ? trans->rotation : 0.0f;
+        const float rotRad = rotDeg
+            * 3.14159265358979323846f / 180.0f;
+        const float cosR = std::cos(rotRad);
+        const float sinR = std::sin(rotRad);
+        auto Project = [&](float lx, float ly) {
+            const float rx = cosR * lx - sinR * ly;
+            const float ry = sinR * lx + cosR * ly;
+            return ImVec2{c.x + rx * zoom, c.y - ry * zoom};
+        };
 
-        // Bounding box (in world) used for the selection outline.
-        float bbMinX =  std::numeric_limits<float>::infinity();
-        float bbMinY =  std::numeric_limits<float>::infinity();
-        float bbMaxX = -std::numeric_limits<float>::infinity();
-        float bbMaxY = -std::numeric_limits<float>::infinity();
+        // Bounding box (in entity-local) used for the
+        // selection outline + label position. We track it
+        // in local coords + rotate the 4 corners at the end.
+        float locMinX =  std::numeric_limits<float>::infinity();
+        float locMinY =  std::numeric_limits<float>::infinity();
+        float locMaxX = -std::numeric_limits<float>::infinity();
+        float locMaxY = -std::numeric_limits<float>::infinity();
 
         for (const auto& kv : tm.cells) {
             const int gx  = kv.first.first;
@@ -7429,22 +7447,37 @@ private:
             const float u0 =  float(tileCol     * rt.cellW) / texW;
             const float v0 =  float(tileRow     * rt.cellH) / texH;
             const float u1 =  float((tileCol + 1) * rt.cellW) / texW;
-            const float v1 =  float((tileRow + 1) * rt.cellH) / texH;
+            const float v1 =  float((tileCol + 1) * rt.cellH) / texH;
 
-            // World rect (Y-up: gy = 0 = bottom row).
-            const float worldL = entityWp.x +  gx       * cellWorldW;
-            const float worldR = entityWp.x + (gx + 1) * cellWorldW;
-            const float worldB = entityWp.y +  gy       * cellWorldH;
-            const float worldT = entityWp.y + (gy + 1) * cellWorldH;
-            bbMinX = std::min(bbMinX, worldL); bbMaxX = std::max(bbMaxX, worldR);
-            bbMinY = std::min(bbMinY, worldB); bbMaxY = std::max(bbMaxY, worldT);
+            // Cell rect in entity-local coords (gy=0 is the
+            // bottom row of the tilemap; the texture's row 0
+            // sits at the visual top of the cell, so the UV
+            // top sits at the world top).
+            const float locL =  gx       * cellWorldW;
+            const float locR = (gx + 1) * cellWorldW;
+            const float locB =  gy       * cellWorldH;
+            const float locT = (gy + 1) * cellWorldH;
+            locMinX = std::min(locMinX, locL);
+            locMaxX = std::max(locMaxX, locR);
+            locMinY = std::min(locMinY, locB);
+            locMaxY = std::max(locMaxY, locT);
 
-            const ImVec2 pMin{c.x + (worldL - entityWp.x) * zoom,
-                              c.y - (worldT - entityWp.y) * zoom};
-            const ImVec2 pMax{c.x + (worldR - entityWp.x) * zoom,
-                              c.y - (worldB - entityWp.y) * zoom};
-            dl->AddImage(texId, pMin, pMax,
-                         ImVec2{u0, v0}, ImVec2{u1, v1}, tint);
+            const ImVec2 pTL = Project(locL, locT);
+            const ImVec2 pTR = Project(locR, locT);
+            const ImVec2 pBR = Project(locR, locB);
+            const ImVec2 pBL = Project(locL, locB);
+            // UV: top-left of source cell sits at the visual
+            // top-left of the rotated quad; AddImageQuad maps
+            // UVs to vertex positions in declared order.
+            const float vu0 = float(tileCol     * rt.cellW) / texW;
+            const float vu1 = float((tileCol + 1) * rt.cellW) / texW;
+            const float vv0 = float(tileRow     * rt.cellH) / texH;
+            const float vv1 = float((tileRow + 1) * rt.cellH) / texH;
+            (void)u0; (void)v0; (void)u1; (void)v1;
+            dl->AddImageQuad(texId, pTL, pTR, pBR, pBL,
+                             ImVec2(vu0, vv0), ImVec2(vu1, vv0),
+                             ImVec2(vu1, vv1), ImVec2(vu0, vv1),
+                             tint);
         }
 
         // Collision overlay: walk the cells once more (now that we have
@@ -7468,16 +7501,24 @@ private:
         }
 
         // Selection outline + label only when we drew at least one cell.
-        if (bbMinX <= bbMaxX && bbMinY <= bbMaxY) {
-            const ImVec2 a{c.x + (bbMinX - entityWp.x) * zoom,
-                           c.y - (bbMaxY - entityWp.y) * zoom};
-            const ImVec2 b{c.x + (bbMaxX - entityWp.x) * zoom,
-                           c.y - (bbMinY - entityWp.y) * zoom};
+        // M7c17: outline traces the rotated tilemap outer rect.
+        if (locMinX <= locMaxX && locMinY <= locMaxY) {
+            const ImVec2 pTL = Project(locMinX, locMaxY);
+            const ImVec2 pTR = Project(locMaxX, locMaxY);
+            const ImVec2 pBR = Project(locMaxX, locMinY);
+            const ImVec2 pBL = Project(locMinX, locMinY);
             if (selected) {
-                dl->AddRect(a, b, IM_COL32(255, 220, 60, 255),
-                            0.0f, 0, 2.0f);
+                const ImVec2 pts[5] = { pTL, pTR, pBR, pBL, pTL };
+                dl->AddPolyline(pts, 5,
+                                IM_COL32(255, 220, 60, 255),
+                                ImDrawFlags_None, 2.0f);
             }
-            dl->AddText(ImVec2{a.x, b.y + 2.0f},
+            float minX = pTL.x, maxY = pTL.y;
+            for (const ImVec2& p : {pTR, pBR, pBL}) {
+                minX = std::min(minX, p.x);
+                maxY = std::max(maxY, p.y);
+            }
+            dl->AddText(ImVec2{minX, maxY + 2.0f},
                         IM_COL32(220, 220, 220, 255), e.name.c_str());
         }
     }
