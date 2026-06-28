@@ -4,6 +4,7 @@
 #include "BoxColliderComponent.h"
 #include "CapsuleColliderComponent.h"
 #include "CircleColliderComponent.h"
+#include "PolygonColliderComponent.h"
 #include "Rigidbody2DComponent.h"
 #include "ScriptComponent.h"
 #include "SpriteRendererComponent.h"
@@ -57,6 +58,8 @@ void RegisterBuiltinComponents() {
                [] { return std::make_unique<CircleColliderComponent>(); });
     r.Register(CapsuleColliderComponent::StaticTypeName(),
                [] { return std::make_unique<CapsuleColliderComponent>(); });
+    r.Register(PolygonColliderComponent::StaticTypeName(),
+               [] { return std::make_unique<PolygonColliderComponent>(); });
     r.Register(Rigidbody2DComponent::StaticTypeName(),
                [] { return std::make_unique<Rigidbody2DComponent>(); });
 }

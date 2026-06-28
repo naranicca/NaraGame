@@ -17,6 +17,7 @@
 #include "scene/BoxColliderComponent.h"
 #include "scene/CapsuleColliderComponent.h"
 #include "scene/CircleColliderComponent.h"
+#include "scene/PolygonColliderComponent.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
 #include "scene/Rigidbody2DComponent.h"
@@ -556,7 +557,11 @@ private:
         // hemispherical cap radius. Overlap + ComputeMTV
         // decompose it into a centre OBB + 2 endcap circles +
         // dispatch through the existing Box / Circle helpers.
-        enum class ColliderKind { Box, Circle, Capsule };
+        // M7c28: Polygon (convex) -- world-space vertex list
+        // stored in `polygonVerts`. The M7c25 SatPolyBox + the
+        // new SatPolyPoly fall through unchanged because both
+        // already loop over an arbitrary vertex count.
+        enum class ColliderKind { Box, Circle, Capsule, Polygon };
         struct ColliderInfo {
             SceneEditor::EntityId   id;
             std::string             name;
@@ -614,6 +619,12 @@ private:
                 RightHigh, LeftHigh
             };
             SlopeShape              slope = SlopeShape::None;
+            // M7c28: convex polygon vertices in world space
+            // (CCW). Empty for Box / Circle / Capsule / Slope.
+            // The pair loop only walks this array when
+            // kind == Polygon -- the field stays unset on the
+            // hot path.
+            std::vector<std::array<float, 2>> polygonVerts;
         };
         std::vector<ColliderInfo> infos;
         infos.reserve(32);
@@ -627,7 +638,8 @@ private:
             auto* bc = e->GetComponent<SceneEditor::BoxColliderComponent>();
             auto* cc = e->GetComponent<SceneEditor::CircleColliderComponent>();
             auto* capc = e->GetComponent<SceneEditor::CapsuleColliderComponent>();
-            if (!bc && !cc && !capc) continue;
+            auto* pgc = e->GetComponent<SceneEditor::PolygonColliderComponent>();
+            if (!bc && !cc && !capc && !pgc) continue;
             auto* sc = e->GetComponent<SceneEditor::ScriptComponent>();
             auto* rbInfo = e->GetComponent<SceneEditor::Rigidbody2DComponent>();
             ColliderInfo ci;
@@ -681,7 +693,7 @@ private:
                 ci.maxX      = ci.cx + ci.radius;
                 ci.minY      = ci.cy - ci.radius;
                 ci.maxY      = ci.cy + ci.radius;
-            } else {
+            } else if (capc) {
                 // M7c27: capsule -- rotation flows in from the
                 // Transform same as Box. halfY = spine
                 // halfLength along local Y, radius = cap.
@@ -700,9 +712,6 @@ private:
                     * 3.14159265358979323846f / 180.0f;
                 ci.cosR      = std::cos(rotRad);
                 ci.sinR      = std::sin(rotRad);
-                // Bounding AABB = the rotated rect of size
-                // (2r, 2(halfLen + r)) -- the endcap circles
-                // already lie inside that envelope.
                 const float ex =
                     std::fabs(ci.cosR) * ci.radius +
                     std::fabs(ci.sinR) * (ci.halfY + ci.radius);
@@ -713,6 +722,48 @@ private:
                 ci.maxX      = ci.cx + ex;
                 ci.minY      = ci.cy - ey;
                 ci.maxY      = ci.cy + ey;
+            } else {
+                // M7c28: convex polygon. Transform each local
+                // vertex into world space + cache it on the
+                // ColliderInfo so the n-gon SAT helpers don't
+                // need to re-derive it per pair-loop iteration.
+                if (pgc->vertices.size() < 3) continue;
+                ci.kind      = ColliderKind::Polygon;
+                ci.isTrigger = pgc->isTrigger;
+                ci.layer     = pgc->layer;
+                ci.cx        = tr->position.x + pgc->offset.x;
+                ci.cy        = tr->position.y + pgc->offset.y;
+                ci.radius    = 0.0f;
+                const float rotRad = tr->rotation
+                    * 3.14159265358979323846f / 180.0f;
+                ci.cosR      = std::cos(rotRad);
+                ci.sinR      = std::sin(rotRad);
+                const float sx = tr->scale.x;
+                const float sy = tr->scale.y;
+                ci.polygonVerts.reserve(pgc->vertices.size());
+                float minX = std::numeric_limits<float>::infinity();
+                float maxX = -minX;
+                float minY = minX;
+                float maxY = -minY;
+                for (const auto& lv : pgc->vertices) {
+                    const float lxs = lv.x * sx;
+                    const float lys = lv.y * sy;
+                    const float wx = ci.cx +
+                        ci.cosR * lxs - ci.sinR * lys;
+                    const float wy = ci.cy +
+                        ci.sinR * lxs + ci.cosR * lys;
+                    ci.polygonVerts.push_back({ wx, wy });
+                    minX = std::min(minX, wx);
+                    maxX = std::max(maxX, wx);
+                    minY = std::min(minY, wy);
+                    maxY = std::max(maxY, wy);
+                }
+                ci.halfX = (maxX - minX) * 0.5f;
+                ci.halfY = (maxY - minY) * 0.5f;
+                ci.minX  = minX;
+                ci.maxX  = maxX;
+                ci.minY  = minY;
+                ci.maxY  = maxY;
             }
             infos.push_back(std::move(ci));
         }
@@ -979,17 +1030,31 @@ private:
         // with the cell floor + the top edge follows the
         // slope hypotenuse. CCW vertex order so the cross-
         // product centroid math stays consistent across both.
+        // M7c28: generalised to handle Polygon collider too.
+        // Buffer enlarged from [4][2] to [16][2] so any convex
+        // shape with up to 16 vertices flows through the same
+        // helpers (Polygon, slope triangle, slope trapezoid).
         auto PolyVertices = [&SlopeHeights](
-                                const ColliderInfo& slope,
-                                float v[4][2],
+                                const ColliderInfo& info,
+                                float v[16][2],
                                 int& count) {
+            if (info.kind == ColliderKind::Polygon) {
+                const int n = std::min(
+                    int(info.polygonVerts.size()), 16);
+                for (int i = 0; i < n; ++i) {
+                    v[i][0] = info.polygonVerts[i][0];
+                    v[i][1] = info.polygonVerts[i][1];
+                }
+                count = n;
+                return;
+            }
             float leftH, rightH;
-            SlopeHeights(slope.slope, leftH, rightH);
-            const float fullH = 2.0f * slope.halfY;
-            const float bl_x = slope.cx - slope.halfX;
-            const float bl_y = slope.cy - slope.halfY;
-            const float br_x = slope.cx + slope.halfX;
-            const float br_y = slope.cy - slope.halfY;
+            SlopeHeights(info.slope, leftH, rightH);
+            const float fullH = 2.0f * info.halfY;
+            const float bl_x = info.cx - info.halfX;
+            const float bl_y = info.cy - info.halfY;
+            const float br_x = info.cx + info.halfX;
+            const float br_y = info.cy - info.halfY;
             // Common bottom corners (CCW order).
             v[0][0] = bl_x; v[0][1] = bl_y;
             v[1][0] = br_x; v[1][1] = br_y;
@@ -1020,11 +1085,11 @@ private:
                             const ColliderInfo& poly,
                             const ColliderInfo& box,
                             float& mtvX, float& mtvY) {
-            float v[4][2];
+            float v[16][2];
             int n;
             PolyVertices(poly, v, n);
-            // 2 box axes + n edge normals = up to 6 axes.
-            float axes[6][2];
+            // 2 box axes + n edge normals.
+            float axes[18][2];
             axes[0][0] =  box.cosR; axes[0][1] =  box.sinR;
             axes[1][0] = -box.sinR; axes[1][1] =  box.cosR;
             // Centroid of the polygon (average of vertices).
@@ -1087,6 +1152,101 @@ private:
         // building until I update the call sites below.
         auto SatTriBox = SatPolyBox;
 
+        // M7c28: convex polygon vs convex polygon SAT. Uses
+        // both polygons' edge normals as candidate axes; the
+        // result MTV pushes A away from B. Falls through for
+        // Polygon-vs-Polygon, Polygon-vs-Slope (slopes also
+        // route through PolyVertices), and Slope-vs-Polygon.
+        auto SatPolyPoly = [&PolyVertices](
+                            const ColliderInfo& a,
+                            const ColliderInfo& b,
+                            float& mtvX, float& mtvY) {
+            float va[16][2], vb[16][2];
+            int na, nb;
+            PolyVertices(a, va, na);
+            PolyVertices(b, vb, nb);
+            if (na < 3 || nb < 3) return false;
+            // Centroids for outward normal disambiguation +
+            // final MTV sign.
+            float caX = 0.0f, caY = 0.0f;
+            for (int i = 0; i < na; ++i) {
+                caX += va[i][0]; caY += va[i][1];
+            }
+            caX /= float(na); caY /= float(na);
+            float cbX = 0.0f, cbY = 0.0f;
+            for (int i = 0; i < nb; ++i) {
+                cbX += vb[i][0]; cbY += vb[i][1];
+            }
+            cbX /= float(nb); cbY /= float(nb);
+            // Build axes from A's edge normals + B's edge
+            // normals. CCW polygons => outward normal is the
+            // 90-deg CW rotation of (v_next - v_curr); we
+            // disambiguate via the centroid to keep the math
+            // robust against accidental CW input.
+            auto buildAxes = [&](const float v[16][2], int n,
+                                 float cx, float cy,
+                                 float axes[16][2]) {
+                for (int i = 0; i < n; ++i) {
+                    const int j = (i + 1) % n;
+                    const float ex = v[j][0] - v[i][0];
+                    const float ey = v[j][1] - v[i][1];
+                    float nx = -ey, ny = ex;
+                    const float mx = (v[i][0] + v[j][0]) * 0.5f - cx;
+                    const float my = (v[i][1] + v[j][1]) * 0.5f - cy;
+                    if (nx * mx + ny * my < 0.0f) {
+                        nx = -nx; ny = -ny;
+                    }
+                    const float len = std::sqrt(nx * nx + ny * ny);
+                    if (len < 1e-6f) { nx = 1.0f; ny = 0.0f; }
+                    else             { nx /= len; ny /= len; }
+                    axes[i][0] = nx;
+                    axes[i][1] = ny;
+                }
+            };
+            float axesA[16][2], axesB[16][2];
+            buildAxes(va, na, caX, caY, axesA);
+            buildAxes(vb, nb, cbX, cbY, axesB);
+            float minOverlap = std::numeric_limits<float>::infinity();
+            float bestNx = 0.0f, bestNy = 0.0f;
+            auto testAxis = [&](float ax, float ay) -> bool {
+                float aMin = va[0][0] * ax + va[0][1] * ay;
+                float aMax = aMin;
+                for (int k = 1; k < na; ++k) {
+                    const float p = va[k][0] * ax + va[k][1] * ay;
+                    aMin = std::min(aMin, p);
+                    aMax = std::max(aMax, p);
+                }
+                float bMin = vb[0][0] * ax + vb[0][1] * ay;
+                float bMax = bMin;
+                for (int k = 1; k < nb; ++k) {
+                    const float p = vb[k][0] * ax + vb[k][1] * ay;
+                    bMin = std::min(bMin, p);
+                    bMax = std::max(bMax, p);
+                }
+                const float overlap = std::min(aMax, bMax) -
+                                      std::max(aMin, bMin);
+                if (overlap < 0.0f) return false;
+                if (overlap < minOverlap) {
+                    minOverlap = overlap;
+                    bestNx = ax; bestNy = ay;
+                }
+                return true;
+            };
+            for (int i = 0; i < na; ++i) {
+                if (!testAxis(axesA[i][0], axesA[i][1])) return false;
+            }
+            for (int i = 0; i < nb; ++i) {
+                if (!testAxis(axesB[i][0], axesB[i][1])) return false;
+            }
+            // MTV points from B's centroid -> A's centroid.
+            const float d = (caX - cbX) * bestNx +
+                            (caY - cbY) * bestNy;
+            if (d < 0.0f) { bestNx = -bestNx; bestNy = -bestNy; }
+            mtvX = bestNx * minOverlap;
+            mtvY = bestNy * minOverlap;
+            return true;
+        };
+
         // M7c22: slope-vs-circle MTV. Pushes the circle out
         // perpendicular to the slope hypotenuse + radial at
         // segment endpoints. Returned vector moves `a` away
@@ -1101,7 +1261,7 @@ private:
                 const ColliderInfo& circ,
                 float& outCx, float& outCy,
                 bool& inside) {
-            float v[4][2];
+            float v[16][2];
             int n;
             PolyVertices(slope, v, n);
             float ctrX = 0.0f, ctrY = 0.0f;
@@ -1152,7 +1312,11 @@ private:
             // could touch any of the 4 edges. For triangle
             // slopes the legacy segment-clamp path still
             // applies + the math collapses to the same result.
-            if (slope.slope == ColliderInfo::SlopeShape::RightHigh ||
+            // M7c28: convex polygons take the same closest-
+            // point branch since their boundary has many
+            // edges + the closest one drives the push.
+            if (slope.kind == ColliderKind::Polygon ||
+                slope.slope == ColliderInfo::SlopeShape::RightHigh ||
                 slope.slope == ColliderInfo::SlopeShape::LeftHigh) {
                 float pcx, pcy;
                 bool inside;
@@ -1266,7 +1430,7 @@ private:
         };
 
         auto ComputeMTV = [&SatBoxBox, &SlopeCircleMtv, &SatTriBox,
-                           &CapsuleDecompose](
+                           &CapsuleDecompose, &SatPolyPoly](
                             const ColliderInfo& a,
                             const ColliderInfo& b,
                             float& dx, float& dy) {
@@ -1285,6 +1449,47 @@ private:
                 a.slope != ColliderInfo::SlopeShape::None;
             const bool bSlope =
                 b.slope != ColliderInfo::SlopeShape::None;
+            // M7c28: polygon side uses the n-gon helpers the
+            // same way slopes do; SatPolyPoly handles both
+            // poly-vs-poly + poly-vs-slope, SatTriBox handles
+            // poly-vs-box, SlopeCircleMtv handles poly-vs-
+            // circle via PolyCircleClosest.
+            const bool aPoly = (a.kind == ColliderKind::Polygon);
+            const bool bPoly = (b.kind == ColliderKind::Polygon);
+            if ((aPoly && bPoly) ||
+                (aPoly && bSlope) || (bPoly && aSlope)) {
+                float pushX, pushY;
+                if (SatPolyPoly(a, b, pushX, pushY)) {
+                    dx = pushX; dy = pushY;
+                }
+                return;
+            }
+            if (aPoly && b.kind == ColliderKind::Box) {
+                float pushX, pushY;
+                if (SatTriBox(a, b, pushX, pushY)) {
+                    dx = -pushX; dy = -pushY;
+                }
+                return;
+            }
+            if (bPoly && a.kind == ColliderKind::Box) {
+                float pushX, pushY;
+                if (SatTriBox(b, a, pushX, pushY)) {
+                    dx = pushX; dy = pushY;
+                }
+                return;
+            }
+            if (aPoly && b.kind == ColliderKind::Circle) {
+                float pushX, pushY;
+                SlopeCircleMtv(a, b, pushX, pushY);
+                dx = -pushX; dy = -pushY;
+                return;
+            }
+            if (bPoly && a.kind == ColliderKind::Circle) {
+                float pushX, pushY;
+                SlopeCircleMtv(b, a, pushX, pushY);
+                dx = pushX; dy = pushY;
+                return;
+            }
             if (aSlope && b.kind == ColliderKind::Circle) {
                 float pushX, pushY;
                 SlopeCircleMtv(a, b, pushX, pushY);
@@ -1465,7 +1670,7 @@ private:
                    circ.radius * circ.radius;
         };
         auto Overlap = [&SatBoxBox, &SlopeCircleOverlap, &SatTriBox,
-                        &CapsuleDecompose]
+                        &CapsuleDecompose, &SatPolyPoly]
                        (const ColliderInfo& a, const ColliderInfo& b) {
             // Inner pair test -- handles every shape *except*
             // Capsule. M7c27 wraps it with a capsule decomp
@@ -1477,6 +1682,31 @@ private:
                 a.slope != ColliderInfo::SlopeShape::None;
             const bool bSlope =
                 b.slope != ColliderInfo::SlopeShape::None;
+            const bool aPoly = (a.kind == ColliderKind::Polygon);
+            const bool bPoly = (b.kind == ColliderKind::Polygon);
+            // M7c28: polygon side reuses the M7c25 helpers --
+            // SatPolyBox + SlopeCircleOverlap already loop over
+            // PolyVertices, which now returns polygon verts
+            // directly when info.kind == Polygon.
+            if ((aPoly && bPoly) ||
+                (aPoly && bSlope) || (bPoly && aSlope)) {
+                float dxIgn = 0.0f, dyIgn = 0.0f;
+                return SatPolyPoly(a, b, dxIgn, dyIgn);
+            }
+            if (aPoly && b.kind == ColliderKind::Box) {
+                float dxIgn = 0.0f, dyIgn = 0.0f;
+                return SatTriBox(a, b, dxIgn, dyIgn);
+            }
+            if (bPoly && a.kind == ColliderKind::Box) {
+                float dxIgn = 0.0f, dyIgn = 0.0f;
+                return SatTriBox(b, a, dxIgn, dyIgn);
+            }
+            if (aPoly && b.kind == ColliderKind::Circle) {
+                return SlopeCircleOverlap(a, b);
+            }
+            if (bPoly && a.kind == ColliderKind::Circle) {
+                return SlopeCircleOverlap(b, a);
+            }
             if (aSlope && b.kind == ColliderKind::Circle) {
                 return SlopeCircleOverlap(a, b);
             }
@@ -6249,6 +6479,8 @@ private:
             DrawCircleColliderEditor(entity, *cc);
         } else if (auto* cap = dynamic_cast<SceneEditor::CapsuleColliderComponent*>(comp)) {
             DrawCapsuleColliderEditor(entity, *cap);
+        } else if (auto* pgc = dynamic_cast<SceneEditor::PolygonColliderComponent*>(comp)) {
+            DrawPolygonColliderEditor(entity, *pgc);
         } else if (auto* rb = dynamic_cast<SceneEditor::Rigidbody2DComponent*>(comp)) {
             DrawRigidbody2DEditor(entity, *rb);
         } else {
@@ -6399,6 +6631,60 @@ private:
             cc.isTrigger = trig;
         }
         DrawColliderLayerCombo(cc.layer);
+    }
+
+    // Convex polygon (M7c28). One DragFloat2 per vertex +
+    // Add / Remove buttons. The runtime trusts the user's
+    // CCW convex input; concave polygons silently misbehave
+    // through SAT.
+    void DrawPolygonColliderEditor(SceneEditor::Entity& /*entity*/,
+                                   SceneEditor::PolygonColliderComponent& pgc) {
+        ImGui::Text("Vertices (%d):", int(pgc.vertices.size()));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+##addvert")) {
+            UndoSnapshot();
+            // Append a vertex midway between the last + first
+            // so the polygon's overall shape stays sensible.
+            if (pgc.vertices.size() >= 2) {
+                const auto& a = pgc.vertices.back();
+                const auto& b = pgc.vertices.front();
+                pgc.vertices.push_back(
+                    { (a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f });
+            } else {
+                pgc.vertices.push_back({ 0.3f, 0.0f });
+            }
+        }
+        int removeIdx = -1;
+        for (size_t i = 0; i < pgc.vertices.size(); ++i) {
+            ImGui::PushID(int(i));
+            float v[2] = { pgc.vertices[i].x, pgc.vertices[i].y };
+            if (ImGui::DragFloat2("##v", v, 0.05f, 0.0f, 0.0f,
+                                   "%.2f")) {
+                UndoSnapshot();
+                pgc.vertices[i] = { v[0], v[1] };
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x") && pgc.vertices.size() > 3) {
+                removeIdx = int(i);
+            }
+            ImGui::PopID();
+        }
+        if (removeIdx >= 0) {
+            UndoSnapshot();
+            pgc.vertices.erase(pgc.vertices.begin() + removeIdx);
+        }
+        float off[2] = { pgc.offset.x, pgc.offset.y };
+        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
+                               "%.2f")) {
+            UndoSnapshot();
+            pgc.offset = { off[0], off[1] };
+        }
+        bool trig = pgc.isTrigger;
+        if (ImGui::Checkbox("Is Trigger", &trig)) {
+            UndoSnapshot();
+            pgc.isTrigger = trig;
+        }
+        DrawColliderLayerCombo(pgc.layer);
     }
 
     // Same shape as DrawBoxColliderEditor but with a single
@@ -8199,6 +8485,55 @@ private:
             const float thickness = sel ? 2.5f : 1.5f;
             dl->AddCircle(cs, pixelR, col, 32, thickness);
             dl->AddCircleFilled(cs, 2.5f, col);
+        }
+        // M7c28: PolygonCollider gizmos. Trace the convex
+        // outline as a closed polyline through world->screen.
+        for (SceneEditor::EntityId id : ids) {
+            const auto* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            const auto* tr =
+                e->GetComponent<SceneEditor::TransformComponent>();
+            const auto* pgc =
+                e->GetComponent<SceneEditor::PolygonColliderComponent>();
+            if (!tr || !pgc) continue;
+            const int n = int(pgc->vertices.size());
+            if (n < 3) continue;
+            const float rotRad = tr->rotation
+                * 3.14159265358979323846f / 180.0f;
+            const float cosR = std::cos(rotRad);
+            const float sinR = std::sin(rotRad);
+            const float ox = tr->position.x + pgc->offset.x;
+            const float oy = tr->position.y + pgc->offset.y;
+            const float sx = tr->scale.x;
+            const float sy = tr->scale.y;
+            bool overlapping = false;
+            for (const auto& key : m_collisionPairs) {
+                if (key.first == id || key.second == id) {
+                    overlapping = true; break;
+                }
+            }
+            const bool sel = (id == m_selection);
+            const ImU32 col = overlapping
+                ? (sel ? IM_COL32(255, 220, 80, 255)
+                       : IM_COL32(255, 200, 60, 200))
+                : (sel ? IM_COL32(120, 255, 140, 255)
+                       : IM_COL32(80,  220, 100, 180));
+            const float thickness = sel ? 2.5f : 1.5f;
+            std::vector<ImVec2> screen;
+            screen.reserve(n + 1);
+            for (int i = 0; i < n; ++i) {
+                const float lvx = pgc->vertices[i].x * sx;
+                const float lvy = pgc->vertices[i].y * sy;
+                const float wx = ox + cosR * lvx - sinR * lvy;
+                const float wy = oy + sinR * lvx + cosR * lvy;
+                screen.push_back(WorldToScreen(
+                    ImVec2(wx, wy), panelMin, panelSize));
+            }
+            dl->AddPolyline(screen.data(), n, col,
+                             ImDrawFlags_Closed, thickness);
+            const ImVec2 origin = WorldToScreen(
+                ImVec2(ox, oy), panelMin, panelSize);
+            dl->AddCircleFilled(origin, 2.5f, col);
         }
         // M7c27: CapsuleCollider gizmos. Outline = rotated
         // rectangle through the spine (2r wide, 2(halfLen+r)
