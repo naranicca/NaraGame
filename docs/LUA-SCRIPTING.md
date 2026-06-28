@@ -241,6 +241,7 @@ all happen in `TickColliders` before any Lua dispatch fires.
 | `BoxCollider` | `size`, `offset`, `isTrigger`, `layer` | Oriented bounding box -- inherits the owning Transform's rotation (M7c13) |
 | `CircleCollider` | `radius`, `offset`, `isTrigger`, `layer` | Centre + radius; rotation-invariant |
 | `Rigidbody2D` | `velocity`, `gravity`, `drag`, `mass`, `restitution`, `friction` | See `rigidbody.*` |
+| `Tilemap` | `tileset`, `cellPixelW/H`, `cells`, `sortingLayer`, `orderInLayer`, `collisionLayer` | Per-tile collider synthesis when `tileset` points at a `.ntileset` asset; layer + cell shapes drive collision (M7c18 / c19 / c20 / c21 / c22 / c23 / c25) |
 
 Box pairs use SAT (Separating Axis Theorem) so the collider
 follows whatever rotation `Transform.rotation` carries -- a
@@ -262,6 +263,60 @@ damage-tick counter that accumulates in `Stay` will see 4x
 the ticks per render frame compared to a Update-driven
 counter. Stay handlers that need once-per-frame semantics
 should drive from a frame counter in `OnUpdate` instead.
+
+#### Per-tile colliders (`.ntileset` assets)
+
+A `Tilemap` whose `tileset` GUID points at a `.ntileset`
+asset gets per-cell collision synthesised automatically --
+no `BoxCollider` / `CircleCollider` component required on
+the tilemap entity. The runtime walks every painted cell,
+looks the tile index up in the tileset's `tiles[]` map,
+and generates one synthetic collider per flagged cell. The
+synthetic id encodes `(tilemap.id, gx, gy)` so the same
+cell hashes to the same pair across frames, and
+`OnTriggerEnter` / `OnCollisionEnter` events report the
+**tilemap entity's name** as `other` -- not a synthetic
+cell name.
+
+Each `TilesetTile` carries three flags that compose to
+seven distinct collider behaviours:
+
+| `collides` | `isTrigger` | `shape` | Behaviour |
+| ---------- | ----------- | ------- | --------- |
+| false | false | -- | Decorative; no collider |
+| true | false | `Box` | Solid box; pushes bodies out (M7c18) |
+| true | true | `Box` | Trigger; fires `OnTrigger*` only (M7c19) |
+| true | false | `OneWay` | Jump-through platform; blocks only when MTV.y > 0 (M7c21) |
+| true | false | `SlopeRight` / `SlopeLeft` | 45-degree triangular slope; Ball rolls down + Box rests on the diagonal face (M7c22) |
+| true | false | `SlopeRightHalf` / `SlopeLeftHalf` | 22.5-degree gentle slope, half-height triangle (M7c23) |
+| true | false | `SlopeRightHigh` / `SlopeLeftHigh` | 22.5-degree gentle slope, upper-half trapezoid -- pairs with the matching Half tile to build a two-cell ramp (M7c25) |
+
+Tileset editor: open a `.ntileset` from the Project pane.
+Click a tile to cycle through the 10 states (blank ->
+Box -> OneWay -> the four slope variants -> Trigger ->
+blank). The overlay paints solid Box red, OneWay orange,
+trigger blue, and slope tiles as the filled triangle or
+trapezoid that matches the runtime's collision shape.
+
+Slope collision math:
+- **Circle vs slope**: closest-point-on-polygon clamp (M7c25
+  for trapezoid; M7c22 segment clamp for triangles). The
+  push direction is the polygon's outward edge normal on
+  interior contacts and the radial direction from the
+  nearest vertex on corner contacts.
+- **Box vs slope**: 5- or 6-axis SAT against the slope's
+  filled triangle or trapezoid (M7c24 + M7c25). Box bodies
+  rest on the diagonal face the same way a Circle does,
+  with the box's nearest corner pinned to the slope.
+
+The synthesised colliders honour the tilemap's
+`collisionLayer` (M7c20), so a `Tilemap.collisionLayer =
+"Enemy"` will not collide with `BoxCollider.layer =
+"Player"` when the matrix turns off that pair. Per-tile
+colliders also inherit the tilemap's `Transform.rotation`
+(M7c17), so a rotated tilemap rotates every cell collider
+in lockstep -- the SAT continues to use the actual rotated
+faces.
 
 #### Collision layers + matrix
 
@@ -484,18 +539,21 @@ test -- still O(1) per candidate.
 | **Window > Sorting Layers...** | Edit the SpriteRenderer draw order layers (rename / add / reorder). |
 | **Window > Collision Matrix...** | Edit collision layers + the NxN collide/skip matrix. |
 | **Viewport collider gizmos** | Every Box / Circle collider renders an outline; the M7c2 gizmo colour shifts from green to amber while the pair is overlapping. M7c13 traces the rotated rect for Box colliders so the gizmo matches the SAT footprint. |
+| **Tileset editor** | Project pane > double-click a `.ntileset` row. Click a cell to cycle through the 10 collider shapes (blank / Box / OneWay / 6 slope variants / Trigger). Overlay paints solid red, OneWay orange, trigger blue, slope filled triangles + trapezoids. |
 
 ## Rotation summary
 
 `Transform.rotation` (degrees, z-axis CCW) flows through the
-entire stack consistently as of M7c16:
+entire stack consistently as of M7c17:
 
 | System | Rotation handling | Commit |
 | ------ | ----------------- | ------ |
 | SpriteRenderer Simple draw | 4 corners rotated, AddImageQuad | M7c12 |
 | SpriteRenderer Sliced 9-zone | Each of the 9 tiles rotates as part of one rigid quad | M7c16 |
 | SpriteRenderer Tiled mode | Same -- TileQuad threads the rotation matrix through each repeated tile | M7c16 |
+| Tilemap draw | Each painted cell rotates around the entity origin via AddImageQuad | M7c17 |
 | BoxCollider physics (Trigger / Solid) | SAT (Separating Axis Theorem) on the 4 candidate axes | M7c13 |
+| Per-tile collider | Same SAT path -- synthesised cell colliders carry the tilemap's cosR/sinR | M7c17 + M7c18 |
 | Collider viewport gizmo | Rotated rect traced as AddPolyline | M7c13 |
 | `scene.raycast` | Ray transformed into box local frame | M7c15 |
 | `scene.overlap_box` | AABB-vs-OBB SAT | M7c15 |
@@ -530,6 +588,19 @@ read it via `transform.get_rotation`).
   thickness per render frame can still tunnel. A project-level
   setting + per-body "is bullet" hint can address this when the
   use case shows up.
+- Per-tile colliders fire per-cell `Enter`/`Stay`/`Exit` events
+  rather than aggregating to "Body hit Tilemap" once -- a body
+  overlapping three flagged cells triggers three Enter events
+  back-to-back with the same `other` name. Lua handlers that
+  want once-per-tilemap semantics need to dedupe themselves.
+- Only slope `Box` / `OneWay` / `Trigger` modes pair with the
+  `isTrigger` flag (M7c21). `isTrigger = true` is silently
+  ignored on slope shapes; a future commit may add OneWay +
+  slope and trigger + slope composites if a use case shows up.
+- Slope-vs-slope contacts are silently skipped. Two tilemaps
+  whose flagged cells overlap each other won't generate
+  events -- the runtime assumes the level designer makes
+  cells exclusive.
 - Fast bodies can tunnel through thin colliders within a single
   60-FPS step; the M7c10 inside-box fallback resolves bodies
   caught penetrating but a CCD / sub-step pass would prevent
