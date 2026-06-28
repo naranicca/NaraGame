@@ -17,6 +17,7 @@
 #include "scene/BoxColliderComponent.h"
 #include "scene/CapsuleColliderComponent.h"
 #include "scene/CircleColliderComponent.h"
+#include "scene/EdgeColliderComponent.h"
 #include "scene/PolygonColliderComponent.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
@@ -561,7 +562,12 @@ private:
         // stored in `polygonVerts`. The M7c25 SatPolyBox + the
         // new SatPolyPoly fall through unchanged because both
         // already loop over an arbitrary vertex count.
-        enum class ColliderKind { Box, Circle, Capsule, Polygon };
+        // M7c32: Edge (chain of segments) -- world-space verts
+        // also stored in `polygonVerts` + `chainClosed` says
+        // whether to wrap the last segment back to vertex 0.
+        // Overlap + ComputeMTV decompose it into one thin OBB
+        // per segment + reuse the existing Box paths.
+        enum class ColliderKind { Box, Circle, Capsule, Polygon, Edge };
         struct ColliderInfo {
             SceneEditor::EntityId   id;
             std::string             name;
@@ -624,7 +630,12 @@ private:
             // The pair loop only walks this array when
             // kind == Polygon -- the field stays unset on the
             // hot path.
+            // M7c32: Edge collider also stores its chain in
+            // this field; chainClosed indicates whether a
+            // final segment from vertex N-1 back to vertex 0
+            // exists.
             std::vector<std::array<float, 2>> polygonVerts;
+            bool chainClosed = false;
         };
         std::vector<ColliderInfo> infos;
         infos.reserve(32);
@@ -639,7 +650,8 @@ private:
             auto* cc = e->GetComponent<SceneEditor::CircleColliderComponent>();
             auto* capc = e->GetComponent<SceneEditor::CapsuleColliderComponent>();
             auto* pgc = e->GetComponent<SceneEditor::PolygonColliderComponent>();
-            if (!bc && !cc && !capc && !pgc) continue;
+            auto* ec = e->GetComponent<SceneEditor::EdgeColliderComponent>();
+            if (!bc && !cc && !capc && !pgc && !ec) continue;
             auto* sc = e->GetComponent<SceneEditor::ScriptComponent>();
             auto* rbInfo = e->GetComponent<SceneEditor::Rigidbody2DComponent>();
             ColliderInfo ci;
@@ -722,7 +734,7 @@ private:
                 ci.maxX      = ci.cx + ex;
                 ci.minY      = ci.cy - ey;
                 ci.maxY      = ci.cy + ey;
-            } else {
+            } else if (pgc) {
                 // M7c28: convex polygon. Transform each local
                 // vertex into world space + cache it on the
                 // ColliderInfo so the n-gon SAT helpers don't
@@ -764,6 +776,53 @@ private:
                 ci.maxX  = maxX;
                 ci.minY  = minY;
                 ci.maxY  = maxY;
+            } else {
+                // M7c32: edge / chain collider. Same world-
+                // space vertex caching the Polygon path uses,
+                // plus a chainClosed flag the decomposer reads
+                // to decide whether to wrap the final segment.
+                if (ec->vertices.size() < 2) continue;
+                ci.kind         = ColliderKind::Edge;
+                ci.isTrigger    = ec->isTrigger;
+                ci.layer        = ec->layer;
+                ci.cx           = tr->position.x + ec->offset.x;
+                ci.cy           = tr->position.y + ec->offset.y;
+                ci.radius       = 0.0f;
+                ci.chainClosed  = ec->closed;
+                const float rotRad = tr->rotation
+                    * 3.14159265358979323846f / 180.0f;
+                ci.cosR      = std::cos(rotRad);
+                ci.sinR      = std::sin(rotRad);
+                const float sx = tr->scale.x;
+                const float sy = tr->scale.y;
+                ci.polygonVerts.reserve(ec->vertices.size());
+                float minX = std::numeric_limits<float>::infinity();
+                float maxX = -minX;
+                float minY = minX;
+                float maxY = -minY;
+                for (const auto& lv : ec->vertices) {
+                    const float lxs = lv.x * sx;
+                    const float lys = lv.y * sy;
+                    const float wx = ci.cx +
+                        ci.cosR * lxs - ci.sinR * lys;
+                    const float wy = ci.cy +
+                        ci.sinR * lxs + ci.cosR * lys;
+                    ci.polygonVerts.push_back({ wx, wy });
+                    minX = std::min(minX, wx);
+                    maxX = std::max(maxX, wx);
+                    minY = std::min(minY, wy);
+                    maxY = std::max(maxY, wy);
+                }
+                // Pad the bounding AABB by the segment
+                // thickness so a body brushing the edge
+                // still triggers the cheap top-level cull.
+                const float pad = 0.05f;
+                ci.halfX = (maxX - minX) * 0.5f;
+                ci.halfY = (maxY - minY) * 0.5f;
+                ci.minX  = minX - pad;
+                ci.maxX  = maxX + pad;
+                ci.minY  = minY - pad;
+                ci.maxY  = maxY + pad;
             }
             infos.push_back(std::move(ci));
         }
@@ -1429,8 +1488,61 @@ private:
             }
         };
 
+        // M7c32: decompose an Edge into one thin OBB per
+        // segment so the existing SatBoxBox + box-vs-circle
+        // paths can serve edge collision unchanged. Thickness
+        // = 0.02 world units; small enough that a Circle
+        // rolling on the edge sits within 0.01 of where the
+        // analytical segment would put it, but non-zero so
+        // SAT doesn't degenerate. Closed chains wrap the last
+        // segment back to vertex 0.
+        auto EdgeDecompose = [](const ColliderInfo& edge,
+                                std::vector<ColliderInfo>& out) {
+            out.clear();
+            const int n = int(edge.polygonVerts.size());
+            if (n < 2) return;
+            const int segCount = edge.chainClosed ? n : n - 1;
+            out.reserve(segCount);
+            const float thickness = 0.02f;
+            for (int i = 0; i < segCount; ++i) {
+                const int j = (i + 1) % n;
+                const float x0 = edge.polygonVerts[i][0];
+                const float y0 = edge.polygonVerts[i][1];
+                const float x1 = edge.polygonVerts[j][0];
+                const float y1 = edge.polygonVerts[j][1];
+                const float dx = x1 - x0;
+                const float dy = y1 - y0;
+                const float len = std::sqrt(dx * dx + dy * dy);
+                if (len < 1e-6f) continue;
+                ColliderInfo seg = edge;
+                seg.kind   = ColliderKind::Box;
+                seg.cx     = (x0 + x1) * 0.5f;
+                seg.cy     = (y0 + y1) * 0.5f;
+                seg.halfX  = len * 0.5f;
+                seg.halfY  = thickness;
+                // Local X axis aligned with the segment so the
+                // OBB's long side hugs the polyline.
+                seg.cosR   = dx / len;
+                seg.sinR   = dy / len;
+                const float ex =
+                    std::fabs(seg.cosR) * seg.halfX +
+                    std::fabs(seg.sinR) * seg.halfY;
+                const float ey =
+                    std::fabs(seg.sinR) * seg.halfX +
+                    std::fabs(seg.cosR) * seg.halfY;
+                seg.minX = seg.cx - ex;
+                seg.maxX = seg.cx + ex;
+                seg.minY = seg.cy - ey;
+                seg.maxY = seg.cy + ey;
+                seg.slope = ColliderInfo::SlopeShape::None;
+                seg.polygonVerts.clear();
+                seg.chainClosed = false;
+                out.push_back(std::move(seg));
+            }
+        };
+
         auto ComputeMTV = [&SatBoxBox, &SlopeCircleMtv, &SatTriBox,
-                           &CapsuleDecompose, &SatPolyPoly](
+                           &CapsuleDecompose, &EdgeDecompose, &SatPolyPoly](
                             const ColliderInfo& a,
                             const ColliderInfo& b,
                             float& dx, float& dy) {
@@ -1622,13 +1734,37 @@ private:
 
             const bool aCap = (a.kind == ColliderKind::Capsule);
             const bool bCap = (b.kind == ColliderKind::Capsule);
-            if (!aCap && !bCap) { testPair(a, b, dx, dy); return; }
-            ColliderInfo aArr[3], bArr[3];
+            const bool aEdge = (a.kind == ColliderKind::Edge);
+            const bool bEdge = (b.kind == ColliderKind::Edge);
+            if (!aCap && !bCap && !aEdge && !bEdge) {
+                testPair(a, b, dx, dy); return;
+            }
+            // M7c32 / M7c27: unified decomposition fan-out.
+            // Each side expands into a small list of sub-
+            // ColliderInfos; the MTV is the sub-pair with the
+            // largest push depth.
+            std::vector<ColliderInfo> aSubsCap(3), bSubsCap(3);
+            std::vector<ColliderInfo> aSubsEdge, bSubsEdge;
             const ColliderInfo* ap = &a;
+            int aN = 1;
+            if (aCap) {
+                CapsuleDecompose(a, aSubsCap.data());
+                ap = aSubsCap.data(); aN = 3;
+            } else if (aEdge) {
+                EdgeDecompose(a, aSubsEdge);
+                ap = aSubsEdge.data();
+                aN = int(aSubsEdge.size());
+            }
             const ColliderInfo* bp = &b;
-            int aN = 1, bN = 1;
-            if (aCap) { CapsuleDecompose(a, aArr); ap = aArr; aN = 3; }
-            if (bCap) { CapsuleDecompose(b, bArr); bp = bArr; bN = 3; }
+            int bN = 1;
+            if (bCap) {
+                CapsuleDecompose(b, bSubsCap.data());
+                bp = bSubsCap.data(); bN = 3;
+            } else if (bEdge) {
+                EdgeDecompose(b, bSubsEdge);
+                bp = bSubsEdge.data();
+                bN = int(bSubsEdge.size());
+            }
             float bestLenSq = -1.0f;
             float bestDx = 0.0f, bestDy = 0.0f;
             for (int i = 0; i < aN; ++i) {
@@ -1670,7 +1806,7 @@ private:
                    circ.radius * circ.radius;
         };
         auto Overlap = [&SatBoxBox, &SlopeCircleOverlap, &SatTriBox,
-                        &CapsuleDecompose, &SatPolyPoly]
+                        &CapsuleDecompose, &EdgeDecompose, &SatPolyPoly]
                        (const ColliderInfo& a, const ColliderInfo& b) {
             // Inner pair test -- handles every shape *except*
             // Capsule. M7c27 wraps it with a capsule decomp
@@ -1748,18 +1884,40 @@ private:
             return dx * dx + dy * dy <= circ.radius * circ.radius;
             };  // testPair
 
-            // M7c27 capsule decomp: any side that's a capsule
-            // expands into 3 sub-shapes (core OBB + 2 endcaps).
-            // Any sub-pair overlap means the capsule overlaps.
-            const bool aCap = (a.kind == ColliderKind::Capsule);
-            const bool bCap = (b.kind == ColliderKind::Capsule);
-            if (!aCap && !bCap) return testPair(a, b);
-            ColliderInfo aArr[3], bArr[3];
+            // M7c27 / M7c32 decomposition: Capsule expands to
+            // 3 sub-shapes; Edge expands to N segment-OBBs.
+            // Either side that needs decomposition routes
+            // through the fan-out loop; everything else falls
+            // through to testPair directly.
+            const bool aCap  = (a.kind == ColliderKind::Capsule);
+            const bool bCap  = (b.kind == ColliderKind::Capsule);
+            const bool aEdge = (a.kind == ColliderKind::Edge);
+            const bool bEdge = (b.kind == ColliderKind::Edge);
+            if (!aCap && !bCap && !aEdge && !bEdge) {
+                return testPair(a, b);
+            }
+            std::vector<ColliderInfo> aSubsCap(3), bSubsCap(3);
+            std::vector<ColliderInfo> aSubsEdge, bSubsEdge;
             const ColliderInfo* ap = &a;
+            int aN = 1;
+            if (aCap) {
+                CapsuleDecompose(a, aSubsCap.data());
+                ap = aSubsCap.data(); aN = 3;
+            } else if (aEdge) {
+                EdgeDecompose(a, aSubsEdge);
+                ap = aSubsEdge.data();
+                aN = int(aSubsEdge.size());
+            }
             const ColliderInfo* bp = &b;
-            int aN = 1, bN = 1;
-            if (aCap) { CapsuleDecompose(a, aArr); ap = aArr; aN = 3; }
-            if (bCap) { CapsuleDecompose(b, bArr); bp = bArr; bN = 3; }
+            int bN = 1;
+            if (bCap) {
+                CapsuleDecompose(b, bSubsCap.data());
+                bp = bSubsCap.data(); bN = 3;
+            } else if (bEdge) {
+                EdgeDecompose(b, bSubsEdge);
+                bp = bSubsEdge.data();
+                bN = int(bSubsEdge.size());
+            }
             for (int i = 0; i < aN; ++i) {
                 for (int j = 0; j < bN; ++j) {
                     if (testPair(ap[i], bp[j])) return true;
@@ -6481,6 +6639,8 @@ private:
             DrawCapsuleColliderEditor(entity, *cap);
         } else if (auto* pgc = dynamic_cast<SceneEditor::PolygonColliderComponent*>(comp)) {
             DrawPolygonColliderEditor(entity, *pgc);
+        } else if (auto* ec = dynamic_cast<SceneEditor::EdgeColliderComponent*>(comp)) {
+            DrawEdgeColliderEditor(entity, *ec);
         } else if (auto* rb = dynamic_cast<SceneEditor::Rigidbody2DComponent*>(comp)) {
             DrawRigidbody2DEditor(entity, *rb);
         } else {
@@ -6631,6 +6791,60 @@ private:
             cc.isTrigger = trig;
         }
         DrawColliderLayerCombo(cc.layer);
+    }
+
+    // Edge / chain (M7c32). One DragFloat2 per vertex + Add
+    // / Remove buttons + a closed-loop checkbox. Two vertices
+    // is the minimum; sub-2 inputs get a no-op synthesis.
+    void DrawEdgeColliderEditor(SceneEditor::Entity& /*entity*/,
+                                SceneEditor::EdgeColliderComponent& ec) {
+        ImGui::Text("Vertices (%d):", int(ec.vertices.size()));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+##addvert_edge")) {
+            UndoSnapshot();
+            if (ec.vertices.size() >= 1) {
+                const auto& a = ec.vertices.back();
+                ec.vertices.push_back({ a.x + 0.5f, a.y });
+            } else {
+                ec.vertices.push_back({ 0.0f, 0.0f });
+            }
+        }
+        int removeIdx = -1;
+        for (size_t i = 0; i < ec.vertices.size(); ++i) {
+            ImGui::PushID(int(i));
+            float v[2] = { ec.vertices[i].x, ec.vertices[i].y };
+            if (ImGui::DragFloat2("##ev", v, 0.05f, 0.0f, 0.0f,
+                                   "%.2f")) {
+                UndoSnapshot();
+                ec.vertices[i] = { v[0], v[1] };
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x") && ec.vertices.size() > 2) {
+                removeIdx = int(i);
+            }
+            ImGui::PopID();
+        }
+        if (removeIdx >= 0) {
+            UndoSnapshot();
+            ec.vertices.erase(ec.vertices.begin() + removeIdx);
+        }
+        bool closed = ec.closed;
+        if (ImGui::Checkbox("Closed (loop)", &closed)) {
+            UndoSnapshot();
+            ec.closed = closed;
+        }
+        float off[2] = { ec.offset.x, ec.offset.y };
+        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
+                               "%.2f")) {
+            UndoSnapshot();
+            ec.offset = { off[0], off[1] };
+        }
+        bool trig = ec.isTrigger;
+        if (ImGui::Checkbox("Is Trigger", &trig)) {
+            UndoSnapshot();
+            ec.isTrigger = trig;
+        }
+        DrawColliderLayerCombo(ec.layer);
     }
 
     // Convex polygon (M7c28). One DragFloat2 per vertex +
@@ -8486,6 +8700,60 @@ private:
             dl->AddCircle(cs, pixelR, col, 32, thickness);
             dl->AddCircleFilled(cs, 2.5f, col);
         }
+        // M7c32: EdgeCollider gizmos. Open chain renders as
+        // a polyline; closed chain adds the wrap segment.
+        for (SceneEditor::EntityId id : ids) {
+            const auto* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            const auto* tr =
+                e->GetComponent<SceneEditor::TransformComponent>();
+            const auto* ec =
+                e->GetComponent<SceneEditor::EdgeColliderComponent>();
+            if (!tr || !ec) continue;
+            const int n = int(ec->vertices.size());
+            if (n < 2) continue;
+            const float rotRad = tr->rotation
+                * 3.14159265358979323846f / 180.0f;
+            const float cosR = std::cos(rotRad);
+            const float sinR = std::sin(rotRad);
+            const float ox = tr->position.x + ec->offset.x;
+            const float oy = tr->position.y + ec->offset.y;
+            const float sx = tr->scale.x;
+            const float sy = tr->scale.y;
+            bool overlapping = false;
+            for (const auto& key : m_collisionPairs) {
+                if (key.first == id || key.second == id) {
+                    overlapping = true; break;
+                }
+            }
+            const bool sel = (id == m_selection);
+            const ImU32 col = overlapping
+                ? (sel ? IM_COL32(255, 220, 80, 255)
+                       : IM_COL32(255, 200, 60, 200))
+                : (sel ? IM_COL32(120, 255, 140, 255)
+                       : IM_COL32(80,  220, 100, 180));
+            const float thickness = sel ? 2.5f : 1.5f;
+            std::vector<ImVec2> screen;
+            screen.reserve(n + 1);
+            for (int i = 0; i < n; ++i) {
+                const float lvx = ec->vertices[i].x * sx;
+                const float lvy = ec->vertices[i].y * sy;
+                const float wx = ox + cosR * lvx - sinR * lvy;
+                const float wy = oy + sinR * lvx + cosR * lvy;
+                screen.push_back(WorldToScreen(
+                    ImVec2(wx, wy), panelMin, panelSize));
+            }
+            const ImDrawFlags flags = ec->closed
+                ? ImDrawFlags_Closed : ImDrawFlags_None;
+            dl->AddPolyline(screen.data(), n, col,
+                             flags, thickness);
+            // Vertex dots so the user can see where each
+            // editable handle sits.
+            for (int i = 0; i < n; ++i) {
+                dl->AddCircleFilled(screen[i], 3.0f, col);
+            }
+        }
+
         // M7c28: PolygonCollider gizmos. Trace the convex
         // outline as a closed polyline through world->screen.
         for (SceneEditor::EntityId id : ids) {
