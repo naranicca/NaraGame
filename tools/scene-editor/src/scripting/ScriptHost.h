@@ -69,6 +69,9 @@ public:
     void CallOnTriggerEnter(const std::string& entityName,
                             const std::string& otherName,
                             const std::string& entryFunction = "");
+    void CallOnTriggerStay (const std::string& entityName,
+                            const std::string& otherName,
+                            const std::string& entryFunction = "");
     void CallOnTriggerExit (const std::string& entityName,
                             const std::string& otherName,
                             const std::string& entryFunction = "");

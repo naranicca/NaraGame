@@ -555,7 +555,9 @@ private:
                         : std::pair<SceneEditor::EntityId,
                                     SceneEditor::EntityId>{b.id, a.id};
                 nowPairs.insert(key);
-                if (m_collisionPairs.find(key) == m_collisionPairs.end()) {
+                const bool wasContact =
+                    m_collisionPairs.find(key) != m_collisionPairs.end();
+                if (!wasContact) {
                     // New contact -- fire Enter on both sides.
                     if (a.hasScript) {
                         m_scriptHost.CallOnTriggerEnter(
@@ -563,6 +565,19 @@ private:
                     }
                     if (b.hasScript) {
                         m_scriptHost.CallOnTriggerEnter(
+                            b.name, a.name, b.entryFunction);
+                    }
+                } else {
+                    // Continuing contact -- fire Stay so scripts
+                    // can run per-frame logic (damage tick,
+                    // proximity sample) without rebuilding edge
+                    // tracking themselves.
+                    if (a.hasScript) {
+                        m_scriptHost.CallOnTriggerStay(
+                            a.name, b.name, a.entryFunction);
+                    }
+                    if (b.hasScript) {
+                        m_scriptHost.CallOnTriggerStay(
                             b.name, a.name, b.entryFunction);
                     }
                 }
