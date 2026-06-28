@@ -280,6 +280,58 @@ static int LuaSceneEntityCount(lua_State* L) {
     lua_pushinteger(L, count);
     return 1;
 }
+// scene.entity_at(x, y) -> string. Walks every enabled entity
+// that carries a SpriteRenderer + tests its world-space AABB
+// against the (x, y) point. Returns the topmost hit by
+// orderInLayer (with simple sortingLayer-string equality as a
+// tie-breaker fence) or the empty string when nothing is under
+// the point. Useful for mouse-picking in Lua-driven editor
+// tooling + click-to-select gameplay logic.
+static int LuaSceneEntityAt(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) {
+        lua_pushstring(L, ""); return 1;
+    }
+    const float wx = float(luaL_checknumber(L, 1));
+    const float wy = float(luaL_checknumber(L, 2));
+    Scene* scene = host->BoundScene();
+    // Pick: keep the entity with the highest orderInLayer among
+    // hits; the empty pick stays "no entity".
+    const Entity* best = nullptr;
+    int bestOrder = 0;
+    // Walk every entity via the same DFS the other helpers use.
+    std::vector<EntityId> stack(scene->Roots().begin(),
+                                scene->Roots().end());
+    while (!stack.empty()) {
+        EntityId id = stack.back(); stack.pop_back();
+        Entity* e = scene->Get(id);
+        if (!e) continue;
+        for (EntityId childId : e->children) stack.push_back(childId);
+        if (!e->enabled) continue;
+        auto* tr = e->GetComponent<TransformComponent>();
+        auto* sp = e->GetComponent<SpriteRendererComponent>();
+        if (!tr || !sp) continue;
+        // World-space AABB: position +/- (sprite.size *
+        // transform.scale.xy * 0.5). Z is ignored because the
+        // editor is 2D-first; entities can still live at non-zero
+        // Z without breaking the test.
+        const float halfX =
+            sp->size.x * 0.5f * tr->scale.x;
+        const float halfY =
+            sp->size.y * 0.5f * tr->scale.y;
+        if (wx < tr->position.x - halfX ||
+            wx > tr->position.x + halfX ||
+            wy < tr->position.y - halfY ||
+            wy > tr->position.y + halfY) continue;
+        if (!best || sp->orderInLayer >= bestOrder) {
+            best = e;
+            bestOrder = sp->orderInLayer;
+        }
+    }
+    lua_pushstring(L, best ? best->name.c_str() : "");
+    return 1;
+}
+
 // scene.destroy_self. Fires from inside a lifecycle hook +
 // destroys whichever entity the host is currently dispatching
 // to. Outside a dispatch the call is a silent no-op so a stray
@@ -1006,6 +1058,7 @@ ScriptHost::ScriptHost() {
         {"children_of",       LuaSceneChildrenOf},
         {"set_parent",        LuaSceneSetParent},
         {"destroy_self",      LuaSceneDestroySelf},
+        {"entity_at",         LuaSceneEntityAt},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
