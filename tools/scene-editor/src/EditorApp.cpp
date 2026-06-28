@@ -18,6 +18,7 @@
 #include "scene/CircleColliderComponent.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
+#include "scene/Rigidbody2DComponent.h"
 #include "scene/Scene.h"
 #include "scene/ScriptComponent.h"
 #include "scene/SpriteRendererComponent.h"
@@ -286,8 +287,9 @@ public:
         DrawMainMenuBar();
         HandleGlobalShortcuts();
         TickAssetFileWatcher(ImGui::GetIO().DeltaTime);
-        TickScripts (ImGui::GetIO().DeltaTime);
-        TickColliders(ImGui::GetIO().DeltaTime);
+        TickScripts    (ImGui::GetIO().DeltaTime);
+        TickRigidbodies(ImGui::GetIO().DeltaTime);
+        TickColliders  (ImGui::GetIO().DeltaTime);
         TickAnimators(ImGui::GetIO().DeltaTime);
         DrawHierarchyPanel();
         DrawInspectorPanel();
@@ -503,6 +505,30 @@ private:
     // pairs and OnTriggerExit on ones that left contact. Both
     // sides of the pair receive the dispatch with the other
     // entity name as the second argument.
+    // Semi-implicit Euler integrator for every entity that
+    // carries a Rigidbody2D + Transform. Runs before
+    // TickColliders so the M7c5 push-out path sees the
+    // newly-stepped position before resolving overlaps.
+    void TickRigidbodies(float dt) {
+        if (!m_animPlaying) return;
+        std::vector<SceneEditor::EntityId> ids;
+        CollectAllEntities(m_scene.Roots(), ids);
+        for (SceneEditor::EntityId id : ids) {
+            SceneEditor::Entity* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* tr = e->GetComponent<SceneEditor::TransformComponent>();
+            auto* rb = e->GetComponent<SceneEditor::Rigidbody2DComponent>();
+            if (!tr || !rb) continue;
+            rb->velocity.x += rb->gravity.x * dt;
+            rb->velocity.y += rb->gravity.y * dt;
+            const float damping = std::max(0.0f, 1.0f - rb->drag * dt);
+            rb->velocity.x *= damping;
+            rb->velocity.y *= damping;
+            tr->position.x += rb->velocity.x * dt;
+            tr->position.y += rb->velocity.y * dt;
+        }
+    }
+
     void TickColliders(float /*dt*/) {
         if (!m_animPlaying) return;
         enum class ColliderKind { Box, Circle };
@@ -710,13 +736,61 @@ private:
                     auto* tbC = eb
                         ? eb->GetComponent<SceneEditor::TransformComponent>()
                         : nullptr;
-                    if (taC) {
-                        taC->position.x += dx * 0.5f;
-                        taC->position.y += dy * 0.5f;
+                    // M7c7: an entity without a Rigidbody2D is
+                    // treated as static -- it neither integrates
+                    // velocity nor accepts collision push-out.
+                    // The dynamic side absorbs the full MTV; if
+                    // both sides are dynamic the MTV splits
+                    // half-half as before. Both static = no push,
+                    // events still fire.
+                    const bool aDyn = ea &&
+                        ea->GetComponent<SceneEditor::Rigidbody2DComponent>();
+                    const bool bDyn = eb &&
+                        eb->GetComponent<SceneEditor::Rigidbody2DComponent>();
+                    float aShare = 0.0f, bShare = 0.0f;
+                    if (aDyn && bDyn) { aShare = 0.5f; bShare = 0.5f; }
+                    else if (aDyn)    { aShare = 1.0f;                 }
+                    else if (bDyn)    {                 bShare = 1.0f; }
+                    if (taC && aShare > 0.0f) {
+                        taC->position.x += dx * aShare;
+                        taC->position.y += dy * aShare;
+                        // Zero the velocity component along the
+                        // MTV so the body doesn't keep pushing
+                        // into the wall every frame. Tangent
+                        // velocity (e.g. horizontal slide along
+                        // a floor) survives.
+                        if (auto* rb = ea
+                                ->GetComponent<SceneEditor::Rigidbody2DComponent>()) {
+                            const float mag = std::sqrt(dx * dx + dy * dy);
+                            if (mag > 1e-6f) {
+                                const float nx = dx / mag;
+                                const float ny = dy / mag;
+                                const float vn = rb->velocity.x * nx +
+                                                 rb->velocity.y * ny;
+                                if (vn < 0.0f) {
+                                    rb->velocity.x -= vn * nx;
+                                    rb->velocity.y -= vn * ny;
+                                }
+                            }
+                        }
                     }
-                    if (tbC) {
-                        tbC->position.x -= dx * 0.5f;
-                        tbC->position.y -= dy * 0.5f;
+                    if (tbC && bShare > 0.0f) {
+                        tbC->position.x -= dx * bShare;
+                        tbC->position.y -= dy * bShare;
+                        if (auto* rb = eb
+                                ->GetComponent<SceneEditor::Rigidbody2DComponent>()) {
+                            const float mag = std::sqrt(dx * dx + dy * dy);
+                            if (mag > 1e-6f) {
+                                const float nx = -dx / mag;
+                                const float ny = -dy / mag;
+                                const float vn = rb->velocity.x * nx +
+                                                 rb->velocity.y * ny;
+                                if (vn < 0.0f) {
+                                    rb->velocity.x -= vn * nx;
+                                    rb->velocity.y -= vn * ny;
+                                }
+                            }
+                        }
                     }
                     if (!wasContact) {
                         if (a.hasScript) m_scriptHost.CallOnCollisionEnter(
@@ -5098,8 +5172,38 @@ private:
             DrawBoxColliderEditor(entity, *bc);
         } else if (auto* cc = dynamic_cast<SceneEditor::CircleColliderComponent*>(comp)) {
             DrawCircleColliderEditor(entity, *cc);
+        } else if (auto* rb = dynamic_cast<SceneEditor::Rigidbody2DComponent*>(comp)) {
+            DrawRigidbody2DEditor(entity, *rb);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
+        }
+    }
+
+    // Rigidbody2D inspector. velocity + gravity DragFloat2s,
+    // drag DragFloat. All in world units / second.
+    void DrawRigidbody2DEditor(SceneEditor::Entity& /*entity*/,
+                                SceneEditor::Rigidbody2DComponent& rb) {
+        float v[2] = { rb.velocity.x, rb.velocity.y };
+        if (ImGui::DragFloat2("Velocity", v, 0.05f, 0.0f, 0.0f,
+                               "%.2f")) {
+            UndoSnapshot();
+            rb.velocity = { v[0], v[1] };
+        }
+        float g[2] = { rb.gravity.x, rb.gravity.y };
+        if (ImGui::DragFloat2("Gravity", g, 0.05f, 0.0f, 0.0f,
+                               "%.2f")) {
+            UndoSnapshot();
+            rb.gravity = { g[0], g[1] };
+        }
+        if (ImGui::DragFloat("Drag", &rb.drag, 0.01f, 0.0f, 0.0f,
+                              "%.2f")) {
+            UndoSnapshot();
+            if (rb.drag < 0.0f) rb.drag = 0.0f;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Per-frame damping. velocity *= max(0, 1 - drag * dt)\n"
+                "0 = none; ~5 stops a 1 u/s body in ~0.2 s.");
         }
     }
 

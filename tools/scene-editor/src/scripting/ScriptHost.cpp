@@ -4,6 +4,7 @@
 #include "../scene/BoxColliderComponent.h"
 #include "../scene/CircleColliderComponent.h"
 #include "../scene/Component.h"
+#include "../scene/Rigidbody2DComponent.h"
 #include "../scene/Entity.h"
 #include "../scene/Scene.h"
 #include "../scene/ScriptComponent.h"
@@ -79,6 +80,14 @@ static TransformComponent* FindTransform(ScriptHost* host,
     Entity* e = host->BoundScene()->FindByName(entityName);
     if (!e) return nullptr;
     return e->GetComponent<TransformComponent>();
+}
+
+static Rigidbody2DComponent* FindRigidbody(ScriptHost* host,
+                                           const char* entityName) {
+    if (!host || !host->BoundScene() || !entityName) return nullptr;
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) return nullptr;
+    return e->GetComponent<Rigidbody2DComponent>();
 }
 
 // Map an editor-friendly key name to ImGui's enum. Supports the
@@ -977,6 +986,60 @@ static int LuaTransformTranslate(lua_State* L) {
     return 0;
 }
 
+// rigidbody.set_velocity / get_velocity / add_force /
+// set_gravity / get_gravity / set_drag / get_drag. All vector
+// values are 2D world units / second. add_force is an impulse
+// (instantaneously bumps velocity); ongoing forces should set
+// gravity instead. Missing Rigidbody2D component is a silent
+// no-op; getters return zero/empty defaults.
+static int LuaRigidbodySetVelocity(lua_State* L) {
+    auto* r = FindRigidbody(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!r) return 0;
+    r->velocity.x = float(luaL_checknumber(L, 2));
+    r->velocity.y = float(luaL_checknumber(L, 3));
+    return 0;
+}
+static int LuaRigidbodyGetVelocity(lua_State* L) {
+    auto* r = FindRigidbody(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!r) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
+    lua_pushnumber(L, r->velocity.x);
+    lua_pushnumber(L, r->velocity.y);
+    return 2;
+}
+static int LuaRigidbodyAddForce(lua_State* L) {
+    auto* r = FindRigidbody(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!r) return 0;
+    r->velocity.x += float(luaL_checknumber(L, 2));
+    r->velocity.y += float(luaL_checknumber(L, 3));
+    return 0;
+}
+static int LuaRigidbodySetGravity(lua_State* L) {
+    auto* r = FindRigidbody(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!r) return 0;
+    r->gravity.x = float(luaL_checknumber(L, 2));
+    r->gravity.y = float(luaL_checknumber(L, 3));
+    return 0;
+}
+static int LuaRigidbodyGetGravity(lua_State* L) {
+    auto* r = FindRigidbody(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!r) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
+    lua_pushnumber(L, r->gravity.x);
+    lua_pushnumber(L, r->gravity.y);
+    return 2;
+}
+static int LuaRigidbodySetDrag(lua_State* L) {
+    auto* r = FindRigidbody(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!r) return 0;
+    r->drag = float(luaL_checknumber(L, 2));
+    if (r->drag < 0.0f) r->drag = 0.0f;
+    return 0;
+}
+static int LuaRigidbodyGetDrag(lua_State* L) {
+    auto* r = FindRigidbody(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    lua_pushnumber(L, r ? r->drag : 0.0);
+    return 1;
+}
+
 // animator.set_bool / get_bool / set_float / get_float / set_int /
 // get_int / set_trigger / set_vec2 / get_vec2 / set_color /
 // get_color / set_string / get_string. Setters return nothing;
@@ -1229,6 +1292,20 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kTransformApi, 1);
     lua_setglobal(L, "transform");
+    static const luaL_Reg kRigidbodyApi[] = {
+        {"set_velocity", LuaRigidbodySetVelocity},
+        {"get_velocity", LuaRigidbodyGetVelocity},
+        {"add_force",    LuaRigidbodyAddForce},
+        {"set_gravity",  LuaRigidbodySetGravity},
+        {"get_gravity",  LuaRigidbodyGetGravity},
+        {"set_drag",     LuaRigidbodySetDrag},
+        {"get_drag",     LuaRigidbodyGetDrag},
+        {nullptr,        nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kRigidbodyApi, 1);
+    lua_setglobal(L, "rigidbody");
     static const luaL_Reg kSpriteApi[] = {
         {"set_color",      LuaSpriteSetColor},
         {"get_color",      LuaSpriteGetColor},

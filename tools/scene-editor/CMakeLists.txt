@@ -49,6 +49,7 @@ add_executable(scene-editor
     src/scene/BoxColliderComponent.cpp
     src/scene/CircleColliderComponent.cpp
     src/scene/Component.cpp
+    src/scene/Rigidbody2DComponent.cpp
     src/scene/Scene.cpp
     src/scene/ScriptComponent.cpp
     src/scene/SpriteRendererComponent.cpp
