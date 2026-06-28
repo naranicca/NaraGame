@@ -7384,10 +7384,73 @@ private:
         ImGui::Separator();
         if (entry->typeName == "Texture") {
             DrawTextureImportEditor(*entry);
+        } else if (entry->typeName == "Audio") {
+            DrawAudioImportEditor(*entry);
         } else {
             ImGui::TextDisabled("(no import settings editor for %s yet)",
                                 entry->typeName.c_str());
         }
+    }
+
+    // M8c6 audio asset preview. Lets the user audition a
+    // sound effect or music track from the Inspector + tune
+    // a default volume the project layer can wire to the
+    // play call. The preview routes through Audio::Play /
+    // Audio::PlayMusic + Audio::Stop, so what the user
+    // hears here is what runtime scripts get.
+    void DrawAudioImportEditor(SceneEditor::AssetEntry& entry) {
+        // Cache the editor-side preview volume per asset
+        // GUID so opening another sound + coming back keeps
+        // the previous gain. The map lives as a member
+        // (m_audioPreviewVolume) so it survives Inspector
+        // redraws without leaking across project switches
+        // (the asset DB swap clears all GUIDs we care about
+        // when the user opens another project).
+        float& vol = m_audioPreviewVolume[entry.guid];
+        if (vol <= 0.0f) vol = 1.0f;
+        ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f, "%.2f");
+        // Build the absolute path the same way the Lua
+        // binding does so a Project-pane preview matches
+        // a script-driven play.
+        const std::string& root = m_assetDb.AssetsRoot();
+        std::string abs = root;
+        if (!abs.empty() &&
+            abs.back() != '/' && abs.back() != '\\') {
+            abs.push_back('/');
+        }
+        abs.append(entry.relPath);
+        if (ImGui::Button("Play")) {
+            SceneEditor::Audio::Play(abs, vol);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Play (Music)")) {
+            SceneEditor::Audio::PlayMusic(abs, vol, false);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Stop")) {
+            SceneEditor::Audio::Stop();
+            SceneEditor::Audio::StopMusic();
+        }
+        // Honest hint about which decoder will run.
+        const std::string& rel = entry.relPath;
+        const auto dotPos = rel.find_last_of('.');
+        std::string ext = (dotPos != std::string::npos)
+            ? rel.substr(dotPos) : std::string{};
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                        [](unsigned char c) {
+                            return char(std::tolower(c));
+                        });
+        const char* decoder = "?";
+        if      (ext == ".wav") decoder = "PCM (RIFF)";
+        else if (ext == ".ogg") decoder = "stb_vorbis";
+        else if (ext == ".mp3") decoder = "minimp3";
+        else                     decoder = "unsupported";
+        ImGui::TextDisabled("Decoder: %s", decoder);
+        ImGui::TextDisabled(
+            "Tip: drag this asset onto an audio.play call in "
+            "Lua to use its GUID:");
+        ImGui::TextDisabled("  audio.play(\"%s\")",
+                             entry.guid.ToString().c_str());
     }
 
     void DrawTextureImportEditor(SceneEditor::AssetEntry& entry) {
@@ -10032,6 +10095,12 @@ private:
 
     SceneEditor::AssetDatabase m_assetDb;
     SceneEditor::AssetGuid     m_selectedAsset;
+    // M8c6 per-asset audition gain. Keyed on AssetGuid so
+    // the slider state survives Inspector redraws + lets
+    // the user A/B test two clips at different volumes by
+    // bouncing between them.
+    std::unordered_map<SceneEditor::AssetGuid, float>
+                               m_audioPreviewVolume;
 
     ViewportCamera             m_viewCam;
 
