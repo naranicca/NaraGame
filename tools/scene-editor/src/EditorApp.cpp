@@ -7512,32 +7512,64 @@ private:
         const float worldRight  = (1.0f - pivot.x) * wWorld;
         const float worldBottom = -pivot.y        * hWorld;
         const float worldTop    = (1.0f - pivot.y) * hWorld;
-        // Convert to screen pixels (Y-up world -> Y-down screen so
-        // worldTop maps to the smaller screen Y).
-        const ImVec2 a{c.x + worldLeft  * m_viewCam.zoom,
-                       c.y - worldTop   * m_viewCam.zoom};
-        const ImVec2 b{c.x + worldRight * m_viewCam.zoom,
-                       c.y - worldBottom* m_viewCam.zoom};
 
         // UV flip swaps the resolved (u0, v0) / (u1, v1) endpoints in
         // place, so sub-sprite + flip combinations stay inside the
         // intended sheet cell.
         if (spr.flipX) std::swap(u0, u1);
         if (spr.flipY) std::swap(v0, v1);
-        const ImVec2 uv0{u0, v0};
-        const ImVec2 uv1{u1, v1};
+
+        // M7c12: respect the Transform's rotation (degrees,
+        // z-axis CCW). Each corner is rotated around the
+        // entity's transform origin in world space before the
+        // Y-flip + zoom mapping into screen pixels.
+        const auto* trans = e.GetComponent<SceneEditor::TransformComponent>();
+        const float rotDeg = trans ? trans->rotation : 0.0f;
+        const float rotRad = rotDeg * 3.14159265358979323846f / 180.0f;
+        const float cosR = std::cos(rotRad);
+        const float sinR = std::sin(rotRad);
+        const float z = m_viewCam.zoom;
+        auto Project = [&](float wx, float wy) {
+            const float rx = cosR * wx - sinR * wy;
+            const float ry = sinR * wx + cosR * wy;
+            return ImVec2{c.x + rx * z, c.y - ry * z};
+        };
+        // Four corners in CW order starting from top-left of
+        // the sprite rect (world top = larger Y, which maps to
+        // smaller screen Y after the Project Y-flip).
+        const ImVec2 pTL = Project(worldLeft,  worldTop);
+        const ImVec2 pTR = Project(worldRight, worldTop);
+        const ImVec2 pBR = Project(worldRight, worldBottom);
+        const ImVec2 pBL = Project(worldLeft,  worldBottom);
+
+        const ImVec2 uvTL{u0, v0};
+        const ImVec2 uvTR{u1, v0};
+        const ImVec2 uvBR{u1, v1};
+        const ImVec2 uvBL{u0, v1};
         const ImU32 tint = ColorToImU32(spr.color);
         const ImTextureID texId =
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                 tex->GetNativeView()));
-        dl->AddImage(texId, a, b, uv0, uv1, tint);
+        dl->AddImageQuad(texId, pTL, pTR, pBR, pBL,
+                         uvTL, uvTR, uvBR, uvBL, tint);
 
-        // Selection outline + label on top.
+        // Selection outline traces the rotated quad.
         if (selected) {
-            dl->AddRect(a, b, IM_COL32(255, 220, 60, 255), 0.0f, 0, 2.0f);
+            const ImVec2 pts[5] = { pTL, pTR, pBR, pBL, pTL };
+            dl->AddPolyline(pts, 5,
+                            IM_COL32(255, 220, 60, 255),
+                            ImDrawFlags_None, 2.0f);
         }
-        const float ts = ImGui::GetFontSize();
-        dl->AddText(ImVec2{a.x, b.y + 2.0f},
+        // Label sits below the (unrotated) AABB of the
+        // four corners so it stays readable + clear of the
+        // sprite regardless of rotation.
+        float minY = pTL.y, maxY = pTL.y, minX = pTL.x;
+        for (const ImVec2& p : {pTR, pBR, pBL}) {
+            minY = std::min(minY, p.y);
+            maxY = std::max(maxY, p.y);
+            minX = std::min(minX, p.x);
+        }
+        dl->AddText(ImVec2{minX, maxY + 2.0f},
                     IM_COL32(220, 220, 220, 255),
                     e.name.c_str());
     }
