@@ -62,6 +62,33 @@ add_executable(scene-editor
     src/scripting/ScriptHost.cpp)
 target_include_directories(scene-editor PRIVATE src)
 target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui xaudio2)
+
+# ---------------------------------------------------------------------------
+# Vendored audio decoders (M8c3). third_party/audio/ ships in a similar
+# vendor-pattern to third_party/lua: the build flips a feature flag when the
+# header is present, otherwise the corresponding extension is rejected at
+# runtime with `false`. See third_party/audio/README.md for the download URLs.
+# ---------------------------------------------------------------------------
+set(AUDIO_DECODERS_DIR ${CMAKE_SOURCE_DIR}/third_party/audio)
+if(EXISTS ${AUDIO_DECODERS_DIR}/stb_vorbis.c)
+    enable_language(C)
+    add_library(stb_vorbis STATIC ${AUDIO_DECODERS_DIR}/stb_vorbis.c)
+    target_include_directories(stb_vorbis PUBLIC ${AUDIO_DECODERS_DIR})
+    set_target_properties(stb_vorbis PROPERTIES FOLDER "third_party")
+    if(MSVC)
+        target_compile_definitions(stb_vorbis PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+        target_compile_options(stb_vorbis PRIVATE /W3)
+    endif()
+    target_compile_definitions(scene-editor PRIVATE NARAGAME_HAS_STB_VORBIS=1)
+    target_link_libraries(scene-editor PRIVATE stb_vorbis)
+    message(STATUS "scene-editor: stb_vorbis found -- OGG playback enabled.")
+endif()
+if(EXISTS ${AUDIO_DECODERS_DIR}/minimp3.h
+   AND EXISTS ${AUDIO_DECODERS_DIR}/minimp3_ex.h)
+    target_compile_definitions(scene-editor PRIVATE NARAGAME_HAS_MINIMP3=1)
+    target_include_directories(scene-editor PRIVATE ${AUDIO_DECODERS_DIR})
+    message(STATUS "scene-editor: minimp3 found -- MP3 playback enabled.")
+endif()
 set_target_properties(scene-editor PROPERTIES FOLDER "tools")
 
 # ---------------------------------------------------------------------------
