@@ -15,6 +15,7 @@
 #include "project/Project.h"
 #include "scene/AnimatorComponent.h"
 #include "scene/BoxColliderComponent.h"
+#include "scene/CircleColliderComponent.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
 #include "scene/Scene.h"
@@ -504,12 +505,21 @@ private:
     // entity name as the second argument.
     void TickColliders(float /*dt*/) {
         if (!m_animPlaying) return;
+        enum class ColliderKind { Box, Circle };
         struct ColliderInfo {
             SceneEditor::EntityId   id;
             std::string             name;
             std::string             entryFunction;
             bool                    hasScript;
+            ColliderKind            kind;
+            // Box: minX/maxX/minY/maxY are the world AABB.
+            // Circle: cx/cy is the world centre, radius is in
+            // world units; minX/maxX/minY/maxY hold the circle's
+            // bounding AABB so the cheap AABB-vs-AABB cull at
+            // the top of the pair loop still works for circles.
+            float                   cx, cy;
             float                   minX, maxX, minY, maxY;
+            float                   radius;
         };
         std::vector<ColliderInfo> infos;
         infos.reserve(32);
@@ -519,24 +529,69 @@ private:
             SceneEditor::Entity* e = m_scene.Get(id);
             if (!e || !e->enabled) continue;
             auto* tr = e->GetComponent<SceneEditor::TransformComponent>();
+            if (!tr) continue;
             auto* bc = e->GetComponent<SceneEditor::BoxColliderComponent>();
-            if (!tr || !bc) continue;
-            const float halfX = bc->size.x * 0.5f * tr->scale.x;
-            const float halfY = bc->size.y * 0.5f * tr->scale.y;
-            const float cx = tr->position.x + bc->offset.x;
-            const float cy = tr->position.y + bc->offset.y;
-            ColliderInfo ci;
-            ci.id = id;
-            ci.name = e->name;
+            auto* cc = e->GetComponent<SceneEditor::CircleColliderComponent>();
+            if (!bc && !cc) continue;
             auto* sc = e->GetComponent<SceneEditor::ScriptComponent>();
-            ci.hasScript = (sc != nullptr);
+            ColliderInfo ci;
+            ci.id            = id;
+            ci.name          = e->name;
+            ci.hasScript     = (sc != nullptr);
             ci.entryFunction = sc ? sc->entryFunction : std::string{};
-            ci.minX = cx - halfX;
-            ci.maxX = cx + halfX;
-            ci.minY = cy - halfY;
-            ci.maxY = cy + halfY;
+            if (bc) {
+                const float halfX = bc->size.x * 0.5f * tr->scale.x;
+                const float halfY = bc->size.y * 0.5f * tr->scale.y;
+                ci.kind   = ColliderKind::Box;
+                ci.cx     = tr->position.x + bc->offset.x;
+                ci.cy     = tr->position.y + bc->offset.y;
+                ci.radius = 0.0f;
+                ci.minX   = ci.cx - halfX;
+                ci.maxX   = ci.cx + halfX;
+                ci.minY   = ci.cy - halfY;
+                ci.maxY   = ci.cy + halfY;
+            } else {
+                const float scaleAvg =
+                    (tr->scale.x + tr->scale.y) * 0.5f;
+                ci.kind   = ColliderKind::Circle;
+                ci.cx     = tr->position.x + cc->offset.x;
+                ci.cy     = tr->position.y + cc->offset.y;
+                ci.radius = cc->radius * scaleAvg;
+                ci.minX   = ci.cx - ci.radius;
+                ci.maxX   = ci.cx + ci.radius;
+                ci.minY   = ci.cy - ci.radius;
+                ci.maxY   = ci.cy + ci.radius;
+            }
             infos.push_back(std::move(ci));
         }
+        // Per-shape overlap. Box-vs-box uses the same AABB check
+        // M7c1 shipped; circle-vs-circle compares centre
+        // distance to summed radii; circle-vs-box uses the
+        // standard "nearest point on box clamp" trick.
+        auto Overlap = [](const ColliderInfo& a, const ColliderInfo& b) {
+            if (a.kind == ColliderKind::Box &&
+                b.kind == ColliderKind::Box) {
+                return !(a.maxX < b.minX || b.maxX < a.minX ||
+                         a.maxY < b.minY || b.maxY < a.minY);
+            }
+            if (a.kind == ColliderKind::Circle &&
+                b.kind == ColliderKind::Circle) {
+                const float dx = a.cx - b.cx;
+                const float dy = a.cy - b.cy;
+                const float r  = a.radius + b.radius;
+                return dx * dx + dy * dy <= r * r;
+            }
+            // One box, one circle. Pick whichever is the box.
+            const ColliderInfo& box =
+                a.kind == ColliderKind::Box ? a : b;
+            const ColliderInfo& circ =
+                a.kind == ColliderKind::Box ? b : a;
+            const float cx2 = std::clamp(circ.cx, box.minX, box.maxX);
+            const float cy2 = std::clamp(circ.cy, box.minY, box.maxY);
+            const float dx  = circ.cx - cx2;
+            const float dy  = circ.cy - cy2;
+            return dx * dx + dy * dy <= circ.radius * circ.radius;
+        };
         // O(n^2) pair check. Fine for editor-scale entity counts;
         // a spatial grid lands when a real game pushes the count
         // past where this becomes hot.
@@ -546,8 +601,12 @@ private:
             for (size_t j = i + 1; j < infos.size(); ++j) {
                 const auto& a = infos[i];
                 const auto& b = infos[j];
+                // Bounding AABB cull first so the per-shape test
+                // only runs on candidates that already share
+                // screen space.
                 if (a.maxX < b.minX || b.maxX < a.minX ||
                     a.maxY < b.minY || b.maxY < a.minY) continue;
+                if (!Overlap(a, b)) continue;
                 const auto key =
                     a.id < b.id
                         ? std::pair<SceneEditor::EntityId,
@@ -4893,6 +4952,8 @@ private:
             DrawScriptEditor(entity, *sc);
         } else if (auto* bc = dynamic_cast<SceneEditor::BoxColliderComponent*>(comp)) {
             DrawBoxColliderEditor(entity, *bc);
+        } else if (auto* cc = dynamic_cast<SceneEditor::CircleColliderComponent*>(comp)) {
+            DrawCircleColliderEditor(entity, *cc);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
         }
@@ -4926,6 +4987,28 @@ private:
                 "When set, overlap fires OnTriggerEnter / Exit\n"
                 "without a physical response. Solid collisions\n"
                 "(non-trigger) ship in a follow-up commit.");
+        }
+    }
+
+    // Same shape as DrawBoxColliderEditor but with a single
+    // radius DragFloat instead of a Vec2 size.
+    void DrawCircleColliderEditor(SceneEditor::Entity& /*entity*/,
+                                  SceneEditor::CircleColliderComponent& cc) {
+        if (ImGui::DragFloat("Radius", &cc.radius, 0.05f,
+                              0.0f, 0.0f, "%.2f")) {
+            UndoSnapshot();
+            if (cc.radius < 0.0f) cc.radius = 0.0f;
+        }
+        float off[2] = { cc.offset.x, cc.offset.y };
+        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
+                               "%.2f")) {
+            UndoSnapshot();
+            cc.offset = { off[0], off[1] };
+        }
+        bool trig = cc.isTrigger;
+        if (ImGui::Checkbox("Is Trigger", &trig)) {
+            UndoSnapshot();
+            cc.isTrigger = trig;
         }
     }
 
@@ -6583,8 +6666,8 @@ private:
             DrawMarkerEntity(dl, *e, c, id == m_selection);
         }
 
-        // BoxCollider gizmos. One outlined rectangle per enabled
-        // collider; colour gates on the M7c1 overlap state:
+        // Collider gizmos -- box outlines + circle outlines.
+        // Colour gates on the M7c1 overlap state:
         //   yellow  = currently overlapping another collider
         //   green   = no contact
         //   selected entity gets thicker stroke + brighter alpha
@@ -6627,6 +6710,45 @@ private:
             const ImVec2 origin = WorldToScreen(
                 ImVec2(cx, cy), panelMin, panelSize);
             dl->AddCircleFilled(origin, 2.5f, col);
+        }
+        // CircleCollider gizmos: same colour rules + per-screen-
+        // pixel radius computed from the camera zoom so the
+        // outline stays accurate when the user zooms.
+        for (SceneEditor::EntityId id : ids) {
+            const auto* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            const auto* tr =
+                e->GetComponent<SceneEditor::TransformComponent>();
+            const auto* cc =
+                e->GetComponent<SceneEditor::CircleColliderComponent>();
+            if (!tr || !cc) continue;
+            const float scaleAvg = (tr->scale.x + tr->scale.y) * 0.5f;
+            const float wr  = cc->radius * scaleAvg;
+            const float cx  = tr->position.x + cc->offset.x;
+            const float cy  = tr->position.y + cc->offset.y;
+            const ImVec2 cs = WorldToScreen(
+                ImVec2(cx, cy), panelMin, panelSize);
+            // Use a pair of cardinal world points to back out the
+            // current zoom-aware pixel radius (avoids leaking the
+            // viewport camera state into this scope).
+            const ImVec2 rs = WorldToScreen(
+                ImVec2(cx + wr, cy), panelMin, panelSize);
+            const float pixelR = rs.x - cs.x;
+            bool overlapping = false;
+            for (const auto& key : m_collisionPairs) {
+                if (key.first == id || key.second == id) {
+                    overlapping = true; break;
+                }
+            }
+            const bool sel = (id == m_selection);
+            const ImU32 col = overlapping
+                ? (sel ? IM_COL32(255, 220, 80, 255)
+                       : IM_COL32(255, 200, 60, 200))
+                : (sel ? IM_COL32(120, 255, 140, 255)
+                       : IM_COL32(80,  220, 100, 180));
+            const float thickness = sel ? 2.5f : 1.5f;
+            dl->AddCircle(cs, pixelR, col, 32, thickness);
+            dl->AddCircleFilled(cs, 2.5f, col);
         }
     }
 
