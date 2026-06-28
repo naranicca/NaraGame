@@ -880,39 +880,73 @@ static int LuaSceneFindPath(lua_State* L) {
     return 1;
 }
 
-// audio.play(path [, volume]) -> bool. M8c2 XAudio2-backed
-// playback -- many overlapping voices, optional volume in
-// [0, 1] (default 1). The path is taken absolute if it
-// starts with a drive letter ("C:\\..." / "/...") or a
-// backslash root, otherwise it's resolved against the
-// project's Assets directory.
+// audio.play(path_or_guid [, volume]) -> bool. M8c2 XAudio2-
+// backed playback -- many overlapping voices, optional
+// volume in [0, 1] (default 1).
 //
-// Honest failure semantics: a missing or malformed WAV now
-// returns false (the M8c1 PlaySound returned true even for
-// typo'd paths). Only PCM WAVs are accepted; compressed
-// formats fail until a decoder lands in a later commit.
+// Three input flavours, detected automatically:
+//   - 36-char dashed GUID (e.g. "a1b2c3d4-e5f6-...") -> M8c4
+//     asset-DB lookup. The GUID must point at an Audio
+//     asset (.wav/.ogg/.mp3); any other type returns false.
+//     This is the recommended form for scenes that survive
+//     a file rename / move because GUID is stable.
+//   - Absolute path ("C:\\..." / "/...") -> used directly.
+//   - Relative path ("Sounds/coin.wav") -> resolved against
+//     the project's Assets directory.
+//
+// Honest failure semantics survive M8c2: missing files,
+// wrong-type GUIDs, malformed WAVs all return false.
 static int LuaAudioPlay(lua_State* L) {
     ScriptHost* host = HostFromUpvalue(L);
     AssetDatabase* db = host ? host->BoundAssetDatabase() : nullptr;
-    const char* path = luaL_checkstring(L, 1);
+    const char* arg = luaL_checkstring(L, 1);
     float volume = 1.0f;
     if (lua_gettop(L) >= 2 && !lua_isnoneornil(L, 2)) {
         volume = float(luaL_checknumber(L, 2));
     }
-    std::string resolved = path;
-    const bool isAbs =
-        (resolved.size() >= 2 && resolved[1] == ':') ||
-        (!resolved.empty() && (resolved[0] == '/' ||
-                                 resolved[0] == '\\'));
-    if (!isAbs && db) {
+    std::string resolved = arg;
+    // M8c4 GUID detection: 36 chars + dashes at the
+    // canonical positions (8, 13, 18, 23). Cheap, no false
+    // positives in practice (real paths have slashes /
+    // extensions in those positions).
+    auto looksLikeGuid = [](const std::string& s) {
+        if (s.size() != 36) return false;
+        return s[8] == '-' && s[13] == '-' &&
+               s[18] == '-' && s[23] == '-';
+    };
+    if (looksLikeGuid(resolved) && db) {
+        AssetGuid guid = AssetGuid::FromString(resolved);
+        if (!guid.IsValid()) {
+            lua_pushboolean(L, 0); return 1;
+        }
+        const AssetEntry* entry = db->FindByGuid(guid);
+        if (!entry || entry->typeName != "Audio") {
+            lua_pushboolean(L, 0); return 1;
+        }
         const std::string& root = db->AssetsRoot();
-        if (!root.empty()) {
-            const char sep =
-                (root.back() == '/' || root.back() == '\\')
-                    ? '\0' : '/';
-            resolved = root;
-            if (sep) resolved.push_back(sep);
-            resolved.append(path);
+        const char sep =
+            (!root.empty() &&
+             (root.back() == '/' || root.back() == '\\'))
+                ? '\0' : '/';
+        resolved = root;
+        if (sep) resolved.push_back(sep);
+        resolved.append(entry->relPath);
+    } else {
+        const bool isAbs =
+            (resolved.size() >= 2 && resolved[1] == ':') ||
+            (!resolved.empty() && (resolved[0] == '/' ||
+                                     resolved[0] == '\\'));
+        if (!isAbs && db) {
+            const std::string& root = db->AssetsRoot();
+            if (!root.empty()) {
+                const char sep =
+                    (root.back() == '/' || root.back() == '\\')
+                        ? '\0' : '/';
+                std::string joined = root;
+                if (sep) joined.push_back(sep);
+                joined.append(arg);
+                resolved = std::move(joined);
+            }
         }
     }
     const bool ok = Audio::Play(resolved, volume);
