@@ -7681,6 +7681,35 @@ private:
                     e.name.c_str());
     }
 
+    // M7c16: rotation-aware AddImage helper. Projects a world
+    // rect's 4 corners through the entity's rotation + the
+    // viewport Y-flip + zoom, then submits an AddImageQuad. The
+    // Sliced + Tiled paths build their 9-zone composition out
+    // of these calls so the whole sprite rotates as a single
+    // rigid quad even when split across 9 sub-rectangles.
+    void AddImageRotated(ImDrawList* dl, ImTextureID texId,
+                         const ImVec2& c,
+                         float cosR, float sinR, float zoom,
+                         float wL, float wR, float wB, float wT,
+                         float u0, float v0, float u1, float v1,
+                         ImU32 tint) const {
+        auto P = [&](float wx, float wy) {
+            const float rx = cosR * wx - sinR * wy;
+            const float ry = sinR * wx + cosR * wy;
+            return ImVec2{c.x + rx * zoom, c.y - ry * zoom};
+        };
+        const ImVec2 pTL = P(wL, wT);
+        const ImVec2 pTR = P(wR, wT);
+        const ImVec2 pBR = P(wR, wB);
+        const ImVec2 pBL = P(wL, wB);
+        const ImVec2 uvTL{u0, v0};
+        const ImVec2 uvTR{u1, v0};
+        const ImVec2 uvBR{u1, v1};
+        const ImVec2 uvBL{u0, v1};
+        dl->AddImageQuad(texId, pTL, pTR, pBR, pBL,
+                         uvTL, uvTR, uvBR, uvBL, tint);
+    }
+
     void DrawSlicedSpriteEntity(ImDrawList* dl,
                                 const SceneEditor::Entity& e,
                                 const SceneEditor::SpriteRendererComponent& spr,
@@ -7736,31 +7765,55 @@ private:
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                 tex->GetNativeView()));
 
+        // M7c16: rotation from Transform. The 9-zone composition
+        // still walks in world coordinates; AddImageRotated
+        // bends each tile through the rotation matrix before
+        // submitting it as an AddImageQuad.
+        const auto* trans =
+            e.GetComponent<SceneEditor::TransformComponent>();
+        const float rotDeg = trans ? trans->rotation : 0.0f;
+        const float rotRad = rotDeg
+            * 3.14159265358979323846f / 180.0f;
+        const float cosR = std::cos(rotRad);
+        const float sinR = std::sin(rotRad);
+        const float zoom = m_viewCam.zoom;
         // Walk the 9 tiles. Column i (0=L, 1=C, 2=R) maps to source
         // column i. World row j (0=bottom, 1=mid, 2=top) maps to source
         // row (2-j) because the texture's Y=0 is the top edge.
-        const float zoom = m_viewCam.zoom;
         for (int j = 0; j < 3; ++j) {
             for (int i = 0; i < 3; ++i) {
                 if (xs[i + 1] <= xs[i] || ys[j + 1] <= ys[j]) continue;
-                const ImVec2 pMin{c.x + xs[i]     * zoom,
-                                  c.y - ys[j + 1] * zoom};   // top-left
-                const ImVec2 pMax{c.x + xs[i + 1] * zoom,
-                                  c.y - ys[j]     * zoom};   // bottom-right
                 const int srcRow = 2 - j;
-                const ImVec2 uvMin{us[i],     vs[srcRow]};
-                const ImVec2 uvMax{us[i + 1], vs[srcRow + 1]};
-                dl->AddImage(texId, pMin, pMax, uvMin, uvMax, tint);
+                AddImageRotated(dl, texId, c, cosR, sinR, zoom,
+                                xs[i], xs[i + 1],
+                                ys[j], ys[j + 1],
+                                us[i], vs[srcRow],
+                                us[i + 1], vs[srcRow + 1], tint);
             }
         }
 
-        // Selection outline + label.
-        const ImVec2 a{c.x + worldLeft  * zoom, c.y - worldTop    * zoom};
-        const ImVec2 b{c.x + worldRight * zoom, c.y - worldBottom * zoom};
+        // Selection outline traces the rotated outer quad.
+        auto P = [&](float wx, float wy) {
+            const float rx = cosR * wx - sinR * wy;
+            const float ry = sinR * wx + cosR * wy;
+            return ImVec2{c.x + rx * zoom, c.y - ry * zoom};
+        };
+        const ImVec2 pTL = P(worldLeft,  worldTop);
+        const ImVec2 pTR = P(worldRight, worldTop);
+        const ImVec2 pBR = P(worldRight, worldBottom);
+        const ImVec2 pBL = P(worldLeft,  worldBottom);
         if (selected) {
-            dl->AddRect(a, b, IM_COL32(255, 220, 60, 255), 0.0f, 0, 2.0f);
+            const ImVec2 pts[5] = { pTL, pTR, pBR, pBL, pTL };
+            dl->AddPolyline(pts, 5,
+                            IM_COL32(255, 220, 60, 255),
+                            ImDrawFlags_None, 2.0f);
         }
-        dl->AddText(ImVec2{a.x, b.y + 2.0f},
+        float minX = pTL.x, maxY = pTL.y;
+        for (const ImVec2& p : {pTR, pBR, pBL}) {
+            minX = std::min(minX, p.x);
+            maxY = std::max(maxY, p.y);
+        }
+        dl->AddText(ImVec2{minX, maxY + 2.0f},
                     IM_COL32(220, 220, 220, 255),
                     e.name.c_str());
     }
@@ -7775,7 +7828,8 @@ private:
                   int srcX, int srcY, int srcW, int srcH,
                   float worldL, float worldR, float worldT, float worldB,
                   float texW, float texH, float ppu, float zoom,
-                  bool tileX, bool tileY, ImU32 tint) const {
+                  bool tileX, bool tileY, ImU32 tint,
+                  float cosR = 1.0f, float sinR = 0.0f) const {
         if (worldR <= worldL || worldT <= worldB) return;
         if (srcW <= 0 || srcH <= 0) return;
         const float tileWorldW = float(srcW) / ppu;
@@ -7818,11 +7872,10 @@ private:
                 const float v1 = tileY
                     ? (float(srcY) + float(srcH) * yspan.frac) / texH
                     : v1Full;
-                const ImVec2 pMin{c.x + xspan.a * zoom, c.y - yspan.b * zoom};
-                const ImVec2 pMax{c.x + xspan.b * zoom, c.y - yspan.a * zoom};
-                dl->AddImage(texId, pMin, pMax,
-                             ImVec2{u0Base, v0Base},
-                             ImVec2{u1, v1}, tint);
+                AddImageRotated(dl, texId, c, cosR, sinR, zoom,
+                                xspan.a, xspan.b,
+                                yspan.a, yspan.b,
+                                u0Base, v0Base, u1, v1, tint);
             }
         }
     }
@@ -7867,6 +7920,17 @@ private:
         const ImTextureID texId =
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                 tex->GetNativeView()));
+        // M7c16: rotation matrix for the Tiled mode mirrors the
+        // Sliced + Simple paths. TileQuad threads cosR / sinR
+        // through to each per-tile AddImageRotated call so the
+        // whole tiled wall rotates as one rigid quad.
+        const auto* trans =
+            e.GetComponent<SceneEditor::TransformComponent>();
+        const float rotDeg = trans ? trans->rotation : 0.0f;
+        const float rotRad = rotDeg
+            * 3.14159265358979323846f / 180.0f;
+        const float cosR = std::cos(rotRad);
+        const float sinR = std::sin(rotRad);
 
         // Helper to pick the source rect for (column i, row j) in the
         // 3x3 split. Row 0 (world bottom) -> source row 2 (texture top
@@ -7894,17 +7958,33 @@ private:
                 const bool tileY = (j == 1);   // Y tiles inside the middle row
                 TileQuad(dl, c, texId, sx, sy, sw, sh,
                          xs[i], xs[i + 1], ys[j + 1], ys[j],
-                         texW, texH, ppu, zoom, tileX, tileY, tint);
+                         texW, texH, ppu, zoom, tileX, tileY, tint,
+                         cosR, sinR);
             }
         }
 
-        // Selection outline + label.
-        const ImVec2 a{c.x + worldLeft  * zoom, c.y - worldTop    * zoom};
-        const ImVec2 b{c.x + worldRight * zoom, c.y - worldBottom * zoom};
+        // Selection outline traces the rotated outer quad.
+        auto P = [&](float wx, float wy) {
+            const float rx = cosR * wx - sinR * wy;
+            const float ry = sinR * wx + cosR * wy;
+            return ImVec2{c.x + rx * zoom, c.y - ry * zoom};
+        };
+        const ImVec2 pTL = P(worldLeft,  worldTop);
+        const ImVec2 pTR = P(worldRight, worldTop);
+        const ImVec2 pBR = P(worldRight, worldBottom);
+        const ImVec2 pBL = P(worldLeft,  worldBottom);
         if (selected) {
-            dl->AddRect(a, b, IM_COL32(255, 220, 60, 255), 0.0f, 0, 2.0f);
+            const ImVec2 pts[5] = { pTL, pTR, pBR, pBL, pTL };
+            dl->AddPolyline(pts, 5,
+                            IM_COL32(255, 220, 60, 255),
+                            ImDrawFlags_None, 2.0f);
         }
-        dl->AddText(ImVec2{a.x, b.y + 2.0f},
+        float minX = pTL.x, maxY = pTL.y;
+        for (const ImVec2& p : {pTR, pBR, pBL}) {
+            minX = std::min(minX, p.x);
+            maxY = std::max(maxY, p.y);
+        }
+        dl->AddText(ImVec2{minX, maxY + 2.0f},
                     IM_COL32(220, 220, 220, 255),
                     e.name.c_str());
     }
