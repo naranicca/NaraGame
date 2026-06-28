@@ -46,6 +46,7 @@ add_executable(scene-editor
     src/asset/Tileset.cpp
     src/project/Project.cpp
     src/scene/AnimatorComponent.cpp
+    src/scene/BoxColliderComponent.cpp
     src/scene/Component.cpp
     src/scene/Scene.cpp
     src/scene/ScriptComponent.cpp

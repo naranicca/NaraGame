@@ -1298,6 +1298,44 @@ void ScriptHost::CallOnDisable(const std::string& entityName,
     m_dispatchEntity.clear();
 }
 
+void ScriptHost::CallOnTriggerEnter(const std::string& entityName,
+                                    const std::string& otherName,
+                                    const std::string& entryFunction) {
+    if (!m_lua) return;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    std::string fn = PushLifecycleHook(L, entryFunction, "TriggerEnter");
+    if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
+    lua_pushstring(L, entityName.c_str());
+    lua_pushstring(L, otherName.c_str());
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + fn + ": " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+    m_dispatchEntity.clear();
+}
+
+void ScriptHost::CallOnTriggerExit(const std::string& entityName,
+                                   const std::string& otherName,
+                                   const std::string& entryFunction) {
+    if (!m_lua) return;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    std::string fn = PushLifecycleHook(L, entryFunction, "TriggerExit");
+    if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
+    lua_pushstring(L, entityName.c_str());
+    lua_pushstring(L, otherName.c_str());
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + fn + ": " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+    m_dispatchEntity.clear();
+}
+
 bool ScriptHost::LoadFile(const std::string& absolutePath,
                           const std::string& displayName) {
     if (!m_lua) return false;
@@ -1422,6 +1460,10 @@ void ScriptHost::CallOnEnable(const std::string&,
                               const std::string&) { /* stub no-op */ }
 void ScriptHost::CallOnDisable(const std::string&,
                                const std::string&) { /* stub no-op */ }
+void ScriptHost::CallOnTriggerEnter(const std::string&, const std::string&,
+                                    const std::string&) { /* stub no-op */ }
+void ScriptHost::CallOnTriggerExit (const std::string&, const std::string&,
+                                    const std::string&) { /* stub no-op */ }
 
 bool ScriptHost::LoadFile(const std::string&,
                           const std::string& displayName) {

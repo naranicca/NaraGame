@@ -1,6 +1,7 @@
 #include "Component.h"
 
 #include "AnimatorComponent.h"
+#include "BoxColliderComponent.h"
 #include "ScriptComponent.h"
 #include "SpriteRendererComponent.h"
 #include "TilemapComponent.h"
@@ -47,6 +48,8 @@ void RegisterBuiltinComponents() {
                [] { return std::make_unique<AnimatorComponent>(); });
     r.Register(ScriptComponent::StaticTypeName(),
                [] { return std::make_unique<ScriptComponent>(); });
+    r.Register(BoxColliderComponent::StaticTypeName(),
+               [] { return std::make_unique<BoxColliderComponent>(); });
 }
 
 } // namespace SceneEditor

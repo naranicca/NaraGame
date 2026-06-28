@@ -62,6 +62,16 @@ public:
                        const std::string& entryFunction = "");
     void CallOnDisable(const std::string& entityName,
                        const std::string& entryFunction = "");
+    // Trigger overlap edges. `otherName` is the entity the
+    // overlap is against. Routing rule matches the rest of the
+    // lifecycle dispatchers (entry-prefixed first, fallback
+    // OnTriggerEnter / OnTriggerExit).
+    void CallOnTriggerEnter(const std::string& entityName,
+                            const std::string& otherName,
+                            const std::string& entryFunction = "");
+    void CallOnTriggerExit (const std::string& entityName,
+                            const std::string& otherName,
+                            const std::string& entryFunction = "");
 
     // Executes a Lua source file in the host's interpreter. Logs
     // load + runtime errors as `[lua-error] <file>: <message>`

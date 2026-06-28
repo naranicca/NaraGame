@@ -14,6 +14,7 @@
 #include "asset/Tileset.h"
 #include "project/Project.h"
 #include "scene/AnimatorComponent.h"
+#include "scene/BoxColliderComponent.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
 #include "scene/Scene.h"
@@ -46,9 +47,11 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <system_error>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // Forward-declared by imgui_impl_win32.h with C++ linkage. We wrap it
@@ -283,6 +286,7 @@ public:
         HandleGlobalShortcuts();
         TickAssetFileWatcher(ImGui::GetIO().DeltaTime);
         TickScripts (ImGui::GetIO().DeltaTime);
+        TickColliders(ImGui::GetIO().DeltaTime);
         TickAnimators(ImGui::GetIO().DeltaTime);
         DrawHierarchyPanel();
         DrawInspectorPanel();
@@ -489,6 +493,109 @@ private:
                typeName == "Texture" ||
                typeName == "Tileset" ||
                typeName == "Autotile";
+    }
+
+    // Walks every entity that carries a BoxColliderComponent +
+    // Transform, does an O(n^2) AABB overlap pass against every
+    // other such entity, and diffs the resulting pair set
+    // against m_collisionPairs to fire OnTriggerEnter on new
+    // pairs and OnTriggerExit on ones that left contact. Both
+    // sides of the pair receive the dispatch with the other
+    // entity name as the second argument.
+    void TickColliders(float /*dt*/) {
+        if (!m_animPlaying) return;
+        struct ColliderInfo {
+            SceneEditor::EntityId   id;
+            std::string             name;
+            std::string             entryFunction;
+            bool                    hasScript;
+            float                   minX, maxX, minY, maxY;
+        };
+        std::vector<ColliderInfo> infos;
+        infos.reserve(32);
+        std::vector<SceneEditor::EntityId> ids;
+        CollectAllEntities(m_scene.Roots(), ids);
+        for (SceneEditor::EntityId id : ids) {
+            SceneEditor::Entity* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* tr = e->GetComponent<SceneEditor::TransformComponent>();
+            auto* bc = e->GetComponent<SceneEditor::BoxColliderComponent>();
+            if (!tr || !bc) continue;
+            const float halfX = bc->size.x * 0.5f * tr->scale.x;
+            const float halfY = bc->size.y * 0.5f * tr->scale.y;
+            const float cx = tr->position.x + bc->offset.x;
+            const float cy = tr->position.y + bc->offset.y;
+            ColliderInfo ci;
+            ci.id = id;
+            ci.name = e->name;
+            auto* sc = e->GetComponent<SceneEditor::ScriptComponent>();
+            ci.hasScript = (sc != nullptr);
+            ci.entryFunction = sc ? sc->entryFunction : std::string{};
+            ci.minX = cx - halfX;
+            ci.maxX = cx + halfX;
+            ci.minY = cy - halfY;
+            ci.maxY = cy + halfY;
+            infos.push_back(std::move(ci));
+        }
+        // O(n^2) pair check. Fine for editor-scale entity counts;
+        // a spatial grid lands when a real game pushes the count
+        // past where this becomes hot.
+        std::set<std::pair<SceneEditor::EntityId,
+                           SceneEditor::EntityId>> nowPairs;
+        for (size_t i = 0; i < infos.size(); ++i) {
+            for (size_t j = i + 1; j < infos.size(); ++j) {
+                const auto& a = infos[i];
+                const auto& b = infos[j];
+                if (a.maxX < b.minX || b.maxX < a.minX ||
+                    a.maxY < b.minY || b.maxY < a.minY) continue;
+                const auto key =
+                    a.id < b.id
+                        ? std::pair<SceneEditor::EntityId,
+                                    SceneEditor::EntityId>{a.id, b.id}
+                        : std::pair<SceneEditor::EntityId,
+                                    SceneEditor::EntityId>{b.id, a.id};
+                nowPairs.insert(key);
+                if (m_collisionPairs.find(key) == m_collisionPairs.end()) {
+                    // New contact -- fire Enter on both sides.
+                    if (a.hasScript) {
+                        m_scriptHost.CallOnTriggerEnter(
+                            a.name, b.name, a.entryFunction);
+                    }
+                    if (b.hasScript) {
+                        m_scriptHost.CallOnTriggerEnter(
+                            b.name, a.name, b.entryFunction);
+                    }
+                }
+            }
+        }
+        // Ended contacts -- pairs in m_collisionPairs but not in
+        // nowPairs.
+        for (const auto& key : m_collisionPairs) {
+            if (nowPairs.count(key)) continue;
+            SceneEditor::Entity* ea = m_scene.Get(key.first);
+            SceneEditor::Entity* eb = m_scene.Get(key.second);
+            if (ea) {
+                auto* sc =
+                    ea->GetComponent<SceneEditor::ScriptComponent>();
+                if (sc) {
+                    m_scriptHost.CallOnTriggerExit(
+                        ea->name,
+                        eb ? eb->name : std::string{},
+                        sc->entryFunction);
+                }
+            }
+            if (eb) {
+                auto* sc =
+                    eb->GetComponent<SceneEditor::ScriptComponent>();
+                if (sc) {
+                    m_scriptHost.CallOnTriggerExit(
+                        eb->name,
+                        ea ? ea->name : std::string{},
+                        sc->entryFunction);
+                }
+            }
+        }
+        m_collisionPairs = std::move(nowPairs);
     }
 
     // Polls disk mtimes on every hot-reloadable asset + dispatches
@@ -7577,6 +7684,15 @@ private:
     // single contiguous backing store. Files that exceed 64 KB
     // load truncated + a tag in the title flags it so the user
     // doesn't accidentally save back a chopped file.
+    // Active overlap pairs from the previous TickColliders call.
+    // Keyed by the symmetric pair `(min(id), max(id))`. Each
+    // tick we rebuild the new pair set and diff against this to
+    // fire OnTriggerEnter for newly-overlapping pairs and
+    // OnTriggerExit for ones that left contact.
+    std::set<std::pair<SceneEditor::EntityId,
+                       SceneEditor::EntityId>>
+                        m_collisionPairs;
+
     // REPL input line at the bottom of the Console panel. Up /
     // Down arrows scroll through submitted history; Enter dispatches
     // the buffer through ScriptHost::LoadString + echoes it into
