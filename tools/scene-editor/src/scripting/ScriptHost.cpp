@@ -1355,6 +1355,89 @@ void ScriptHost::CallOnTriggerExit(const std::string& entityName,
     m_dispatchEntity.clear();
 }
 
+// Helper shared by the three Collision dispatchers -- same body
+// as the Trigger trio with a configurable suffix.
+namespace {
+void DispatchTwoArgHook(void* luaState, std::string* dispatchEntity,
+                        std::vector<std::string>* outputLog,
+                        const std::string& entityName,
+                        const std::string& otherName,
+                        const std::string& entryFunction,
+                        const char* suffix) {
+    if (!luaState) return;
+    lua_State* L = static_cast<lua_State*>(luaState);
+    std::string fn = PushLifecycleHook(L, entryFunction, suffix);
+    if (fn.empty()) { lua_pop(L, 1); return; }
+    *dispatchEntity = entityName;
+    lua_pushstring(L, entityName.c_str());
+    lua_pushstring(L, otherName.c_str());
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        outputLog->push_back("[lua-error] " + fn + ": " +
+                             (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+    dispatchEntity->clear();
+}
+} // namespace
+
+void ScriptHost::CallOnCollisionEnter(const std::string& entityName,
+                                      const std::string& otherName,
+                                      const std::string& entryFunction) {
+    if (!m_lua) return;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    std::string fn = PushLifecycleHook(L, entryFunction, "CollisionEnter");
+    if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
+    lua_pushstring(L, entityName.c_str());
+    lua_pushstring(L, otherName.c_str());
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + fn + ": " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+    m_dispatchEntity.clear();
+}
+
+void ScriptHost::CallOnCollisionStay(const std::string& entityName,
+                                     const std::string& otherName,
+                                     const std::string& entryFunction) {
+    if (!m_lua) return;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    std::string fn = PushLifecycleHook(L, entryFunction, "CollisionStay");
+    if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
+    lua_pushstring(L, entityName.c_str());
+    lua_pushstring(L, otherName.c_str());
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + fn + ": " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+    m_dispatchEntity.clear();
+}
+
+void ScriptHost::CallOnCollisionExit(const std::string& entityName,
+                                     const std::string& otherName,
+                                     const std::string& entryFunction) {
+    if (!m_lua) return;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    std::string fn = PushLifecycleHook(L, entryFunction, "CollisionExit");
+    if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
+    lua_pushstring(L, entityName.c_str());
+    lua_pushstring(L, otherName.c_str());
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + fn + ": " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+    m_dispatchEntity.clear();
+}
+
 bool ScriptHost::LoadFile(const std::string& absolutePath,
                           const std::string& displayName) {
     if (!m_lua) return false;
@@ -1485,6 +1568,12 @@ void ScriptHost::CallOnTriggerStay (const std::string&, const std::string&,
                                     const std::string&) { /* stub no-op */ }
 void ScriptHost::CallOnTriggerExit (const std::string&, const std::string&,
                                     const std::string&) { /* stub no-op */ }
+void ScriptHost::CallOnCollisionEnter(const std::string&, const std::string&,
+                                      const std::string&) { /* stub no-op */ }
+void ScriptHost::CallOnCollisionStay (const std::string&, const std::string&,
+                                      const std::string&) { /* stub no-op */ }
+void ScriptHost::CallOnCollisionExit (const std::string&, const std::string&,
+                                      const std::string&) { /* stub no-op */ }
 
 bool ScriptHost::LoadFile(const std::string&,
                           const std::string& displayName) {

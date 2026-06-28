@@ -511,6 +511,7 @@ private:
             std::string             name;
             std::string             entryFunction;
             bool                    hasScript;
+            bool                    isTrigger;
             ColliderKind            kind;
             // Box: minX/maxX/minY/maxY are the world AABB.
             // Circle: cx/cy is the world centre, radius is in
@@ -542,28 +543,105 @@ private:
             if (bc) {
                 const float halfX = bc->size.x * 0.5f * tr->scale.x;
                 const float halfY = bc->size.y * 0.5f * tr->scale.y;
-                ci.kind   = ColliderKind::Box;
-                ci.cx     = tr->position.x + bc->offset.x;
-                ci.cy     = tr->position.y + bc->offset.y;
-                ci.radius = 0.0f;
-                ci.minX   = ci.cx - halfX;
-                ci.maxX   = ci.cx + halfX;
-                ci.minY   = ci.cy - halfY;
-                ci.maxY   = ci.cy + halfY;
+                ci.kind      = ColliderKind::Box;
+                ci.isTrigger = bc->isTrigger;
+                ci.cx        = tr->position.x + bc->offset.x;
+                ci.cy        = tr->position.y + bc->offset.y;
+                ci.radius    = 0.0f;
+                ci.minX      = ci.cx - halfX;
+                ci.maxX      = ci.cx + halfX;
+                ci.minY      = ci.cy - halfY;
+                ci.maxY      = ci.cy + halfY;
             } else {
                 const float scaleAvg =
                     (tr->scale.x + tr->scale.y) * 0.5f;
-                ci.kind   = ColliderKind::Circle;
-                ci.cx     = tr->position.x + cc->offset.x;
-                ci.cy     = tr->position.y + cc->offset.y;
-                ci.radius = cc->radius * scaleAvg;
-                ci.minX   = ci.cx - ci.radius;
-                ci.maxX   = ci.cx + ci.radius;
-                ci.minY   = ci.cy - ci.radius;
-                ci.maxY   = ci.cy + ci.radius;
+                ci.kind      = ColliderKind::Circle;
+                ci.isTrigger = cc->isTrigger;
+                ci.cx        = tr->position.x + cc->offset.x;
+                ci.cy        = tr->position.y + cc->offset.y;
+                ci.radius    = cc->radius * scaleAvg;
+                ci.minX      = ci.cx - ci.radius;
+                ci.maxX      = ci.cx + ci.radius;
+                ci.minY      = ci.cy - ci.radius;
+                ci.maxY      = ci.cy + ci.radius;
             }
             infos.push_back(std::move(ci));
         }
+        // Minimum translation vector returning (dx, dy) such that
+        // moving entity A by (dx, dy) separates it from B.
+        // Caller pushes B by the opposite vector. Used by the
+        // solid (non-trigger) push-out path.
+        auto ComputeMTV = [](const ColliderInfo& a,
+                             const ColliderInfo& b,
+                             float& dx, float& dy) {
+            dx = 0.0f; dy = 0.0f;
+            if (a.kind == ColliderKind::Box &&
+                b.kind == ColliderKind::Box) {
+                // Box-vs-box: pick the smaller penetration axis.
+                const float ox = std::min(a.maxX - b.minX,
+                                          b.maxX - a.minX);
+                const float oy = std::min(a.maxY - b.minY,
+                                          b.maxY - a.minY);
+                if (ox <= oy) {
+                    dx = (a.cx < b.cx) ? -ox : ox;
+                } else {
+                    dy = (a.cy < b.cy) ? -oy : oy;
+                }
+                return;
+            }
+            if (a.kind == ColliderKind::Circle &&
+                b.kind == ColliderKind::Circle) {
+                const float ex = a.cx - b.cx;
+                const float ey = a.cy - b.cy;
+                const float dist = std::sqrt(ex * ex + ey * ey);
+                const float pen  = (a.radius + b.radius) - dist;
+                if (dist < 1e-6f) { dx = pen; return; }
+                dx = ex / dist * pen;
+                dy = ey / dist * pen;
+                return;
+            }
+            // Mixed: clamp the circle centre to the box, push the
+            // circle along the closest-point vector.
+            const bool aIsBox = (a.kind == ColliderKind::Box);
+            const ColliderInfo& box = aIsBox ? a : b;
+            const ColliderInfo& cir = aIsBox ? b : a;
+            const float cx2 = std::clamp(cir.cx, box.minX, box.maxX);
+            const float cy2 = std::clamp(cir.cy, box.minY, box.maxY);
+            float ex = cir.cx - cx2;
+            float ey = cir.cy - cy2;
+            float dist = std::sqrt(ex * ex + ey * ey);
+            if (dist < 1e-6f) {
+                // Circle centre is inside the box; pick the
+                // nearest face.
+                const float toLeft   = cir.cx - box.minX;
+                const float toRight  = box.maxX - cir.cx;
+                const float toBottom = cir.cy - box.minY;
+                const float toTop    = box.maxY - cir.cy;
+                const float minH = std::min(toLeft, toRight);
+                const float minV = std::min(toBottom, toTop);
+                if (minH <= minV) {
+                    ex = (toLeft < toRight) ? -1.0f : 1.0f;
+                    ey = 0.0f;
+                    dist = 1.0f;
+                } else {
+                    ex = 0.0f;
+                    ey = (toBottom < toTop) ? -1.0f : 1.0f;
+                    dist = 1.0f;
+                }
+            }
+            const float pen = cir.radius - dist;
+            const float pushX = ex / dist * pen;
+            const float pushY = ey / dist * pen;
+            // mtv we built pushes the circle out of the box. If
+            // A is the circle the result is direct; otherwise
+            // flip the sign.
+            if (aIsBox) {
+                dx = -pushX; dy = -pushY;
+            } else {
+                dx =  pushX; dy =  pushY;
+            }
+        };
+
         // Per-shape overlap. Box-vs-box uses the same AABB check
         // M7c1 shipped; circle-vs-circle compares centre
         // distance to summed radii; circle-vs-box uses the
@@ -616,8 +694,42 @@ private:
                 nowPairs.insert(key);
                 const bool wasContact =
                     m_collisionPairs.find(key) != m_collisionPairs.end();
-                if (!wasContact) {
-                    // New contact -- fire Enter on both sides.
+                // Solid contact when neither collider is a
+                // trigger. Solid pairs push each other apart by
+                // half the MTV + fire OnCollision events; the
+                // rest fire OnTrigger like the M7c1/c3 path.
+                const bool isSolid = !a.isTrigger && !b.isTrigger;
+                if (isSolid) {
+                    float dx = 0.0f, dy = 0.0f;
+                    ComputeMTV(a, b, dx, dy);
+                    SceneEditor::Entity* ea = m_scene.Get(a.id);
+                    SceneEditor::Entity* eb = m_scene.Get(b.id);
+                    auto* taC = ea
+                        ? ea->GetComponent<SceneEditor::TransformComponent>()
+                        : nullptr;
+                    auto* tbC = eb
+                        ? eb->GetComponent<SceneEditor::TransformComponent>()
+                        : nullptr;
+                    if (taC) {
+                        taC->position.x += dx * 0.5f;
+                        taC->position.y += dy * 0.5f;
+                    }
+                    if (tbC) {
+                        tbC->position.x -= dx * 0.5f;
+                        tbC->position.y -= dy * 0.5f;
+                    }
+                    if (!wasContact) {
+                        if (a.hasScript) m_scriptHost.CallOnCollisionEnter(
+                            a.name, b.name, a.entryFunction);
+                        if (b.hasScript) m_scriptHost.CallOnCollisionEnter(
+                            b.name, a.name, b.entryFunction);
+                    } else {
+                        if (a.hasScript) m_scriptHost.CallOnCollisionStay(
+                            a.name, b.name, a.entryFunction);
+                        if (b.hasScript) m_scriptHost.CallOnCollisionStay(
+                            b.name, a.name, b.entryFunction);
+                    }
+                } else if (!wasContact) {
                     if (a.hasScript) {
                         m_scriptHost.CallOnTriggerEnter(
                             a.name, b.name, a.entryFunction);
@@ -627,10 +739,6 @@ private:
                             b.name, a.name, b.entryFunction);
                     }
                 } else {
-                    // Continuing contact -- fire Stay so scripts
-                    // can run per-frame logic (damage tick,
-                    // proximity sample) without rebuilding edge
-                    // tracking themselves.
                     if (a.hasScript) {
                         m_scriptHost.CallOnTriggerStay(
                             a.name, b.name, a.entryFunction);
@@ -643,29 +751,65 @@ private:
             }
         }
         // Ended contacts -- pairs in m_collisionPairs but not in
-        // nowPairs.
+        // nowPairs. Fire the matching Exit dispatcher; we don't
+        // have to re-look-up isTrigger because the runtime
+        // intent doesn't change between Enter / Stay / Exit
+        // edges. Default to OnTriggerExit when either side is a
+        // trigger or when we can't tell; only the
+        // both-non-trigger case routes to OnCollisionExit.
         for (const auto& key : m_collisionPairs) {
             if (nowPairs.count(key)) continue;
             SceneEditor::Entity* ea = m_scene.Get(key.first);
             SceneEditor::Entity* eb = m_scene.Get(key.second);
+            const auto* aBc = ea
+                ? ea->GetComponent<SceneEditor::BoxColliderComponent>()
+                : nullptr;
+            const auto* aCc = ea
+                ? ea->GetComponent<SceneEditor::CircleColliderComponent>()
+                : nullptr;
+            const auto* bBc = eb
+                ? eb->GetComponent<SceneEditor::BoxColliderComponent>()
+                : nullptr;
+            const auto* bCc = eb
+                ? eb->GetComponent<SceneEditor::CircleColliderComponent>()
+                : nullptr;
+            const bool aTrigger =
+                (aBc && aBc->isTrigger) || (aCc && aCc->isTrigger);
+            const bool bTrigger =
+                (bBc && bBc->isTrigger) || (bCc && bCc->isTrigger);
+            const bool wasSolid = ea && eb && !aTrigger && !bTrigger;
             if (ea) {
                 auto* sc =
                     ea->GetComponent<SceneEditor::ScriptComponent>();
                 if (sc) {
-                    m_scriptHost.CallOnTriggerExit(
-                        ea->name,
-                        eb ? eb->name : std::string{},
-                        sc->entryFunction);
+                    if (wasSolid) {
+                        m_scriptHost.CallOnCollisionExit(
+                            ea->name,
+                            eb ? eb->name : std::string{},
+                            sc->entryFunction);
+                    } else {
+                        m_scriptHost.CallOnTriggerExit(
+                            ea->name,
+                            eb ? eb->name : std::string{},
+                            sc->entryFunction);
+                    }
                 }
             }
             if (eb) {
                 auto* sc =
                     eb->GetComponent<SceneEditor::ScriptComponent>();
                 if (sc) {
-                    m_scriptHost.CallOnTriggerExit(
-                        eb->name,
-                        ea ? ea->name : std::string{},
-                        sc->entryFunction);
+                    if (wasSolid) {
+                        m_scriptHost.CallOnCollisionExit(
+                            eb->name,
+                            ea ? ea->name : std::string{},
+                            sc->entryFunction);
+                    } else {
+                        m_scriptHost.CallOnTriggerExit(
+                            eb->name,
+                            ea ? ea->name : std::string{},
+                            sc->entryFunction);
+                    }
                 }
             }
         }

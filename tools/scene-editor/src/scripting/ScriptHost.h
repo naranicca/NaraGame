@@ -75,6 +75,18 @@ public:
     void CallOnTriggerExit (const std::string& entityName,
                             const std::string& otherName,
                             const std::string& entryFunction = "");
+    // Solid (non-trigger) collisions. Same routing rule. Unity-
+    // style: fired only when neither collider is flagged
+    // isTrigger.
+    void CallOnCollisionEnter(const std::string& entityName,
+                              const std::string& otherName,
+                              const std::string& entryFunction = "");
+    void CallOnCollisionStay (const std::string& entityName,
+                              const std::string& otherName,
+                              const std::string& entryFunction = "");
+    void CallOnCollisionExit (const std::string& entityName,
+                              const std::string& otherName,
+                              const std::string& entryFunction = "");
 
     // Executes a Lua source file in the host's interpreter. Logs
     // load + runtime errors as `[lua-error] <file>: <message>`
