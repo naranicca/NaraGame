@@ -1119,6 +1119,38 @@ static int LuaAudioIsVoicePlaying(lua_State* L) {
     return 1;
 }
 
+// M8c13 audio.play_positional(path_or_guid, vol, pan [, freq_ratio]).
+// Same SFX cache path as audio.play, but the caller picks the
+// stereo pan + (optional) pitch shift -- the building block for
+// game-side doppler. freq_ratio defaults to 1.0 (no shift); the
+// engine clamps to [0.25, 2.0]. Pan is in [-1, 1].
+static int LuaAudioPlayPositional(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* arg = luaL_checkstring(L, 1);
+    const float vol = float(luaL_checknumber(L, 2));
+    const float pan = float(luaL_checknumber(L, 3));
+    float freqRatio = 1.0f;
+    if (lua_gettop(L) >= 4 && !lua_isnoneornil(L, 4)) {
+        freqRatio = float(luaL_checknumber(L, 4));
+    }
+    const std::string resolved = ResolveAudioPath(host, arg);
+    if (resolved.empty()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    lua_pushboolean(L,
+        Audio::PlayPositional(resolved, vol, pan, freqRatio) ? 1 : 0);
+    return 1;
+}
+static int LuaAudioSetReverbWet(lua_State* L) {
+    const float wet = float(luaL_checknumber(L, 1));
+    Audio::SetReverbWet(wet);
+    return 0;
+}
+static int LuaAudioGetReverbWet(lua_State* L) {
+    lua_pushnumber(L, Audio::GetReverbWet());
+    return 1;
+}
+
 // Path / GUID resolution used by spawn -- same rules audio.play
 // applies. Returns an empty string on a missing GUID / wrong
 // type GUID; the Spawn binding turns that into a nil result.
@@ -2162,6 +2194,9 @@ ScriptHost::ScriptHost() {
         {"resume_voice",      LuaAudioResumeVoice},
         {"set_voice_volume",  LuaAudioSetVoiceVolume},
         {"is_voice_playing",  LuaAudioIsVoicePlaying},
+        {"play_positional",   LuaAudioPlayPositional},
+        {"set_reverb_wet",    LuaAudioSetReverbWet},
+        {"get_reverb_wet",    LuaAudioGetReverbWet},
         {nullptr,             nullptr},
     };
     lua_newtable(L);

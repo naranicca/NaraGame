@@ -36,9 +36,17 @@ public:
     // left, 0 = centred, +1 = full right. Stereo sources
     // get the volume but skip the matrix (they already
     // carry their own L/R balance).
+    //
+    // M8c13 adds the optional `freqRatio` -- when not 1.0
+    // the voice plays at SetFrequencyRatio(freqRatio), so
+    // a positive doppler shift (approaching source) raises
+    // the pitch + a negative one (receding) lowers it.
+    // Clamped internally to XAudio2's hard [0.25, 4.0]
+    // range; 1.0 (the default) skips the call entirely.
     static bool PlayPositional(const std::string& absolutePath,
                                 float volume,
-                                float pan);
+                                float pan,
+                                float freqRatio = 1.0f);
     // Stops all currently-playing SFX source voices.
     static void Stop();
     // Explicit teardown -- normally the static engine is
@@ -85,6 +93,18 @@ public:
     enum class Bus { Master, Sfx, Music };
     static void  SetBusVolume(Bus bus, float volume);
     static float GetBusVolume(Bus bus);
+
+    // M8c13 reverb wet send. The SFX submix feeds both the
+    // mastering voice (dry) at unity AND a reverb submix at
+    // `wet` gain; the reverb submix carries an XAudio2 I3DL2
+    // reverb effect tuned to a small-room preset + routes its
+    // output back to mastering. So wet=0 is identical to the
+    // M8c9 chain (dry only) and wet=1 stacks a full reverb
+    // tail on top. Music + per-voice spawns currently bypass
+    // the reverb; this is the SFX-only wet path the mixer UI
+    // exposes today.
+    static void  SetReverbWet(float wet);
+    static float GetReverbWet();
 
     // M8c11 per-voice control. Spawn() reserves one slot of
     // a 64-voice pool + returns an opaque handle the caller

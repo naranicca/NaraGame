@@ -121,6 +121,7 @@ float ClampVol(float v) {
 void Project::SetAudioMasterVolume(float v) { m_audioMasterVolume = ClampVol(v); }
 void Project::SetAudioSfxVolume(float v)    { m_audioSfxVolume    = ClampVol(v); }
 void Project::SetAudioMusicVolume(float v)  { m_audioMusicVolume  = ClampVol(v); }
+void Project::SetAudioReverbWet(float v)    { m_audioReverbWet    = ClampVol(v); }
 
 void Project::SetSortingLayers(std::vector<std::string> layers) {
     if (layers.empty()) layers = DefaultSortingLayers();
@@ -221,6 +222,7 @@ void Project::Close() {
     m_audioMasterVolume = 1.0f;
     m_audioSfxVolume    = 1.0f;
     m_audioMusicVolume  = 1.0f;
+    m_audioReverbWet    = 0.0f;
 }
 
 bool Project::EnsureFolderTree() const {
@@ -270,9 +272,10 @@ bool Project::WriteProjectJson() const {
     // a visible record of its default state in project.json; the read
     // path tolerates the block being absent.
     Value mixer = Value::MakeObject();
-    mixer.Add("master", Value::MakeNumber(double(m_audioMasterVolume)));
-    mixer.Add("sfx",    Value::MakeNumber(double(m_audioSfxVolume)));
-    mixer.Add("music",  Value::MakeNumber(double(m_audioMusicVolume)));
+    mixer.Add("master",    Value::MakeNumber(double(m_audioMasterVolume)));
+    mixer.Add("sfx",       Value::MakeNumber(double(m_audioSfxVolume)));
+    mixer.Add("music",     Value::MakeNumber(double(m_audioMusicVolume)));
+    mixer.Add("reverbWet", Value::MakeNumber(double(m_audioReverbWet)));
     root.Add("audioMixer", std::move(mixer));
     const std::string out = NaraGame::MiniJson::Write(root);
     if (!WriteFileText(ProjectJsonPath(), out)) {
@@ -325,13 +328,15 @@ bool Project::ReadProjectJson() {
     // 5.0 in JSON loads as 1.0 instead of blowing speakers.
     const NaraGame::MiniJson::Value* mixer = root.Find("audioMixer");
     if (mixer && mixer->IsObject()) {
-        SetAudioMasterVolume(float(mixer->GetNumber("master", 1.0)));
-        SetAudioSfxVolume   (float(mixer->GetNumber("sfx",    1.0)));
-        SetAudioMusicVolume (float(mixer->GetNumber("music",  1.0)));
+        SetAudioMasterVolume(float(mixer->GetNumber("master",    1.0)));
+        SetAudioSfxVolume   (float(mixer->GetNumber("sfx",       1.0)));
+        SetAudioMusicVolume (float(mixer->GetNumber("music",     1.0)));
+        SetAudioReverbWet   (float(mixer->GetNumber("reverbWet", 0.0)));
     } else {
         m_audioMasterVolume = 1.0f;
         m_audioSfxVolume    = 1.0f;
         m_audioMusicVolume  = 1.0f;
+        m_audioReverbWet    = 0.0f;
     }
     m_collisionMatrixOff.clear();
     const NaraGame::MiniJson::Value* cmatrix = root.Find("collisionMatrixOff");

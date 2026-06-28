@@ -2807,6 +2807,8 @@ private:
         SceneEditor::Audio::SetBusVolume(
             SceneEditor::Audio::Bus::Music,
             m_project.AudioMusicVolume());
+        SceneEditor::Audio::SetReverbWet(
+            m_project.AudioReverbWet());
     }
 
     // Walks every "Script" typed asset in the database + sends it
@@ -6540,18 +6542,26 @@ private:
             "voice's own volume. Master scales the final mix.");
         ImGui::Separator();
 
+        // Three Master/SFX/Music sliders feed Audio::SetBusVolume;
+        // the 4th Reverb slider takes a separate code path
+        // (Audio::SetReverbWet + Project::SetAudioReverbWet)
+        // because reverb isn't a Bus enum entry. Kept as a
+        // single per-row switch so the layout stays uniform.
+        enum class MixerRowKind { Master, Sfx, Music, Reverb };
         struct Row {
-            const char*       label;
-            SceneEditor::Audio::Bus bus;
-            float             value;
+            const char*  label;
+            MixerRowKind kind;
+            float        value;
         };
-        Row rows[3] = {
-            { "Master", SceneEditor::Audio::Bus::Master,
+        Row rows[4] = {
+            { "Master",      MixerRowKind::Master,
               m_project.AudioMasterVolume() },
-            { "SFX",    SceneEditor::Audio::Bus::Sfx,
+            { "SFX",         MixerRowKind::Sfx,
               m_project.AudioSfxVolume()    },
-            { "Music",  SceneEditor::Audio::Bus::Music,
+            { "Music",       MixerRowKind::Music,
               m_project.AudioMusicVolume()  },
+            { "Reverb (Wet)", MixerRowKind::Reverb,
+              m_project.AudioReverbWet()    },
         };
 
         bool changed = false;
@@ -6560,14 +6570,26 @@ private:
             ImGui::SetNextItemWidth(220.0f);
             if (ImGui::SliderFloat(r.label, &r.value, 0.0f, 1.0f,
                                    "%.2f")) {
-                SceneEditor::Audio::SetBusVolume(r.bus, r.value);
-                switch (r.bus) {
-                case SceneEditor::Audio::Bus::Master:
-                    m_project.SetAudioMasterVolume(r.value); break;
-                case SceneEditor::Audio::Bus::Sfx:
-                    m_project.SetAudioSfxVolume(r.value);    break;
-                case SceneEditor::Audio::Bus::Music:
-                    m_project.SetAudioMusicVolume(r.value);  break;
+                switch (r.kind) {
+                case MixerRowKind::Master:
+                    SceneEditor::Audio::SetBusVolume(
+                        SceneEditor::Audio::Bus::Master, r.value);
+                    m_project.SetAudioMasterVolume(r.value);
+                    break;
+                case MixerRowKind::Sfx:
+                    SceneEditor::Audio::SetBusVolume(
+                        SceneEditor::Audio::Bus::Sfx, r.value);
+                    m_project.SetAudioSfxVolume(r.value);
+                    break;
+                case MixerRowKind::Music:
+                    SceneEditor::Audio::SetBusVolume(
+                        SceneEditor::Audio::Bus::Music, r.value);
+                    m_project.SetAudioMusicVolume(r.value);
+                    break;
+                case MixerRowKind::Reverb:
+                    SceneEditor::Audio::SetReverbWet(r.value);
+                    m_project.SetAudioReverbWet(r.value);
+                    break;
                 }
                 changed = true;
             }
@@ -6583,9 +6605,11 @@ private:
                 SceneEditor::Audio::Bus::Sfx, 1.0f);
             SceneEditor::Audio::SetBusVolume(
                 SceneEditor::Audio::Bus::Music, 1.0f);
+            SceneEditor::Audio::SetReverbWet(0.0f);
             m_project.SetAudioMasterVolume(1.0f);
             m_project.SetAudioSfxVolume(1.0f);
             m_project.SetAudioMusicVolume(1.0f);
+            m_project.SetAudioReverbWet(0.0f);
             m_project.Save();
         }
         ImGui::SameLine();

@@ -93,9 +93,15 @@ public:
     float AudioMasterVolume() const { return m_audioMasterVolume; }
     float AudioSfxVolume()    const { return m_audioSfxVolume; }
     float AudioMusicVolume()  const { return m_audioMusicVolume; }
+    // M8c13 reverb wet-send. 0 = dry, 1 = full reverb tail on
+    // top of dry signal. Lives next to the bus volumes inside
+    // `audioMixer` so re-opening a project restores the same
+    // ambience.
+    float AudioReverbWet()    const { return m_audioReverbWet; }
     void  SetAudioMasterVolume(float v);
     void  SetAudioSfxVolume(float v);
     void  SetAudioMusicVolume(float v);
+    void  SetAudioReverbWet(float v);
 
 private:
     bool EnsureFolderTree() const;
@@ -116,6 +122,7 @@ private:
     float m_audioMasterVolume = 1.0f;
     float m_audioSfxVolume    = 1.0f;
     float m_audioMusicVolume  = 1.0f;
+    float m_audioReverbWet    = 0.0f;
 };
 
 } // namespace SceneEditor

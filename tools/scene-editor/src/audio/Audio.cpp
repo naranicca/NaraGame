@@ -5,6 +5,10 @@
 #endif
 #include <windows.h>
 #include <xaudio2.h>
+// M8c13 reverb. xaudio2fx.h exposes XAudio2CreateReverb +
+// XAUDIO2FX_REVERB_I3DL2_PARAMETERS preset bridge.
+#include <xaudio2fx.h>
+#include <xapofx.h>
 
 #include <algorithm>
 #include <cctype>
@@ -91,12 +95,22 @@ IXAudio2MasteringVoice*                    g_master  = nullptr;
 // the user can balance the two categories independently.
 IXAudio2SubmixVoice*                       g_sfxSubmix   = nullptr;
 IXAudio2SubmixVoice*                       g_musicSubmix = nullptr;
+// M8c13 reverb submix. Created when the engine boots if
+// XAudio2CreateReverb succeeds. The SFX submix sends to
+// [g_master, g_reverbSubmix] at gains [1.0, g_reverbWet],
+// so wet=0 silences the reverb tail while leaving the dry
+// signal untouched. Null when reverb creation failed --
+// SetReverbWet logs nothing in that case + the dry path
+// keeps working.
+IXAudio2SubmixVoice*                       g_reverbSubmix = nullptr;
+IUnknown*                                  g_reverbEffect = nullptr;
 // Cached bus volumes -- queried via GetBusVolume even when
 // the engine hasn't initialised yet (e.g. inside a Lua
 // boot sequence that runs before any audio plays).
 float                                      g_masterVolume = 1.0f;
 float                                      g_sfxVolume    = 1.0f;
 float                                      g_musicVolume  = 1.0f;
+float                                      g_reverbWet    = 0.0f;
 VoiceCallback                              g_callback;
 // M8c11 voice pool. Each slot owns a source voice the caller
 // can address by handle (slot + generation). When the voice
@@ -199,6 +213,70 @@ bool Initialize() {
         &g_sfxSubmix, 2, masterDetails.InputSampleRate);
     g_engine->CreateSubmixVoice(
         &g_musicSubmix, 2, masterDetails.InputSampleRate);
+    // M8c13 reverb submix + I3DL2 preset. The reverb XAPO
+    // ships with XAudio2 (xaudio2fx.lib). The effect runs
+    // on the reverb submix, which feeds back into the
+    // mastering voice; the SFX submix routes [Master,
+    // Reverb] so the dry path is unconditional + the wet
+    // amount scales with g_reverbWet. Soft failure: if
+    // any step fails we leave g_reverbSubmix null and the
+    // SFX submix keeps its default master-only output.
+    bool reverbReady = false;
+    if (SUCCEEDED(XAudio2CreateReverb(&g_reverbEffect, 0)) &&
+        g_reverbEffect) {
+        XAUDIO2_EFFECT_DESCRIPTOR desc{};
+        desc.pEffect        = g_reverbEffect;
+        desc.InitialState   = TRUE;
+        desc.OutputChannels = 2;
+        XAUDIO2_EFFECT_CHAIN chain{};
+        chain.EffectCount        = 1;
+        chain.pEffectDescriptors = &desc;
+        if (SUCCEEDED(g_engine->CreateSubmixVoice(
+                &g_reverbSubmix, 2,
+                masterDetails.InputSampleRate, 0, 0,
+                nullptr, &chain)) &&
+            g_reverbSubmix) {
+            XAUDIO2FX_REVERB_I3DL2_PARAMETERS preset =
+                XAUDIO2FX_I3DL2_PRESET_LIVINGROOM;
+            XAUDIO2FX_REVERB_PARAMETERS params{};
+            ReverbConvertI3DL2ToNative(&preset, &params);
+            g_reverbSubmix->SetEffectParameters(
+                0, &params, sizeof(params));
+            reverbReady = true;
+        }
+    }
+    // Wire the SFX submix to fan out to master + reverb
+    // (or just master if reverb didn't come up). Output
+    // matrix on the SFX submix scales the reverb send by
+    // g_reverbWet; master path stays at unity.
+    if (g_sfxSubmix) {
+        XAUDIO2_SEND_DESCRIPTOR sends[2]{};
+        sends[0].pOutputVoice = g_master;
+        UINT32 sendCount = 1;
+        if (reverbReady) {
+            sends[1].pOutputVoice = g_reverbSubmix;
+            sendCount = 2;
+        }
+        XAUDIO2_VOICE_SENDS sendList{};
+        sendList.SendCount = sendCount;
+        sendList.pSends    = sends;
+        g_sfxSubmix->SetOutputVoices(&sendList);
+        if (reverbReady) {
+            // SFX submix is stereo, both downstream voices
+            // are stereo. Row-major 2x2 matrices: dry is
+            // identity, wet is identity scaled by the wet
+            // send level.
+            const float dry[4] = { 1.0f, 0.0f,
+                                    0.0f, 1.0f };
+            g_sfxSubmix->SetOutputMatrix(
+                g_master, 2, 2, dry);
+            const float w = g_reverbWet;
+            const float wet[4] = { w,    0.0f,
+                                    0.0f, w    };
+            g_sfxSubmix->SetOutputMatrix(
+                g_reverbSubmix, 2, 2, wet);
+        }
+    }
     // Apply any pre-Initialize SetBusVolume calls.
     if (g_master)     g_master->SetVolume(g_masterVolume);
     if (g_sfxSubmix)  g_sfxSubmix->SetVolume(g_sfxVolume);
@@ -418,7 +496,8 @@ bool Audio::Play(const std::string& absolutePath, float volume) {
 }
 
 bool Audio::PlayPositional(const std::string& absolutePath,
-                            float volume, float pan) {
+                            float volume, float pan,
+                            float freqRatio) {
     if (absolutePath.empty()) return false;
     if (!Initialize()) return false;
     SoundClip* clip = nullptr;
@@ -443,6 +522,21 @@ bool Audio::PlayPositional(const std::string& absolutePath,
     if (volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
     voice->SetVolume(volume);
+    // M8c13 doppler. SetFrequencyRatio is a no-op at 1.0,
+    // but XAudio2 still validates the range -- so clamp to
+    // the engine's [XAUDIO2_MIN_FREQ_RATIO=0.0005,
+    // XAUDIO2_MAX_FREQ_RATIO=1024] and additionally to the
+    // [0.25, 4.0] musical-range default we created the
+    // voice with (CreateSourceVoice's MaxFrequencyRatio
+    // arg, defaulted via XAUDIO2_DEFAULT_FREQ_RATIO = 2.0).
+    // Beyond 2.0 we'd need to recreate the voice with a
+    // larger MaxFreqRatio -- skipping that for now since
+    // 2x pitch is already audibly extreme for SFX.
+    if (freqRatio != 1.0f) {
+        if (freqRatio < 0.25f) freqRatio = 0.25f;
+        if (freqRatio > 2.0f)  freqRatio = 2.0f;
+        voice->SetFrequencyRatio(freqRatio);
+    }
     // Mono source -> stereo pan matrix. Stereo sources
     // already encode L/R balance, so we leave their
     // matrix at the identity default.
@@ -973,6 +1067,21 @@ float Audio::GetBusVolume(Bus bus) {
     return 1.0f;
 }
 
+void Audio::SetReverbWet(float wet) {
+    if (wet < 0.0f) wet = 0.0f;
+    if (wet > 1.0f) wet = 1.0f;
+    g_reverbWet = wet;
+    // Pre-Initialize call: the value is stashed + Initialize
+    // will pick it up on its first SetOutputMatrix pass.
+    if (!g_sfxSubmix || !g_reverbSubmix) return;
+    const float wetMatrix[4] = { wet,  0.0f,
+                                  0.0f, wet  };
+    g_sfxSubmix->SetOutputMatrix(
+        g_reverbSubmix, 2, 2, wetMatrix);
+}
+
+float Audio::GetReverbWet() { return g_reverbWet; }
+
 void Audio::Shutdown() {
     StopMusic();
     {
@@ -994,6 +1103,14 @@ void Audio::Shutdown() {
     if (g_musicSubmix) {
         g_musicSubmix->DestroyVoice();
         g_musicSubmix = nullptr;
+    }
+    if (g_reverbSubmix) {
+        g_reverbSubmix->DestroyVoice();
+        g_reverbSubmix = nullptr;
+    }
+    if (g_reverbEffect) {
+        g_reverbEffect->Release();
+        g_reverbEffect = nullptr;
     }
     if (g_master) {
         g_master->DestroyVoice();
