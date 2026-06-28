@@ -8,8 +8,9 @@ void TilemapComponent::Serialize(Value& out) const {
     out.Add("tileset",      Value::MakeString(tileset.ToString()));
     out.Add("cellPixelW",   Value::MakeNumber(cellPixelW));
     out.Add("cellPixelH",   Value::MakeNumber(cellPixelH));
-    out.Add("sortingLayer", Value::MakeString(sortingLayer));
-    out.Add("orderInLayer", Value::MakeNumber(orderInLayer));
+    out.Add("sortingLayer",   Value::MakeString(sortingLayer));
+    out.Add("orderInLayer",   Value::MakeNumber(orderInLayer));
+    out.Add("collisionLayer", Value::MakeString(collisionLayer));
     // Each cell is a [gx, gy, tile] triple. Sparse storage keeps the
     // scene file small even for very large maps.
     Value arr = Value::MakeArray();
@@ -27,8 +28,9 @@ void TilemapComponent::Deserialize(const Value& obj) {
     tileset      = AssetGuid::FromString(obj.GetString("tileset"));
     cellPixelW   = obj.GetInt("cellPixelW", 16);
     cellPixelH   = obj.GetInt("cellPixelH", 16);
-    sortingLayer = obj.GetString("sortingLayer", "Default");
-    orderInLayer = obj.GetInt("orderInLayer", 0);
+    sortingLayer   = obj.GetString("sortingLayer", "Default");
+    orderInLayer   = obj.GetInt("orderInLayer", 0);
+    collisionLayer = obj.GetString("collisionLayer", "Default");
     cells.clear();
     const Value* arr = obj.Find("cells");
     if (!arr || !arr->IsArray()) return;

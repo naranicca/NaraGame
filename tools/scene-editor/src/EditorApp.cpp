@@ -724,7 +724,7 @@ private:
                 ci.entryFunction.clear();
                 ci.isTrigger     = tileTrigger;
                 ci.kind          = ColliderKind::Box;
-                ci.layer         = "Default";
+                ci.layer         = tm->collisionLayer;
                 ci.cx            = wx;
                 ci.cy            = wy;
                 ci.radius        = 0.0f;
@@ -6118,6 +6118,30 @@ private:
             changed = true;
         }
         if (ImGui::IsItemActivated()) UndoSnapshot();
+        // M7c20: collision layer for the M7c18 per-tile collider
+        // synthesis pass. Combo mirrors the BoxCollider /
+        // CircleCollider layer picker; the runtime feeds the
+        // selected layer into Project::CollisionLayersCollide.
+        const auto& cLayers = m_project.CollisionLayers();
+        if (ImGui::BeginCombo("Collision Layer",
+                               tm.collisionLayer.c_str())) {
+            for (const std::string& l : cLayers) {
+                const bool sel = (l == tm.collisionLayer);
+                if (ImGui::Selectable(l.c_str(), sel)) {
+                    UndoSnapshot();
+                    tm.collisionLayer = l;
+                    changed = true;
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Collision layer for every solid / trigger\n"
+                "tile this Tilemap synthesises. Filtered by\n"
+                "Window > Collision Matrix.");
+        }
         ImGui::TextDisabled("Painted cells: %zu", tm.cells.size());
         if (changed) {
             m_scene.MarkDirty();

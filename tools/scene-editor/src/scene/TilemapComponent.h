@@ -37,6 +37,13 @@ public:
     std::string sortingLayer = "Default";
     int         orderInLayer = 0;
 
+    // M7c20: collision layer that flows through the M7c11 layer
+    // matrix when the M7c18 per-tile collider pass synthesises
+    // colliders for this Tilemap's flagged cells. Defaults to
+    // "Default" so old tilemaps keep colliding with every layer
+    // that does today.
+    std::string collisionLayer = "Default";
+
     static const char* StaticTypeName() { return "Tilemap"; }
     const char* TypeName() const override { return StaticTypeName(); }
 
