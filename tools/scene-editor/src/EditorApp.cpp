@@ -258,6 +258,7 @@ public:
             if (p.Open(m_startupProjectPath)) {
                 m_project = std::move(p);
                 m_assetDb.Open(m_project);
+                ApplyProjectAudioMixer();
                 ReloadAllScripts();
                 UpdateWindowTitle();
             }
@@ -315,6 +316,7 @@ public:
         DrawNewProjectModal();
         DrawSortingLayersModal();
         DrawCollisionMatrixModal();
+        DrawAudioMixerModal();
         DrawSpriteEditorWindow();
         DrawTilesetEditorWindow();
         DrawAutotileEditorWindow();
@@ -2786,8 +2788,25 @@ private:
         if (!p.Open(folder)) return;
         m_project = std::move(p);
         m_assetDb.Open(m_project);
+        ApplyProjectAudioMixer();
         ReloadAllScripts();
         UpdateWindowTitle();
+    }
+
+    // M8c12. Push the project's persisted master/SFX/music levels
+    // into the live Audio engine. Called whenever a project is
+    // opened (CLI flag, File > Open Project, New Project flow) so
+    // the bus state always matches the JSON.
+    void ApplyProjectAudioMixer() {
+        SceneEditor::Audio::SetBusVolume(
+            SceneEditor::Audio::Bus::Master,
+            m_project.AudioMasterVolume());
+        SceneEditor::Audio::SetBusVolume(
+            SceneEditor::Audio::Bus::Sfx,
+            m_project.AudioSfxVolume());
+        SceneEditor::Audio::SetBusVolume(
+            SceneEditor::Audio::Bus::Music,
+            m_project.AudioMusicVolume());
     }
 
     // Walks every "Script" typed asset in the database + sends it
@@ -3025,6 +3044,10 @@ private:
             if (ImGui::MenuItem("Collision Matrix...", nullptr, false,
                                 m_project.IsOpen())) {
                 m_openCollisionMatrixModal = true;
+            }
+            if (ImGui::MenuItem("Audio Mixer...", nullptr, false,
+                                m_project.IsOpen())) {
+                m_openAudioMixerModal = true;
             }
             ImGui::EndMenu();
         }
@@ -6499,6 +6522,77 @@ private:
         ImGui::EndPopup();
     }
 
+    // M8c12 Audio Mixer. Three sliders driving the submix bus
+    // volumes Audio.cpp keeps. Changes propagate to the live engine
+    // (so the user hears the new balance immediately) AND to
+    // project.json (so re-opening the project restores it).
+    void DrawAudioMixerModal() {
+        if (m_openAudioMixerModal) {
+            ImGui::OpenPopup("Audio Mixer");
+            m_openAudioMixerModal = false;
+        }
+        if (!ImGui::BeginPopupModal("Audio Mixer", nullptr,
+                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            return;
+        }
+        ImGui::TextUnformatted(
+            "Per-bus volumes apply multiplicatively on top of every\n"
+            "voice's own volume. Master scales the final mix.");
+        ImGui::Separator();
+
+        struct Row {
+            const char*       label;
+            SceneEditor::Audio::Bus bus;
+            float             value;
+        };
+        Row rows[3] = {
+            { "Master", SceneEditor::Audio::Bus::Master,
+              m_project.AudioMasterVolume() },
+            { "SFX",    SceneEditor::Audio::Bus::Sfx,
+              m_project.AudioSfxVolume()    },
+            { "Music",  SceneEditor::Audio::Bus::Music,
+              m_project.AudioMusicVolume()  },
+        };
+
+        bool changed = false;
+        for (Row& r : rows) {
+            ImGui::PushID(r.label);
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::SliderFloat(r.label, &r.value, 0.0f, 1.0f,
+                                   "%.2f")) {
+                SceneEditor::Audio::SetBusVolume(r.bus, r.value);
+                switch (r.bus) {
+                case SceneEditor::Audio::Bus::Master:
+                    m_project.SetAudioMasterVolume(r.value); break;
+                case SceneEditor::Audio::Bus::Sfx:
+                    m_project.SetAudioSfxVolume(r.value);    break;
+                case SceneEditor::Audio::Bus::Music:
+                    m_project.SetAudioMusicVolume(r.value);  break;
+                }
+                changed = true;
+            }
+            ImGui::PopID();
+        }
+        if (changed) m_project.Save();
+
+        ImGui::Separator();
+        if (ImGui::Button("Reset All")) {
+            SceneEditor::Audio::SetBusVolume(
+                SceneEditor::Audio::Bus::Master, 1.0f);
+            SceneEditor::Audio::SetBusVolume(
+                SceneEditor::Audio::Bus::Sfx, 1.0f);
+            SceneEditor::Audio::SetBusVolume(
+                SceneEditor::Audio::Bus::Music, 1.0f);
+            m_project.SetAudioMasterVolume(1.0f);
+            m_project.SetAudioSfxVolume(1.0f);
+            m_project.SetAudioMusicVolume(1.0f);
+            m_project.Save();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
     void DrawNewProjectModal() {
         if (m_openNewProjectModal) {
             ImGui::OpenPopup("New Project");
@@ -6544,6 +6638,7 @@ private:
             if (p.Create(root, name)) {
                 m_project = std::move(p);
                 m_assetDb.Open(m_project);
+                ApplyProjectAudioMixer();
                 ReloadAllScripts();
                 UpdateWindowTitle();
                 ImGui::CloseCurrentPopup();
@@ -10324,6 +10419,7 @@ private:
     // Modal trigger flags.
     bool                m_openLayersModal = false;
     bool                m_openCollisionMatrixModal = false;
+    bool                m_openAudioMixerModal = false;
     // Sprite Editor state. m_spriteEditorOpen drives the window's
     // visibility; activating it via OpenSpriteEditor pre-focuses the
     // window so a stale floating instance doesn't get lost behind a

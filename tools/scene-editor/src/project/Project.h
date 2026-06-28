@@ -84,6 +84,19 @@ public:
 
     static std::vector<std::string> DefaultCollisionLayers();
 
+    // M8c12 audio mixer state. Per-bus volumes the editor's Audio
+    // Mixer modal edits + persists into project.json so each
+    // project keeps its own SFX/music balance. All values are
+    // clamped to [0, 1] on set; defaults are 1.0 (unity gain) so
+    // legacy projects (with no `audioMixer` block in their JSON)
+    // load to the same sound level as before this milestone.
+    float AudioMasterVolume() const { return m_audioMasterVolume; }
+    float AudioSfxVolume()    const { return m_audioSfxVolume; }
+    float AudioMusicVolume()  const { return m_audioMusicVolume; }
+    void  SetAudioMasterVolume(float v);
+    void  SetAudioSfxVolume(float v);
+    void  SetAudioMusicVolume(float v);
+
 private:
     bool EnsureFolderTree() const;
     bool WriteProjectJson() const;
@@ -98,6 +111,11 @@ private:
     // missing entry is "true" (collide); SetCollisionLayersCollide
     // populates it when the user un-ticks a pair.
     std::vector<std::pair<std::string, std::string>> m_collisionMatrixOff;
+    // M8c12. Defaults to unity so omitting the JSON block leaves
+    // playback unchanged.
+    float m_audioMasterVolume = 1.0f;
+    float m_audioSfxVolume    = 1.0f;
+    float m_audioMusicVolume  = 1.0f;
 };
 
 } // namespace SceneEditor

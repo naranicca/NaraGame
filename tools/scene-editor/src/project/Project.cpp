@@ -110,6 +110,18 @@ void Project::SetCollisionLayersCollide(const std::string& a,
     }
 }
 
+namespace {
+float ClampVol(float v) {
+    if (v < 0.0f) return 0.0f;
+    if (v > 1.0f) return 1.0f;
+    return v;
+}
+}
+
+void Project::SetAudioMasterVolume(float v) { m_audioMasterVolume = ClampVol(v); }
+void Project::SetAudioSfxVolume(float v)    { m_audioSfxVolume    = ClampVol(v); }
+void Project::SetAudioMusicVolume(float v)  { m_audioMusicVolume  = ClampVol(v); }
+
 void Project::SetSortingLayers(std::vector<std::string> layers) {
     if (layers.empty()) layers = DefaultSortingLayers();
     m_sortingLayers = std::move(layers);
@@ -206,6 +218,9 @@ void Project::Close() {
     m_rootDir.clear();
     m_name.clear();
     m_version = "0.1.0";
+    m_audioMasterVolume = 1.0f;
+    m_audioSfxVolume    = 1.0f;
+    m_audioMusicVolume  = 1.0f;
 }
 
 bool Project::EnsureFolderTree() const {
@@ -251,6 +266,14 @@ bool Project::WriteProjectJson() const {
         cmatrix.Push(std::move(pair));
     }
     root.Add("collisionMatrixOff", std::move(cmatrix));
+    // M8c12 audio mixer block. Always written so a fresh project gets
+    // a visible record of its default state in project.json; the read
+    // path tolerates the block being absent.
+    Value mixer = Value::MakeObject();
+    mixer.Add("master", Value::MakeNumber(double(m_audioMasterVolume)));
+    mixer.Add("sfx",    Value::MakeNumber(double(m_audioSfxVolume)));
+    mixer.Add("music",  Value::MakeNumber(double(m_audioMusicVolume)));
+    root.Add("audioMixer", std::move(mixer));
     const std::string out = NaraGame::MiniJson::Write(root);
     if (!WriteFileText(ProjectJsonPath(), out)) {
         NARAGAME_ERROR("Project: cannot write '%s'", ProjectJsonPath().c_str());
@@ -296,6 +319,19 @@ bool Project::ReadProjectJson() {
     }
     if (m_collisionLayers.empty()) {
         m_collisionLayers = DefaultCollisionLayers();
+    }
+    // M8c12 audio mixer block. Missing object / fields => defaults
+    // (1.0). Values out of range get clamped on Set, so a hand-edited
+    // 5.0 in JSON loads as 1.0 instead of blowing speakers.
+    const NaraGame::MiniJson::Value* mixer = root.Find("audioMixer");
+    if (mixer && mixer->IsObject()) {
+        SetAudioMasterVolume(float(mixer->GetNumber("master", 1.0)));
+        SetAudioSfxVolume   (float(mixer->GetNumber("sfx",    1.0)));
+        SetAudioMusicVolume (float(mixer->GetNumber("music",  1.0)));
+    } else {
+        m_audioMasterVolume = 1.0f;
+        m_audioSfxVolume    = 1.0f;
+        m_audioMusicVolume  = 1.0f;
     }
     m_collisionMatrixOff.clear();
     const NaraGame::MiniJson::Value* cmatrix = root.Find("collisionMatrixOff");
