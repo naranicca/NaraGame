@@ -15,6 +15,7 @@
 #include "project/Project.h"
 #include "scene/AnimatorComponent.h"
 #include "scene/BoxColliderComponent.h"
+#include "scene/CapsuleColliderComponent.h"
 #include "scene/CircleColliderComponent.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
@@ -549,7 +550,13 @@ private:
 
     void TickColliders(float /*dt*/) {
         if (!m_animPlaying) return;
-        enum class ColliderKind { Box, Circle };
+        // M7c27: Capsule joins Box + Circle. Stored as
+        // (cx, cy, halfY, radius, cosR, sinR) where halfY is
+        // the spine half-length along local Y; radius is the
+        // hemispherical cap radius. Overlap + ComputeMTV
+        // decompose it into a centre OBB + 2 endcap circles +
+        // dispatch through the existing Box / Circle helpers.
+        enum class ColliderKind { Box, Circle, Capsule };
         struct ColliderInfo {
             SceneEditor::EntityId   id;
             std::string             name;
@@ -619,7 +626,8 @@ private:
             if (!tr) continue;
             auto* bc = e->GetComponent<SceneEditor::BoxColliderComponent>();
             auto* cc = e->GetComponent<SceneEditor::CircleColliderComponent>();
-            if (!bc && !cc) continue;
+            auto* capc = e->GetComponent<SceneEditor::CapsuleColliderComponent>();
+            if (!bc && !cc && !capc) continue;
             auto* sc = e->GetComponent<SceneEditor::ScriptComponent>();
             auto* rbInfo = e->GetComponent<SceneEditor::Rigidbody2DComponent>();
             ColliderInfo ci;
@@ -656,7 +664,7 @@ private:
                 ci.maxX      = ci.cx + ex;
                 ci.minY      = ci.cy - ey;
                 ci.maxY      = ci.cy + ey;
-            } else {
+            } else if (cc) {
                 const float scaleAvg =
                     (tr->scale.x + tr->scale.y) * 0.5f;
                 ci.kind      = ColliderKind::Circle;
@@ -673,6 +681,38 @@ private:
                 ci.maxX      = ci.cx + ci.radius;
                 ci.minY      = ci.cy - ci.radius;
                 ci.maxY      = ci.cy + ci.radius;
+            } else {
+                // M7c27: capsule -- rotation flows in from the
+                // Transform same as Box. halfY = spine
+                // halfLength along local Y, radius = cap.
+                const float scaleX = tr->scale.x;
+                const float scaleY = tr->scale.y;
+                const float scaleAvg = (scaleX + scaleY) * 0.5f;
+                ci.kind      = ColliderKind::Capsule;
+                ci.isTrigger = capc->isTrigger;
+                ci.layer     = capc->layer;
+                ci.cx        = tr->position.x + capc->offset.x;
+                ci.cy        = tr->position.y + capc->offset.y;
+                ci.radius    = capc->radius * scaleAvg;
+                ci.halfX     = ci.radius;
+                ci.halfY     = capc->halfLength * scaleY;
+                const float rotRad = tr->rotation
+                    * 3.14159265358979323846f / 180.0f;
+                ci.cosR      = std::cos(rotRad);
+                ci.sinR      = std::sin(rotRad);
+                // Bounding AABB = the rotated rect of size
+                // (2r, 2(halfLen + r)) -- the endcap circles
+                // already lie inside that envelope.
+                const float ex =
+                    std::fabs(ci.cosR) * ci.radius +
+                    std::fabs(ci.sinR) * (ci.halfY + ci.radius);
+                const float ey =
+                    std::fabs(ci.sinR) * ci.radius +
+                    std::fabs(ci.cosR) * (ci.halfY + ci.radius);
+                ci.minX      = ci.cx - ex;
+                ci.maxX      = ci.cx + ex;
+                ci.minY      = ci.cy - ey;
+                ci.maxY      = ci.cy + ey;
             }
             infos.push_back(std::move(ci));
         }
@@ -1182,14 +1222,65 @@ private:
             outY = pushY * pen;
         };
 
-        auto ComputeMTV = [&SatBoxBox, &SlopeCircleMtv, &SatTriBox](
+        // M7c27: build three sub-ColliderInfos for a capsule --
+        // a centre OBB (size 2r x 2halfLen) + two endcap
+        // circles. Endcaps live at the capsule centre +/- the
+        // local-Y direction (-sinR, cosR) scaled by halfLen.
+        // Defined before ComputeMTV so the lambda capture works
+        // without a forward declaration.
+        auto CapsuleDecompose = [](const ColliderInfo& cap,
+                                   ColliderInfo* out) {
+            const float dirX = -cap.sinR;
+            const float dirY =  cap.cosR;
+            ColliderInfo core = cap;
+            core.kind   = ColliderKind::Box;
+            core.halfX  = cap.radius;
+            core.halfY  = cap.halfY;
+            const float exA =
+                std::fabs(core.cosR) * core.halfX +
+                std::fabs(core.sinR) * core.halfY;
+            const float eyA =
+                std::fabs(core.sinR) * core.halfX +
+                std::fabs(core.cosR) * core.halfY;
+            core.minX = core.cx - exA;
+            core.maxX = core.cx + exA;
+            core.minY = core.cy - eyA;
+            core.maxY = core.cy + eyA;
+            out[0] = core;
+            for (int i = 0; i < 2; ++i) {
+                const float sign = (i == 0) ? -1.0f : 1.0f;
+                ColliderInfo cap_i = cap;
+                cap_i.kind   = ColliderKind::Circle;
+                cap_i.cx     = cap.cx + sign * dirX * cap.halfY;
+                cap_i.cy     = cap.cy + sign * dirY * cap.halfY;
+                cap_i.halfX  = cap.radius;
+                cap_i.halfY  = cap.radius;
+                cap_i.cosR   = 1.0f;
+                cap_i.sinR   = 0.0f;
+                cap_i.minX   = cap_i.cx - cap.radius;
+                cap_i.maxX   = cap_i.cx + cap.radius;
+                cap_i.minY   = cap_i.cy - cap.radius;
+                cap_i.maxY   = cap_i.cy + cap.radius;
+                out[1 + i] = cap_i;
+            }
+        };
+
+        auto ComputeMTV = [&SatBoxBox, &SlopeCircleMtv, &SatTriBox,
+                           &CapsuleDecompose](
                             const ColliderInfo& a,
                             const ColliderInfo& b,
                             float& dx, float& dy) {
             dx = 0.0f; dy = 0.0f;
-            // M7c22: slope vs circle is its own MTV path.
-            // M7c24: slope vs box runs the dedicated triangle-
-            // vs-OBB SAT instead of the M7c22 AABB approximation.
+            // M7c27 capsule decomp: when either side is a
+            // capsule, expand it into core OBB + 2 endcap
+            // circles, compute MTV for every sub-pair, and
+            // return the sub-pair whose push depth is largest.
+            // The non-capsule path lives below in `testPair` so
+            // the dispatch stays a single in-place expansion.
+            auto testPair = [&](const ColliderInfo& a,
+                                const ColliderInfo& b,
+                                float& dx, float& dy) {
+            dx = 0.0f; dy = 0.0f;
             const bool aSlope =
                 a.slope != ColliderInfo::SlopeShape::None;
             const bool bSlope =
@@ -1322,6 +1413,32 @@ private:
             } else {
                 dx =  pushX; dy =  pushY;
             }
+            };  // testPair
+
+            const bool aCap = (a.kind == ColliderKind::Capsule);
+            const bool bCap = (b.kind == ColliderKind::Capsule);
+            if (!aCap && !bCap) { testPair(a, b, dx, dy); return; }
+            ColliderInfo aArr[3], bArr[3];
+            const ColliderInfo* ap = &a;
+            const ColliderInfo* bp = &b;
+            int aN = 1, bN = 1;
+            if (aCap) { CapsuleDecompose(a, aArr); ap = aArr; aN = 3; }
+            if (bCap) { CapsuleDecompose(b, bArr); bp = bArr; bN = 3; }
+            float bestLenSq = -1.0f;
+            float bestDx = 0.0f, bestDy = 0.0f;
+            for (int i = 0; i < aN; ++i) {
+                for (int j = 0; j < bN; ++j) {
+                    float subDx = 0.0f, subDy = 0.0f;
+                    testPair(ap[i], bp[j], subDx, subDy);
+                    const float lenSq = subDx * subDx + subDy * subDy;
+                    if (lenSq > bestLenSq) {
+                        bestLenSq = lenSq;
+                        bestDx = subDx;
+                        bestDy = subDy;
+                    }
+                }
+            }
+            dx = bestDx; dy = bestDy;
         };
 
         // Per-shape overlap. Box-vs-box runs the M7c13 SAT
@@ -1347,13 +1464,15 @@ private:
             return ddx * ddx + ddy * ddy <=
                    circ.radius * circ.radius;
         };
-        auto Overlap = [&SatBoxBox, &SlopeCircleOverlap, &SatTriBox]
+        auto Overlap = [&SatBoxBox, &SlopeCircleOverlap, &SatTriBox,
+                        &CapsuleDecompose]
                        (const ColliderInfo& a, const ColliderInfo& b) {
-            // M7c22: slope vs circle takes its own path.
-            // M7c24: slope vs box runs the dedicated triangle-
-            // vs-OBB SAT instead of the M7c22 bounding-AABB
-            // approximation, so box bodies finally feel the
-            // slope's diagonal face.
+            // Inner pair test -- handles every shape *except*
+            // Capsule. M7c27 wraps it with a capsule decomp
+            // pass so the same body of code keeps serving the
+            // non-capsule pairs unchanged.
+            auto testPair = [&](const ColliderInfo& a,
+                                const ColliderInfo& b) -> bool {
             const bool aSlope =
                 a.slope != ColliderInfo::SlopeShape::None;
             const bool bSlope =
@@ -1374,10 +1493,6 @@ private:
             }
             if (a.kind == ColliderKind::Box &&
                 b.kind == ColliderKind::Box) {
-                // SAT yields a yes/no plus a throwaway MTV --
-                // we just need the boolean; ComputeMTV reruns
-                // SAT for the solid path so the redundant work
-                // is bounded.
                 float dxIgn = 0.0f, dyIgn = 0.0f;
                 return SatBoxBox(a, b, dxIgn, dyIgn);
             }
@@ -1388,9 +1503,6 @@ private:
                 const float r  = a.radius + b.radius;
                 return dx * dx + dy * dy <= r * r;
             }
-            // Box-Circle: route the circle into the box's
-            // local frame so the rotated box uses an axis-
-            // aligned clamp.
             const ColliderInfo& box =
                 a.kind == ColliderKind::Box ? a : b;
             const ColliderInfo& circ =
@@ -1404,6 +1516,26 @@ private:
             const float dx  = lx - cx2;
             const float dy  = ly - cy2;
             return dx * dx + dy * dy <= circ.radius * circ.radius;
+            };  // testPair
+
+            // M7c27 capsule decomp: any side that's a capsule
+            // expands into 3 sub-shapes (core OBB + 2 endcaps).
+            // Any sub-pair overlap means the capsule overlaps.
+            const bool aCap = (a.kind == ColliderKind::Capsule);
+            const bool bCap = (b.kind == ColliderKind::Capsule);
+            if (!aCap && !bCap) return testPair(a, b);
+            ColliderInfo aArr[3], bArr[3];
+            const ColliderInfo* ap = &a;
+            const ColliderInfo* bp = &b;
+            int aN = 1, bN = 1;
+            if (aCap) { CapsuleDecompose(a, aArr); ap = aArr; aN = 3; }
+            if (bCap) { CapsuleDecompose(b, bArr); bp = bArr; bN = 3; }
+            for (int i = 0; i < aN; ++i) {
+                for (int j = 0; j < bN; ++j) {
+                    if (testPair(ap[i], bp[j])) return true;
+                }
+            }
+            return false;
         };
         // O(n^2) pair check. Fine for editor-scale entity counts;
         // a spatial grid lands when a real game pushes the count
@@ -6115,6 +6247,8 @@ private:
             DrawBoxColliderEditor(entity, *bc);
         } else if (auto* cc = dynamic_cast<SceneEditor::CircleColliderComponent*>(comp)) {
             DrawCircleColliderEditor(entity, *cc);
+        } else if (auto* cap = dynamic_cast<SceneEditor::CapsuleColliderComponent*>(comp)) {
+            DrawCapsuleColliderEditor(entity, *cap);
         } else if (auto* rb = dynamic_cast<SceneEditor::Rigidbody2DComponent*>(comp)) {
             DrawRigidbody2DEditor(entity, *rb);
         } else {
@@ -6236,6 +6370,35 @@ private:
                 "un-ticked in Edit > Collision Matrix are\n"
                 "filtered out of every overlap test.");
         }
+    }
+
+    // Capsule = radius + halfLength (spine along local Y). The
+    // collision pass decomposes it into a centre rectangle +
+    // two end-cap circles (M7c27).
+    void DrawCapsuleColliderEditor(SceneEditor::Entity& /*entity*/,
+                                   SceneEditor::CapsuleColliderComponent& cc) {
+        if (ImGui::DragFloat("Radius", &cc.radius, 0.05f,
+                              0.0f, 0.0f, "%.2f")) {
+            UndoSnapshot();
+            if (cc.radius < 0.0f) cc.radius = 0.0f;
+        }
+        if (ImGui::DragFloat("Half Length", &cc.halfLength, 0.05f,
+                              0.0f, 0.0f, "%.2f")) {
+            UndoSnapshot();
+            if (cc.halfLength < 0.0f) cc.halfLength = 0.0f;
+        }
+        float off[2] = { cc.offset.x, cc.offset.y };
+        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
+                               "%.2f")) {
+            UndoSnapshot();
+            cc.offset = { off[0], off[1] };
+        }
+        bool trig = cc.isTrigger;
+        if (ImGui::Checkbox("Is Trigger", &trig)) {
+            UndoSnapshot();
+            cc.isTrigger = trig;
+        }
+        DrawColliderLayerCombo(cc.layer);
     }
 
     // Same shape as DrawBoxColliderEditor but with a single
@@ -8036,6 +8199,94 @@ private:
             const float thickness = sel ? 2.5f : 1.5f;
             dl->AddCircle(cs, pixelR, col, 32, thickness);
             dl->AddCircleFilled(cs, 2.5f, col);
+        }
+        // M7c27: CapsuleCollider gizmos. Outline = rotated
+        // rectangle through the spine (2r wide, 2(halfLen+r)
+        // tall) trimmed with two semicircular caps. Trace the
+        // two side segments + two arcs as polylines so the
+        // shape matches the runtime decomposition exactly.
+        for (SceneEditor::EntityId id : ids) {
+            const auto* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            const auto* tr =
+                e->GetComponent<SceneEditor::TransformComponent>();
+            const auto* cap =
+                e->GetComponent<SceneEditor::CapsuleColliderComponent>();
+            if (!tr || !cap) continue;
+            const float scaleX = tr->scale.x;
+            const float scaleY = tr->scale.y;
+            const float scaleAvg = (scaleX + scaleY) * 0.5f;
+            const float wr  = cap->radius     * scaleAvg;
+            const float whl = cap->halfLength * scaleY;
+            const float cx  = tr->position.x + cap->offset.x;
+            const float cy  = tr->position.y + cap->offset.y;
+            const float rotRad = tr->rotation
+                * 3.14159265358979323846f / 180.0f;
+            const float cosR = std::cos(rotRad);
+            const float sinR = std::sin(rotRad);
+            // Spine endpoints in world (local Y is the spine).
+            const float dirX = -sinR;
+            const float dirY =  cosR;
+            const float pAx = cx - dirX * whl;
+            const float pAy = cy - dirY * whl;
+            const float pBx = cx + dirX * whl;
+            const float pBy = cy + dirY * whl;
+            // Right-perpendicular vector of magnitude r.
+            const float rx =  cosR * wr;
+            const float ry =  sinR * wr;
+            bool overlapping = false;
+            for (const auto& key : m_collisionPairs) {
+                if (key.first == id || key.second == id) {
+                    overlapping = true; break;
+                }
+            }
+            const bool sel = (id == m_selection);
+            const ImU32 col = overlapping
+                ? (sel ? IM_COL32(255, 220, 80, 255)
+                       : IM_COL32(255, 200, 60, 200))
+                : (sel ? IM_COL32(120, 255, 140, 255)
+                       : IM_COL32(80,  220, 100, 180));
+            const float thickness = sel ? 2.5f : 1.5f;
+            // Side line 1: pA + r-perp -> pB + r-perp.
+            const ImVec2 s1a = WorldToScreen(
+                ImVec2(pAx + rx, pAy + ry), panelMin, panelSize);
+            const ImVec2 s1b = WorldToScreen(
+                ImVec2(pBx + rx, pBy + ry), panelMin, panelSize);
+            dl->AddLine(s1a, s1b, col, thickness);
+            const ImVec2 s2a = WorldToScreen(
+                ImVec2(pAx - rx, pAy - ry), panelMin, panelSize);
+            const ImVec2 s2b = WorldToScreen(
+                ImVec2(pBx - rx, pBy - ry), panelMin, panelSize);
+            dl->AddLine(s2a, s2b, col, thickness);
+            // Two semicircular caps. Approximate each with N
+            // segments rendered as a polyline through world-
+            // space points so the camera zoom respects the
+            // capsule's radius automatically.
+            const int N = 16;
+            ImVec2 capA[N + 1];
+            ImVec2 capB[N + 1];
+            for (int i = 0; i <= N; ++i) {
+                const float th = float(i) / float(N) * 3.14159265f;
+                const float lx = std::sin(th) * wr;
+                const float ly = std::cos(th) * wr;
+                // pA cap: rotate (lx, -ly) into world + add pA.
+                const float wxA = pAx + cosR * lx - sinR * (-ly);
+                const float wyA = pAy + sinR * lx + cosR * (-ly);
+                capA[i] = WorldToScreen(
+                    ImVec2(wxA, wyA), panelMin, panelSize);
+                // pB cap: rotate (-lx, ly) into world + add pB.
+                const float wxB = pBx + cosR * (-lx) - sinR * ly;
+                const float wyB = pBy + sinR * (-lx) + cosR * ly;
+                capB[i] = WorldToScreen(
+                    ImVec2(wxB, wyB), panelMin, panelSize);
+            }
+            dl->AddPolyline(capA, N + 1, col,
+                             ImDrawFlags_None, thickness);
+            dl->AddPolyline(capB, N + 1, col,
+                             ImDrawFlags_None, thickness);
+            const ImVec2 origin = WorldToScreen(
+                ImVec2(cx, cy), panelMin, panelSize);
+            dl->AddCircleFilled(origin, 2.5f, col);
         }
     }
 
