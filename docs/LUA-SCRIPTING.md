@@ -238,15 +238,30 @@ all happen in `TickColliders` before any Lua dispatch fires.
 
 | Component | Key fields | Notes |
 | --------- | ---------- | ----- |
-| `BoxCollider` | `size`, `offset`, `isTrigger`, `layer` | Axis-aligned bounding box |
-| `CircleCollider` | `radius`, `offset`, `isTrigger`, `layer` | Centre + radius |
+| `BoxCollider` | `size`, `offset`, `isTrigger`, `layer` | Oriented bounding box -- inherits the owning Transform's rotation (M7c13) |
+| `CircleCollider` | `radius`, `offset`, `isTrigger`, `layer` | Centre + radius; rotation-invariant |
 | `Rigidbody2D` | `velocity`, `gravity`, `drag`, `mass`, `restitution`, `friction` | See `rigidbody.*` |
 
-Mixed Box-vs-Circle pairs use the standard nearest-point-on-box
-clamp. The runtime fires `OnTrigger*` when **either** side is
-flagged trigger and `OnCollision*` when both are solid; the
-solid path also push-outs along the MTV + reflects velocity by
-the combined restitution.
+Box pairs use SAT (Separating Axis Theorem) so the collider
+follows whatever rotation `Transform.rotation` carries -- a
+sprite rotated 45 degrees gets a diamond hitbox, not its
+axis-aligned bounding box. Box-vs-circle routes the circle's
+centre into the box's local frame so the same nearest-point
+clamp the M7c1 path used still applies even when the box is
+rotated. The runtime fires `OnTrigger*` when **either** side
+is flagged trigger and `OnCollision*` when both are solid;
+the solid path also push-outs along the MTV + reflects
+velocity by the combined restitution.
+
+Physics runs at 4x the render rate: `TickPhysics` (M7c14)
+splits the frame's dt into four sub-steps and runs the
+integrator + collision pass on each. Lua scripts still get
+one `OnUpdate(dt)` per render frame, but `OnTriggerStay` /
+`OnCollisionStay` now fire **four times** per frame -- a
+damage-tick counter that accumulates in `Stay` will see 4x
+the ticks per render frame compared to a Update-driven
+counter. Stay handlers that need once-per-frame semantics
+should drive from a frame counter in `OnUpdate` instead.
 
 #### Collision layers + matrix
 
@@ -447,7 +462,15 @@ end
 `scene.raycast` returns the nearest collider hit along the
 segment; `scene.overlap_box` / `scene.overlap_circle` return
 every collider that intersects a virtual shape, without
-needing a permanent sensor entity in the scene.
+needing a permanent sensor entity in the scene. All four
+spatial queries -- raycast, overlap_box, overlap_circle, and
+`entity_at` -- honour `Transform.rotation` on Box colliders
+(M7c15). A ray fired at a rotated Box collider hits the
+actual rotated face, not the AABB envelope; `entity_at`
+picks a point that's inside the rotated outline even when
+it sits outside the AABB. The price for that precision is
+roughly one extra dot-product per box-pair / box-point
+test -- still O(1) per candidate.
 
 ## IDE tools
 
@@ -460,15 +483,32 @@ needing a permanent sensor entity in the scene.
 | **File watcher** | Polls `last_write_time` every 1 s; covers Script + Animation + AnimatorController + Texture + Tileset + Autotile. |
 | **Window > Sorting Layers...** | Edit the SpriteRenderer draw order layers (rename / add / reorder). |
 | **Window > Collision Matrix...** | Edit collision layers + the NxN collide/skip matrix. |
-| **Viewport collider gizmos** | Every Box / Circle collider renders an outline; the M7c2 gizmo colour shifts from green to amber while the pair is overlapping. |
+| **Viewport collider gizmos** | Every Box / Circle collider renders an outline; the M7c2 gizmo colour shifts from green to amber while the pair is overlapping. M7c13 traces the rotated rect for Box colliders so the gizmo matches the SAT footprint. |
+
+## Rotation summary
+
+`Transform.rotation` (degrees, z-axis CCW) flows through the
+entire stack consistently as of M7c16:
+
+| System | Rotation handling | Commit |
+| ------ | ----------------- | ------ |
+| SpriteRenderer Simple draw | 4 corners rotated, AddImageQuad | M7c12 |
+| SpriteRenderer Sliced 9-zone | Each of the 9 tiles rotates as part of one rigid quad | M7c16 |
+| SpriteRenderer Tiled mode | Same -- TileQuad threads the rotation matrix through each repeated tile | M7c16 |
+| BoxCollider physics (Trigger / Solid) | SAT (Separating Axis Theorem) on the 4 candidate axes | M7c13 |
+| Collider viewport gizmo | Rotated rect traced as AddPolyline | M7c13 |
+| `scene.raycast` | Ray transformed into box local frame | M7c15 |
+| `scene.overlap_box` | AABB-vs-OBB SAT | M7c15 |
+| `scene.overlap_circle` | Circle centre rotated into box local frame | M7c15 |
+| `scene.entity_at` | Point rotated into entity local frame | M7c15 |
+
+CircleCollider is rotation-invariant; SortingLayer + draw
+order ignore rotation; the AnimatorController + animation
+event payload don't carry rotation themselves (scripts can
+read it via `transform.get_rotation`).
 
 ## Limitations + future work
 
-- M7c12 ships sprite rotation for the SpriteRenderer's Simple
-  draw mode; Sliced + Tiled draw modes still render axis-
-  aligned. Colliders (Box / Circle) and `entity_at` keep AABB
-  semantics for now -- rotated OBB collision (SAT) is a
-  follow-up.
 - `rigidbody.*` doesn't expose mass / restitution / friction
   yet; tweak those through the inspector or scene JSON. The
   runtime reads them every tick so live edits work without
@@ -485,6 +525,11 @@ needing a permanent sensor entity in the scene.
   -- the data flow is too entangled with the editor's live state
   (selection, undo stack, runtime ScriptComponent flags) for a
   silent reload to do the right thing.
+- The M7c14 sub-step ratio is hardcoded (`kPhysicsSubSteps = 4`);
+  fast bodies that move more than four times their collider
+  thickness per render frame can still tunnel. A project-level
+  setting + per-body "is bullet" hint can address this when the
+  use case shows up.
 - Fast bodies can tunnel through thin colliders within a single
   60-FPS step; the M7c10 inside-box fallback resolves bodies
   caught penetrating but a CCD / sub-step pass would prevent
