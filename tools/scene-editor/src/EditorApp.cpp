@@ -7222,6 +7222,80 @@ private:
             }
         }
 
+        // M9c6 per-particle frame animation. List of sub-sprite
+        // names + per-second rate + loop toggle. The
+        // sub-sprite combo above keeps editing the M9c5 single-
+        // cell path; once one or more frames are added here
+        // the renderer switches to the animated path + ignores
+        // `subSprite` until the list is cleared.
+        if (ps.texture.IsValid()) {
+            std::vector<SceneEditor::SubSprite> subs;
+            if (const auto* entry = m_assetDb.FindByGuid(ps.texture)) {
+                SceneEditor::TextureImportSettings imp;
+                imp.FromJson(entry->importSettings);
+                subs = imp.spriteSheet.sprites;
+            }
+            ImGui::Text("Frames: %d", int(ps.animFrames.size()));
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Add##frame")) {
+                UndoSnapshot();
+                ps.animFrames.emplace_back();
+            }
+            if (!ps.animFrames.empty()) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clear##frames")) {
+                    UndoSnapshot();
+                    ps.animFrames.clear();
+                }
+            }
+            int removeAt = -1;
+            for (int i = 0; i < int(ps.animFrames.size()); ++i) {
+                ImGui::PushID(i);
+                std::string& frame = ps.animFrames[size_t(i)];
+                const char* preview =
+                    frame.empty() ? "(none)" : frame.c_str();
+                ImGui::SetNextItemWidth(180.0f);
+                if (ImGui::BeginCombo("##framepick", preview)) {
+                    if (ImGui::Selectable("(none)", frame.empty())) {
+                        UndoSnapshot();
+                        frame.clear();
+                    }
+                    for (const auto& sub : subs) {
+                        const bool sel = (sub.name == frame);
+                        if (ImGui::Selectable(sub.name.c_str(), sel)) {
+                            UndoSnapshot();
+                            frame = sub.name;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X")) removeAt = i;
+                ImGui::PopID();
+            }
+            if (removeAt >= 0) {
+                UndoSnapshot();
+                ps.animFrames.erase(
+                    ps.animFrames.begin() + removeAt);
+            }
+            if (!ps.animFrames.empty()) {
+                if (ImGui::DragFloat("Anim FPS", &ps.animFps,
+                                      0.5f, 0.0f, 0.0f, "%.1f")) {
+                    UndoSnapshot();
+                    if (ps.animFps < 0.0f) ps.animFps = 0.0f;
+                }
+                if (ImGui::Checkbox("Anim Loop", &ps.animLoop)) {
+                    UndoSnapshot();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Loop: wrap via modulo for fire / sparkle\n"
+                        "loops. Off: clamp at the last frame --\n"
+                        "use for one-shot explosion sequences.");
+                }
+            }
+        }
+
         if (ImGui::Checkbox("Play On Start", &ps.playOnStart)) {
             UndoSnapshot();
         }
@@ -9386,49 +9460,64 @@ private:
             if (!ps || ps->_liveCount <= 0) continue;
             NaraGame::RHITexture* tex = nullptr;
             ImTextureID texId = (ImTextureID)0;
-            // M9c5 per-emitter sub-sprite resolve. Whole-texture
-            // defaults to (0..1, 0..1); a non-empty subSprite
-            // name walks the texture's sheet to pick a cell.
-            // Names that don't match silently keep the whole-
-            // tex UVs so a stale rename doesn't make particles
-            // vanish.
-            ImVec2 uvFull0{0.0f, 0.0f};
-            ImVec2 uvFull1{1.0f, 0.0f};
-            ImVec2 uvFull2{1.0f, 1.0f};
-            ImVec2 uvFull3{0.0f, 1.0f};
+            // M9c5/M9c6 per-emitter UV resolve. Frame cache
+            // holds one UV rect per animation frame; an
+            // emitter without animFrames stays one rect (the
+            // M9c5 path). Whole-texture default + orphan
+            // fallback keep the renderer safe against stale
+            // sub-sprite names.
+            struct UvRect { ImVec2 a, b, c, d; };
+            const UvRect kFullUv = {
+                {0.0f, 0.0f}, {1.0f, 0.0f},
+                {1.0f, 1.0f}, {0.0f, 1.0f}
+            };
+            std::vector<UvRect> frameUVs;
             if (ps->texture.IsValid()) {
                 tex = m_assetDb.GetTexture(GetDevice(), ps->texture);
                 if (tex) {
                     texId = static_cast<ImTextureID>(
                         reinterpret_cast<uintptr_t>(
                             tex->GetNativeView()));
-                    if (!ps->subSprite.empty()) {
-                        if (const auto* en =
-                                m_assetDb.FindByGuid(ps->texture)) {
-                            SceneEditor::TextureImportSettings imp;
-                            imp.FromJson(en->importSettings);
-                            for (const SceneEditor::SubSprite& s :
-                                    imp.spriteSheet.sprites) {
-                                if (s.name != ps->subSprite) continue;
-                                const float tw = float(tex->Width());
-                                const float th = float(tex->Height());
-                                if (tw <= 0.0f || th <= 0.0f) break;
-                                const float u0 = float(s.x) / tw;
-                                const float v0 = float(s.y) / th;
-                                const float u1 =
-                                    float(s.x + s.w) / tw;
-                                const float v1 =
-                                    float(s.y + s.h) / th;
-                                uvFull0 = ImVec2{u0, v0};
-                                uvFull1 = ImVec2{u1, v0};
-                                uvFull2 = ImVec2{u1, v1};
-                                uvFull3 = ImVec2{u0, v1};
-                                break;
-                            }
+                    const SceneEditor::AssetEntry* en =
+                        m_assetDb.FindByGuid(ps->texture);
+                    SceneEditor::TextureImportSettings imp;
+                    if (en) imp.FromJson(en->importSettings);
+                    const float tw = float(tex->Width());
+                    const float th = float(tex->Height());
+                    auto resolveName =
+                        [&](const std::string& name) -> UvRect {
+                        if (name.empty() || tw <= 0.0f || th <= 0.0f) {
+                            return kFullUv;
                         }
+                        for (const SceneEditor::SubSprite& s :
+                                imp.spriteSheet.sprites) {
+                            if (s.name != name) continue;
+                            const float u0 = float(s.x) / tw;
+                            const float v0 = float(s.y) / th;
+                            const float u1 = float(s.x + s.w) / tw;
+                            const float v1 = float(s.y + s.h) / th;
+                            return UvRect{
+                                {u0, v0}, {u1, v0},
+                                {u1, v1}, {u0, v1}};
+                        }
+                        return kFullUv;
+                    };
+                    if (!ps->animFrames.empty()) {
+                        frameUVs.reserve(ps->animFrames.size());
+                        for (const std::string& n : ps->animFrames) {
+                            frameUVs.push_back(resolveName(n));
+                        }
+                    } else {
+                        frameUVs.push_back(resolveName(ps->subSprite));
                     }
                 }
             }
+            if (frameUVs.empty()) frameUVs.push_back(kFullUv);
+            const bool animated =
+                !ps->animFrames.empty() && frameUVs.size() > 1;
+            const float fps =
+                (ps->animFps > 0.0f) ? ps->animFps : 0.0f;
+            const int   frameCount = int(frameUVs.size());
             for (int i = 0; i < ps->_liveCount; ++i) {
                 const auto& p = ps->_pool[size_t(i)];
                 const float t = (p.lifetime > 0.0f)
@@ -9457,9 +9546,28 @@ private:
                     const ImVec2 pTR{sc.x + half, sc.y - half};
                     const ImVec2 pBR{sc.x + half, sc.y + half};
                     const ImVec2 pBL{sc.x - half, sc.y + half};
+                    // M9c6 per-particle frame select. Each
+                    // particle's age maps to a frame index
+                    // independently, so two particles spawned
+                    // a fraction of a second apart cycle out
+                    // of phase. Loop wraps via modulo; non-
+                    // loop clamps at the last frame.
+                    int frameIdx = 0;
+                    if (animated && fps > 0.0f) {
+                        const int raw = int(p.age * fps);
+                        if (ps->animLoop) {
+                            frameIdx = ((raw % frameCount) + frameCount)
+                                       % frameCount;
+                        } else {
+                            frameIdx = raw < 0 ? 0 :
+                                (raw >= frameCount ? frameCount - 1
+                                                   : raw);
+                        }
+                    }
+                    const UvRect& uv = frameUVs[size_t(frameIdx)];
                     dl->AddImageQuad(texId,
                         pTL, pTR, pBR, pBL,
-                        uvFull0, uvFull1, uvFull2, uvFull3, col);
+                        uv.a, uv.b, uv.c, uv.d, col);
                 } else {
                     dl->AddRectFilled(
                         ImVec2{sc.x - half, sc.y - half},

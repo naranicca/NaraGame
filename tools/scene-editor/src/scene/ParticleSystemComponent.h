@@ -78,6 +78,24 @@ public:
     // rather than going invisible.
     std::string subSprite;
 
+    // M9c6 per-particle frame animation. A non-empty `animFrames`
+    // list overrides `subSprite` -- the renderer cycles each
+    // particle through the listed sub-sprites at `animFps` frames
+    // per second, indexed against the particle's own `age` so
+    // every particle's animation starts at frame 0 when it's
+    // spawned. `animLoop = true` wraps via modulo; false clamps
+    // at the last frame for the rest of the particle's lifetime
+    // (useful for one-shot explosion / impact sequences).
+    //
+    // Empty list = use the M9c5 single-sub-sprite path. UV
+    // resolution is cached per emitter per frame (one sheet
+    // walk per frame, not per particle) so a 200-particle
+    // emitter on an 8-frame sprite costs 8 lookups + 200
+    // indexings per draw.
+    std::vector<std::string> animFrames;
+    float                    animFps  = 8.0f;
+    bool                     animLoop = true;
+
     // Lifecycle flags. `playOnStart` mirrors the M8c7 audio
     // source pattern: rising-edge auto-play when the editor
     // enters play mode. `loop = false` lets the emitter run

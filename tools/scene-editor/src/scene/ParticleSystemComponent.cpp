@@ -62,6 +62,13 @@ void ParticleSystemComponent::Serialize(Value& out) const {
     out.Add("gravity",        Vec2ToJson(gravity));
     out.Add("texture",        Value::MakeString(texture.ToString()));
     out.Add("subSprite",      Value::MakeString(subSprite));
+    Value frames = Value::MakeArray();
+    for (const std::string& f : animFrames) {
+        frames.Push(Value::MakeString(f));
+    }
+    out.Add("animFrames",     std::move(frames));
+    out.Add("animFps",        Value::MakeNumber(animFps));
+    out.Add("animLoop",       Value::MakeBool(animLoop));
     out.Add("playOnStart",    Value::MakeBool(playOnStart));
     out.Add("loop",           Value::MakeBool(loop));
 }
@@ -85,6 +92,15 @@ void ParticleSystemComponent::Deserialize(const Value& obj) {
                                  NaraGame::Vec2{0.0f, -2.0f});
     texture        = AssetGuid::FromString(obj.GetString("texture", ""));
     subSprite      = obj.GetString("subSprite", "");
+    animFrames.clear();
+    if (const Value* af = obj.Find("animFrames");
+        af && af->IsArray()) {
+        for (const Value& v : af->arrayValue) {
+            if (v.IsString()) animFrames.push_back(v.stringValue);
+        }
+    }
+    animFps        = float(obj.GetNumber("animFps", 8.0));
+    animLoop       = obj.GetBool("animLoop", true);
     playOnStart    = obj.GetBool("playOnStart", true);
     loop           = obj.GetBool("loop",         true);
     // Reset runtime state so a scene reload starts the
