@@ -403,6 +403,71 @@ static bool RaySegmentVsBox(float ox, float oy, float dx, float dy,
     return true;
 }
 
+// M7c15: Segment-vs-OBB. Transforms the ray into the box's
+// local frame (translate by -centre, rotate by -theta) so the
+// existing slab test works as if the box were axis-aligned.
+// tHit is parameter-space along the original segment, which is
+// invariant under that rigid transform, so the value returned
+// is correct in world space too.
+static bool RaySegmentVsObb(float ox, float oy, float dx, float dy,
+                            float bcx, float bcy,
+                            float halfX, float halfY,
+                            float cosR, float sinR,
+                            float& tHit) {
+    const float relOx = ox - bcx;
+    const float relOy = oy - bcy;
+    const float localOx =  cosR * relOx + sinR * relOy;
+    const float localOy = -sinR * relOx + cosR * relOy;
+    const float localDx =  cosR * dx + sinR * dy;
+    const float localDy = -sinR * dx + cosR * dy;
+    return RaySegmentVsBox(localOx, localOy, localDx, localDy,
+                           -halfX, -halfY, halfX, halfY, tHit);
+}
+
+// M7c15: SAT for an axis-aligned query box against a rotated
+// target box. Four candidate axes (query X / Y + target's
+// rotated X / Y); any separating axis means no overlap.
+static bool AabbVsObb(float qMinX, float qMaxX,
+                      float qMinY, float qMaxY,
+                      float bcx, float bcy,
+                      float halfX, float halfY,
+                      float cosR, float sinR) {
+    const float qcx = (qMinX + qMaxX) * 0.5f;
+    const float qcy = (qMinY + qMaxY) * 0.5f;
+    const float qhx = (qMaxX - qMinX) * 0.5f;
+    const float qhy = (qMaxY - qMinY) * 0.5f;
+    auto Project = [](float cx, float cy,
+                      float hX, float hY,
+                      float xAxX, float xAxY,
+                      float yAxX, float yAxY,
+                      float ax, float ay,
+                      float& outMin, float& outMax) {
+        const float centerProj = cx * ax + cy * ay;
+        const float xExt = hX * std::fabs(xAxX * ax + xAxY * ay);
+        const float yExt = hY * std::fabs(yAxX * ax + yAxY * ay);
+        const float ext = xExt + yExt;
+        outMin = centerProj - ext;
+        outMax = centerProj + ext;
+    };
+    const float axes[4][2] = {
+        { 1.0f, 0.0f },           // query X
+        { 0.0f, 1.0f },           // query Y
+        {  cosR,  sinR },         // target X
+        { -sinR,  cosR },         // target Y
+    };
+    for (int i = 0; i < 4; ++i) {
+        float qMin, qMax, bMin, bMax;
+        Project(qcx, qcy, qhx, qhy,
+                1.0f, 0.0f, 0.0f, 1.0f,
+                axes[i][0], axes[i][1], qMin, qMax);
+        Project(bcx, bcy, halfX, halfY,
+                cosR, sinR, -sinR, cosR,
+                axes[i][0], axes[i][1], bMin, bMax);
+        if (qMax < bMin || bMax < qMin) return false;
+    }
+    return true;
+}
+
 // Segment-vs-circle. Standard quadratic; returns the nearest
 // non-negative root inside [0, 1]. Inside-the-circle origin
 // reports tHit = 0 the same way the box variant does.
@@ -467,10 +532,13 @@ static int LuaSceneRaycast(lua_State* L) {
             const float halfY = bc->size.y * 0.5f * tr->scale.y;
             const float cx    = tr->position.x + bc->offset.x;
             const float cy    = tr->position.y + bc->offset.y;
-            hit = RaySegmentVsBox(
-                x0, y0, dx, dy,
-                cx - halfX, cy - halfY, cx + halfX, cy + halfY,
-                tHit);
+            const float rotRad = tr->rotation
+                * 3.14159265358979323846f / 180.0f;
+            const float cosR = std::cos(rotRad);
+            const float sinR = std::sin(rotRad);
+            hit = RaySegmentVsObb(x0, y0, dx, dy,
+                                  cx, cy, halfX, halfY,
+                                  cosR, sinR, tHit);
         } else {
             const float scaleAvg =
                 (tr->scale.x + tr->scale.y) * 0.5f;
@@ -534,8 +602,12 @@ static int LuaSceneOverlapBox(lua_State* L) {
             const float halfY = bc->size.y * 0.5f * tr->scale.y;
             const float ex = tr->position.x + bc->offset.x;
             const float ey = tr->position.y + bc->offset.y;
-            hit = !(ex + halfX < minX || ex - halfX > maxX ||
-                    ey + halfY < minY || ey - halfY > maxY);
+            const float rotRad = tr->rotation
+                * 3.14159265358979323846f / 180.0f;
+            const float cosR = std::cos(rotRad);
+            const float sinR = std::sin(rotRad);
+            hit = AabbVsObb(minX, maxX, minY, maxY,
+                            ex, ey, halfX, halfY, cosR, sinR);
         } else {
             const float scaleAvg =
                 (tr->scale.x + tr->scale.y) * 0.5f;
@@ -589,10 +661,21 @@ static int LuaSceneOverlapCircle(lua_State* L) {
             const float halfY = bc->size.y * 0.5f * tr->scale.y;
             const float ex = tr->position.x + bc->offset.x;
             const float ey = tr->position.y + bc->offset.y;
-            const float qx = std::clamp(cx, ex - halfX, ex + halfX);
-            const float qy = std::clamp(cy, ey - halfY, ey + halfY);
-            const float ddx = cx - qx;
-            const float ddy = cy - qy;
+            const float rotRad = tr->rotation
+                * 3.14159265358979323846f / 180.0f;
+            const float cosR = std::cos(rotRad);
+            const float sinR = std::sin(rotRad);
+            // Rotate the world-space query-circle centre into the
+            // box's local frame, then run the regular axis-
+            // aligned clamp + radius compare.
+            const float relX = cx - ex;
+            const float relY = cy - ey;
+            const float lx =  cosR * relX + sinR * relY;
+            const float ly = -sinR * relX + cosR * relY;
+            const float qx = std::clamp(lx, -halfX, halfX);
+            const float qy = std::clamp(ly, -halfY, halfY);
+            const float ddx = lx - qx;
+            const float ddy = ly - qy;
             hit = (ddx * ddx + ddy * ddy) <= r2;
         } else {
             const float scaleAvg =
@@ -676,18 +759,23 @@ static int LuaSceneEntityAt(lua_State* L) {
         auto* tr = e->GetComponent<TransformComponent>();
         auto* sp = e->GetComponent<SpriteRendererComponent>();
         if (!tr || !sp) continue;
-        // World-space AABB: position +/- (sprite.size *
-        // transform.scale.xy * 0.5). Z is ignored because the
-        // editor is 2D-first; entities can still live at non-zero
-        // Z without breaking the test.
+        // M7c15: world point routed into the sprite's local
+        // frame so the pick honours Transform.rotation. Z is
+        // ignored because the editor is 2D-first.
         const float halfX =
             sp->size.x * 0.5f * tr->scale.x;
         const float halfY =
             sp->size.y * 0.5f * tr->scale.y;
-        if (wx < tr->position.x - halfX ||
-            wx > tr->position.x + halfX ||
-            wy < tr->position.y - halfY ||
-            wy > tr->position.y + halfY) continue;
+        const float relX = wx - tr->position.x;
+        const float relY = wy - tr->position.y;
+        const float rotRad = tr->rotation
+            * 3.14159265358979323846f / 180.0f;
+        const float cosR = std::cos(rotRad);
+        const float sinR = std::sin(rotRad);
+        const float lx =  cosR * relX + sinR * relY;
+        const float ly = -sinR * relX + cosR * relY;
+        if (std::fabs(lx) > halfX || std::fabs(ly) > halfY)
+            continue;
         if (!best || sp->orderInLayer >= bestOrder) {
             best = e;
             bestOrder = sp->orderInLayer;
