@@ -89,6 +89,7 @@ $env:NARAGAME_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d1
 
 자세한 내용은 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 참고.
 인-엔진 타일맵 에디터 사용법은 [docs/TILESET-EDITOR.md](docs/TILESET-EDITOR.md) 참고.
+씬 에디터의 Lua 스크립팅 API는 [docs/LUA-SCRIPTING.md](docs/LUA-SCRIPTING.md) 참고.
 
 ## 현재 상태 / 다음 단계
 
