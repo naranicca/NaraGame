@@ -1066,6 +1066,104 @@ static int LuaAudioGetBusVolume(lua_State* L) {
     return 1;
 }
 
+// M8c11 per-voice control. Same path / GUID resolution as
+// audio.play. Returns the voice handle (number) on success;
+// nil on failure -- maps to Lua's truthy / falsy in the
+// natural way so `if h then ...` works.
+static std::string ResolveAudioPath(ScriptHost* host,
+                                     const char* arg);
+static int LuaAudioSpawn(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* arg = luaL_checkstring(L, 1);
+    float volume = 1.0f;
+    if (lua_gettop(L) >= 2 && !lua_isnoneornil(L, 2)) {
+        volume = float(luaL_checknumber(L, 2));
+    }
+    const std::string resolved = ResolveAudioPath(host, arg);
+    if (resolved.empty()) { lua_pushnil(L); return 1; }
+    const Audio::VoiceHandle h = Audio::Spawn(resolved, volume);
+    if (h == 0) { lua_pushnil(L); return 1; }
+    lua_pushinteger(L, lua_Integer(h));
+    return 1;
+}
+static int LuaAudioStopVoice(lua_State* L) {
+    const lua_Integer h = luaL_checkinteger(L, 1);
+    lua_pushboolean(L,
+        Audio::StopVoice(Audio::VoiceHandle(h)) ? 1 : 0);
+    return 1;
+}
+static int LuaAudioPauseVoice(lua_State* L) {
+    const lua_Integer h = luaL_checkinteger(L, 1);
+    lua_pushboolean(L,
+        Audio::PauseVoice(Audio::VoiceHandle(h)) ? 1 : 0);
+    return 1;
+}
+static int LuaAudioResumeVoice(lua_State* L) {
+    const lua_Integer h = luaL_checkinteger(L, 1);
+    lua_pushboolean(L,
+        Audio::ResumeVoice(Audio::VoiceHandle(h)) ? 1 : 0);
+    return 1;
+}
+static int LuaAudioSetVoiceVolume(lua_State* L) {
+    const lua_Integer h   = luaL_checkinteger(L, 1);
+    const float       vol = float(luaL_checknumber(L, 2));
+    lua_pushboolean(L,
+        Audio::SetVoiceVolume(Audio::VoiceHandle(h), vol)
+            ? 1 : 0);
+    return 1;
+}
+static int LuaAudioIsVoicePlaying(lua_State* L) {
+    const lua_Integer h = luaL_checkinteger(L, 1);
+    lua_pushboolean(L,
+        Audio::IsVoicePlaying(Audio::VoiceHandle(h)) ? 1 : 0);
+    return 1;
+}
+
+// Path / GUID resolution used by spawn -- same rules audio.play
+// applies. Returns an empty string on a missing GUID / wrong
+// type GUID; the Spawn binding turns that into a nil result.
+static std::string ResolveAudioPath(ScriptHost* host,
+                                     const char* arg) {
+    AssetDatabase* db = host ? host->BoundAssetDatabase() : nullptr;
+    std::string resolved = arg ? arg : "";
+    auto looksLikeGuid = [](const std::string& s) {
+        if (s.size() != 36) return false;
+        return s[8] == '-' && s[13] == '-' &&
+               s[18] == '-' && s[23] == '-';
+    };
+    if (looksLikeGuid(resolved) && db) {
+        AssetGuid guid = AssetGuid::FromString(resolved);
+        if (!guid.IsValid()) return "";
+        const AssetEntry* entry = db->FindByGuid(guid);
+        if (!entry || entry->typeName != "Audio") return "";
+        const std::string& root = db->AssetsRoot();
+        const char sep = (!root.empty() &&
+            (root.back() == '/' || root.back() == '\\'))
+                ? '\0' : '/';
+        std::string out = root;
+        if (sep) out.push_back(sep);
+        out.append(entry->relPath);
+        return out;
+    }
+    const bool isAbs =
+        (resolved.size() >= 2 && resolved[1] == ':') ||
+        (!resolved.empty() && (resolved[0] == '/' ||
+                                 resolved[0] == '\\'));
+    if (!isAbs && db) {
+        const std::string& root = db->AssetsRoot();
+        if (!root.empty()) {
+            const char sep =
+                (root.back() == '/' || root.back() == '\\')
+                    ? '\0' : '/';
+            std::string joined = root;
+            if (sep) joined.push_back(sep);
+            joined.append(arg ? arg : "");
+            return joined;
+        }
+    }
+    return resolved;
+}
+
 // scene.overlap_circle(cx, cy, r) -> table of entity names.
 // Same area-query shape as overlap_box but with a virtual
 // circle. Box colliders use the nearest-point-on-box clamp,
@@ -2052,13 +2150,19 @@ ScriptHost::ScriptHost() {
     // project-relative paths through the asset DB without
     // bouncing through a global.
     static const luaL_Reg kAudioApi[] = {
-        {"play",            LuaAudioPlay},
-        {"stop",            LuaAudioStop},
-        {"play_music",      LuaAudioPlayMusic},
-        {"stop_music",      LuaAudioStopMusic},
-        {"set_bus_volume",  LuaAudioSetBusVolume},
-        {"get_bus_volume",  LuaAudioGetBusVolume},
-        {nullptr,           nullptr},
+        {"play",              LuaAudioPlay},
+        {"stop",              LuaAudioStop},
+        {"play_music",        LuaAudioPlayMusic},
+        {"stop_music",        LuaAudioStopMusic},
+        {"set_bus_volume",    LuaAudioSetBusVolume},
+        {"get_bus_volume",    LuaAudioGetBusVolume},
+        {"spawn",             LuaAudioSpawn},
+        {"stop_voice",        LuaAudioStopVoice},
+        {"pause_voice",       LuaAudioPauseVoice},
+        {"resume_voice",      LuaAudioResumeVoice},
+        {"set_voice_volume",  LuaAudioSetVoiceVolume},
+        {"is_voice_playing",  LuaAudioIsVoicePlaying},
+        {nullptr,             nullptr},
     };
     lua_newtable(L);
     lua_pushlightuserdata(L, this);

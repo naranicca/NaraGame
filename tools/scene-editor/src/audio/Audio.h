@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace SceneEditor {
@@ -84,6 +85,23 @@ public:
     enum class Bus { Master, Sfx, Music };
     static void  SetBusVolume(Bus bus, float volume);
     static float GetBusVolume(Bus bus);
+
+    // M8c11 per-voice control. Spawn() reserves one slot of
+    // a 64-voice pool + returns an opaque handle the caller
+    // can use to stop / pause / resume / re-volume the voice
+    // until it finishes naturally. Finished voices recycle
+    // their slot on the next Spawn(); the handle's high
+    // bits carry a generation counter so a stale handle
+    // can't accidentally control a re-used slot. Returns 0
+    // on missing file / full pool / unsupported format.
+    using VoiceHandle = std::uint32_t;
+    static VoiceHandle Spawn(const std::string& absolutePath,
+                              float volume = 1.0f);
+    static bool StopVoice(VoiceHandle h);
+    static bool PauseVoice(VoiceHandle h);
+    static bool ResumeVoice(VoiceHandle h);
+    static bool SetVoiceVolume(VoiceHandle h, float volume);
+    static bool IsVoicePlaying(VoiceHandle h);
 };
 
 } // namespace SceneEditor

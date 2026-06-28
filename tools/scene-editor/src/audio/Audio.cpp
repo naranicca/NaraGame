@@ -98,6 +98,72 @@ float                                      g_masterVolume = 1.0f;
 float                                      g_sfxVolume    = 1.0f;
 float                                      g_musicVolume  = 1.0f;
 VoiceCallback                              g_callback;
+// M8c11 voice pool. Each slot owns a source voice the caller
+// can address by handle (slot + generation). When the voice
+// finishes naturally OnBufferEnd marks the slot Finished;
+// the next Spawn() recycles all Finished slots before
+// looking for an Idle one. State + voice pointer live
+// behind g_voicePoolMutex.
+struct VoiceSlot {
+    enum class State { Idle, Playing, Paused, Finished };
+    IXAudio2SourceVoice* voice      = nullptr;
+    State                state      = State::Idle;
+    std::uint16_t        generation = 0;
+};
+constexpr int   kVoicePoolSize = 64;
+VoiceSlot       g_voicePool[kVoicePoolSize];
+std::mutex      g_voicePoolMutex;
+
+struct PerSlotCallback : public IXAudio2VoiceCallback {
+    void STDMETHODCALLTYPE OnVoiceProcessingPassStart(UINT32) override {}
+    void STDMETHODCALLTYPE OnVoiceProcessingPassEnd() override {}
+    void STDMETHODCALLTYPE OnStreamEnd() override {}
+    void STDMETHODCALLTYPE OnBufferStart(void*) override {}
+    void STDMETHODCALLTYPE OnBufferEnd(void* context) override {
+        const intptr_t idx =
+            reinterpret_cast<intptr_t>(context);
+        if (idx < 0 || idx >= kVoicePoolSize) return;
+        std::lock_guard<std::mutex> lock(g_voicePoolMutex);
+        VoiceSlot& slot = g_voicePool[idx];
+        if (slot.state == VoiceSlot::State::Playing) {
+            slot.state = VoiceSlot::State::Finished;
+        }
+    }
+    void STDMETHODCALLTYPE OnLoopEnd(void*) override {}
+    void STDMETHODCALLTYPE OnVoiceError(void*, HRESULT) override {}
+};
+PerSlotCallback g_perSlotCallback;
+
+// Handle layout: high 16 bits = generation, low 16 bits =
+// (slot_index + 1). Slot 0 maps to handle starting at 1,
+// so a zero handle is always invalid.
+Audio::VoiceHandle MakeVoiceHandle(int slot,
+                                    std::uint16_t gen) {
+    return (std::uint32_t(gen) << 16) |
+           std::uint32_t(slot + 1);
+}
+bool DecodeVoiceHandle(Audio::VoiceHandle h, int& slot,
+                        std::uint16_t& gen) {
+    if (h == 0) return false;
+    slot = int(h & 0xFFFF) - 1;
+    gen  = std::uint16_t((h >> 16) & 0xFFFF);
+    return slot >= 0 && slot < kVoicePoolSize;
+}
+
+// Caller must hold g_voicePoolMutex. Tears down whatever
+// voice the slot holds + bumps the generation so a stale
+// handle stops resolving here.
+void RecycleSlot(int idx) {
+    VoiceSlot& slot = g_voicePool[idx];
+    if (slot.voice) {
+        slot.voice->Stop();
+        slot.voice->DestroyVoice();
+        slot.voice = nullptr;
+    }
+    slot.state = VoiceSlot::State::Idle;
+    slot.generation =
+        std::uint16_t(slot.generation + 1);
+}
 std::unordered_map<std::string, SoundClip> g_cache;
 std::mutex                                 g_cacheMutex;
 bool                                       g_initFailed = false;
@@ -765,6 +831,120 @@ void Audio::UpdateMusic() {
     }
 }
 
+Audio::VoiceHandle Audio::Spawn(const std::string& path,
+                                  float volume) {
+    if (path.empty()) return 0;
+    if (!Initialize()) return 0;
+    SoundClip* clip = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        auto it = g_cache.find(path);
+        if (it == g_cache.end()) {
+            SoundClip fresh;
+            if (!LoadSound(path, fresh)) return 0;
+            it = g_cache.emplace(path, std::move(fresh)).first;
+        }
+        clip = &it->second;
+    }
+    std::lock_guard<std::mutex> lock(g_voicePoolMutex);
+    // Recycle every Finished slot first -- decoupled from
+    // a render-thread Tick so the pool can recover slots
+    // even on consoles that don't run a per-frame update.
+    int chosen = -1;
+    for (int i = 0; i < kVoicePoolSize; ++i) {
+        if (g_voicePool[i].state ==
+            VoiceSlot::State::Finished) {
+            RecycleSlot(i);
+        }
+    }
+    for (int i = 0; i < kVoicePoolSize; ++i) {
+        if (g_voicePool[i].state == VoiceSlot::State::Idle) {
+            chosen = i; break;
+        }
+    }
+    if (chosen < 0) return 0;
+    IXAudio2SourceVoice* voice = nullptr;
+    SubmixSend           sfxRoute(g_sfxSubmix);
+    HRESULT hr = g_engine->CreateSourceVoice(
+        &voice, &clip->format, 0,
+        XAUDIO2_DEFAULT_FREQ_RATIO,
+        &g_perSlotCallback, sfxRoute.AsParam(), nullptr);
+    if (FAILED(hr) || !voice) return 0;
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    voice->SetVolume(volume);
+    XAUDIO2_BUFFER buffer{};
+    buffer.AudioBytes = UINT32(clip->data.size());
+    buffer.pAudioData = clip->data.data();
+    buffer.Flags      = XAUDIO2_END_OF_STREAM;
+    buffer.pContext   =
+        reinterpret_cast<void*>(intptr_t(chosen));
+    hr = voice->SubmitSourceBuffer(&buffer);
+    if (FAILED(hr)) { voice->DestroyVoice(); return 0; }
+    hr = voice->Start(0);
+    if (FAILED(hr)) { voice->DestroyVoice(); return 0; }
+    VoiceSlot& slot = g_voicePool[chosen];
+    slot.voice = voice;
+    slot.state = VoiceSlot::State::Playing;
+    return MakeVoiceHandle(chosen, slot.generation);
+}
+
+bool Audio::StopVoice(VoiceHandle h) {
+    std::lock_guard<std::mutex> lock(g_voicePoolMutex);
+    int idx; std::uint16_t gen;
+    if (!DecodeVoiceHandle(h, idx, gen)) return false;
+    VoiceSlot& slot = g_voicePool[idx];
+    if (slot.generation != gen ||
+        slot.state == VoiceSlot::State::Idle) return false;
+    RecycleSlot(idx);
+    return true;
+}
+
+bool Audio::PauseVoice(VoiceHandle h) {
+    std::lock_guard<std::mutex> lock(g_voicePoolMutex);
+    int idx; std::uint16_t gen;
+    if (!DecodeVoiceHandle(h, idx, gen)) return false;
+    VoiceSlot& slot = g_voicePool[idx];
+    if (slot.generation != gen || !slot.voice) return false;
+    if (slot.state != VoiceSlot::State::Playing) return false;
+    slot.voice->Stop();
+    slot.state = VoiceSlot::State::Paused;
+    return true;
+}
+
+bool Audio::ResumeVoice(VoiceHandle h) {
+    std::lock_guard<std::mutex> lock(g_voicePoolMutex);
+    int idx; std::uint16_t gen;
+    if (!DecodeVoiceHandle(h, idx, gen)) return false;
+    VoiceSlot& slot = g_voicePool[idx];
+    if (slot.generation != gen || !slot.voice) return false;
+    if (slot.state != VoiceSlot::State::Paused) return false;
+    slot.voice->Start(0);
+    slot.state = VoiceSlot::State::Playing;
+    return true;
+}
+
+bool Audio::SetVoiceVolume(VoiceHandle h, float volume) {
+    std::lock_guard<std::mutex> lock(g_voicePoolMutex);
+    int idx; std::uint16_t gen;
+    if (!DecodeVoiceHandle(h, idx, gen)) return false;
+    VoiceSlot& slot = g_voicePool[idx];
+    if (slot.generation != gen || !slot.voice) return false;
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    slot.voice->SetVolume(volume);
+    return true;
+}
+
+bool Audio::IsVoicePlaying(VoiceHandle h) {
+    std::lock_guard<std::mutex> lock(g_voicePoolMutex);
+    int idx; std::uint16_t gen;
+    if (!DecodeVoiceHandle(h, idx, gen)) return false;
+    VoiceSlot& slot = g_voicePool[idx];
+    if (slot.generation != gen) return false;
+    return slot.state == VoiceSlot::State::Playing;
+}
+
 void Audio::SetBusVolume(Bus bus, float volume) {
     if (volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
@@ -795,6 +975,18 @@ float Audio::GetBusVolume(Bus bus) {
 
 void Audio::Shutdown() {
     StopMusic();
+    {
+        std::lock_guard<std::mutex> lock(g_voicePoolMutex);
+        for (int i = 0; i < kVoicePoolSize; ++i) {
+            VoiceSlot& slot = g_voicePool[i];
+            if (slot.voice) {
+                slot.voice->Stop();
+                slot.voice->DestroyVoice();
+                slot.voice = nullptr;
+            }
+            slot.state = VoiceSlot::State::Idle;
+        }
+    }
     if (g_sfxSubmix) {
         g_sfxSubmix->DestroyVoice();
         g_sfxSubmix = nullptr;
