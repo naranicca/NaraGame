@@ -8,6 +8,7 @@
 #include <NaraGame/renderer/rhi/RHITypes.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace SceneEditor {
@@ -60,13 +61,22 @@ public:
 
     // M9c4 optional texture. Invalid GUID (the default) keeps
     // the M9c2 untextured-rect path; a valid Texture asset
-    // makes the renderer route through AddImageQuad with the
-    // whole texture mapped onto each particle quad. Sub-sprite
-    // / spritesheet-cell selection is future-work; today the
-    // whole texture is tinted by the lerped colour the same way
-    // the rect path is, so an alpha-channel PNG of a smoke
-    // puff + alpha-fading endColor gives a clean soft particle.
-    AssetGuid texture;
+    // makes the renderer route through AddImageQuad. The whole
+    // texture is tinted by the lerped colour the same way the
+    // rect path is, so an alpha-channel PNG of a smoke puff
+    // plus alpha-fading endColor gives a clean soft particle.
+    AssetGuid   texture;
+
+    // M9c5 sub-sprite selection. Empty (the default) maps the
+    // whole texture onto each particle quad. A non-empty name
+    // resolves through the texture's importSettings.spriteSheet
+    // at draw time -- same lookup the SpriteRenderer does --
+    // so a single spritesheet PNG can drive multiple emitters
+    // pointing at different cells (sparkle frames, soot
+    // chunks, leaf shapes). Names that don't match any
+    // sub-sprite silently fall back to the whole texture
+    // rather than going invisible.
+    std::string subSprite;
 
     // Lifecycle flags. `playOnStart` mirrors the M8c7 audio
     // source pattern: rising-edge auto-play when the editor

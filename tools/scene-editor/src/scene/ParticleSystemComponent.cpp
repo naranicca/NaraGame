@@ -61,6 +61,7 @@ void ParticleSystemComponent::Serialize(Value& out) const {
     out.Add("endColor",       ColorToJson(endColor));
     out.Add("gravity",        Vec2ToJson(gravity));
     out.Add("texture",        Value::MakeString(texture.ToString()));
+    out.Add("subSprite",      Value::MakeString(subSprite));
     out.Add("playOnStart",    Value::MakeBool(playOnStart));
     out.Add("loop",           Value::MakeBool(loop));
 }
@@ -83,6 +84,7 @@ void ParticleSystemComponent::Deserialize(const Value& obj) {
     gravity        = JsonToVec2(obj.Find("gravity"),
                                  NaraGame::Vec2{0.0f, -2.0f});
     texture        = AssetGuid::FromString(obj.GetString("texture", ""));
+    subSprite      = obj.GetString("subSprite", "");
     playOnStart    = obj.GetBool("playOnStart", true);
     loop           = obj.GetBool("loop",         true);
     // Reset runtime state so a scene reload starts the

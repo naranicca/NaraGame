@@ -7178,6 +7178,50 @@ private:
             ImGui::EndDragDropTarget();
         }
 
+        // M9c5 sub-sprite picker. Only meaningful when the
+        // bound texture has a Multiple-mode sprite sheet --
+        // mirrors the SpriteRenderer pattern, including the
+        // "(whole texture)" default + orphan pin so a stale
+        // rename keeps editing instead of going invisible.
+        if (ps.texture.IsValid()) {
+            if (const auto* entry = m_assetDb.FindByGuid(ps.texture)) {
+                SceneEditor::TextureImportSettings imp;
+                imp.FromJson(entry->importSettings);
+                const auto& subs = imp.spriteSheet.sprites;
+                if (!subs.empty()) {
+                    bool nameInList = ps.subSprite.empty();
+                    for (const auto& sub : subs) {
+                        if (sub.name == ps.subSprite) {
+                            nameInList = true; break;
+                        }
+                    }
+                    const char* preview = ps.subSprite.empty()
+                        ? "(whole texture)" : ps.subSprite.c_str();
+                    if (ImGui::BeginCombo("Sub-sprite", preview)) {
+                        if (!nameInList && !ps.subSprite.empty()) {
+                            if (ImGui::Selectable(
+                                    (ps.subSprite + "  (orphan)").c_str(),
+                                    true)) {}
+                            ImGui::Separator();
+                        }
+                        if (ImGui::Selectable("(whole texture)",
+                                              ps.subSprite.empty())) {
+                            UndoSnapshot();
+                            ps.subSprite.clear();
+                        }
+                        for (const auto& sub : subs) {
+                            const bool sel = (sub.name == ps.subSprite);
+                            if (ImGui::Selectable(sub.name.c_str(), sel)) {
+                                UndoSnapshot();
+                                ps.subSprite = sub.name;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+            }
+        }
+
         if (ImGui::Checkbox("Play On Start", &ps.playOnStart)) {
             UndoSnapshot();
         }
@@ -9334,10 +9378,6 @@ private:
         // gives a real soft particle. The untextured
         // AddRectFilled fallback stays the default for the
         // common "spark" / "ember" sharp-pixel look.
-        const ImVec2 uvFull0{0.0f, 0.0f};
-        const ImVec2 uvFull1{1.0f, 0.0f};
-        const ImVec2 uvFull2{1.0f, 1.0f};
-        const ImVec2 uvFull3{0.0f, 1.0f};
         for (SceneEditor::EntityId id : ids) {
             const auto* e = m_scene.Get(id);
             if (!e || !e->enabled) continue;
@@ -9346,12 +9386,47 @@ private:
             if (!ps || ps->_liveCount <= 0) continue;
             NaraGame::RHITexture* tex = nullptr;
             ImTextureID texId = (ImTextureID)0;
+            // M9c5 per-emitter sub-sprite resolve. Whole-texture
+            // defaults to (0..1, 0..1); a non-empty subSprite
+            // name walks the texture's sheet to pick a cell.
+            // Names that don't match silently keep the whole-
+            // tex UVs so a stale rename doesn't make particles
+            // vanish.
+            ImVec2 uvFull0{0.0f, 0.0f};
+            ImVec2 uvFull1{1.0f, 0.0f};
+            ImVec2 uvFull2{1.0f, 1.0f};
+            ImVec2 uvFull3{0.0f, 1.0f};
             if (ps->texture.IsValid()) {
                 tex = m_assetDb.GetTexture(GetDevice(), ps->texture);
                 if (tex) {
                     texId = static_cast<ImTextureID>(
                         reinterpret_cast<uintptr_t>(
                             tex->GetNativeView()));
+                    if (!ps->subSprite.empty()) {
+                        if (const auto* en =
+                                m_assetDb.FindByGuid(ps->texture)) {
+                            SceneEditor::TextureImportSettings imp;
+                            imp.FromJson(en->importSettings);
+                            for (const SceneEditor::SubSprite& s :
+                                    imp.spriteSheet.sprites) {
+                                if (s.name != ps->subSprite) continue;
+                                const float tw = float(tex->Width());
+                                const float th = float(tex->Height());
+                                if (tw <= 0.0f || th <= 0.0f) break;
+                                const float u0 = float(s.x) / tw;
+                                const float v0 = float(s.y) / th;
+                                const float u1 =
+                                    float(s.x + s.w) / tw;
+                                const float v1 =
+                                    float(s.y + s.h) / th;
+                                uvFull0 = ImVec2{u0, v0};
+                                uvFull1 = ImVec2{u1, v0};
+                                uvFull2 = ImVec2{u1, v1};
+                                uvFull3 = ImVec2{u0, v1};
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             for (int i = 0; i < ps->_liveCount; ++i) {
