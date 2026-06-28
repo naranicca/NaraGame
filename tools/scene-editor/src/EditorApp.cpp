@@ -651,6 +651,96 @@ private:
             }
             infos.push_back(std::move(ci));
         }
+        // M7c18: synthetic per-tile colliders. Each tilemap cell
+        // whose tile carries `collides = true` in the Tileset
+        // asset becomes a static Box collider in the pair loop.
+        // Synthetic ids encode (tilemap, gx, gy) so the same
+        // cell keeps the same id across frames + Enter/Stay/Exit
+        // diff against m_collisionPairs works naturally. The
+        // synthetic side is marked hasScript=false so only the
+        // body that collides with the wall fires events.
+        m_syntheticColliderNames.clear();
+        auto SyntheticCellId = [](SceneEditor::EntityId tilemap,
+                                  int gx, int gy) -> SceneEditor::EntityId {
+            const uint64_t hi  = 1ULL << 63;
+            const uint64_t tm  = (uint64_t(tilemap) & 0x7FFFFFFFu) << 32;
+            const uint64_t ex  = uint64_t(uint16_t(gx)) << 16;
+            const uint64_t ey  = uint64_t(uint16_t(gy));
+            return SceneEditor::EntityId(hi | tm | ex | ey);
+        };
+        for (SceneEditor::EntityId id : ids) {
+            SceneEditor::Entity* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* tr = e->GetComponent<SceneEditor::TransformComponent>();
+            auto* tm = e->GetComponent<SceneEditor::TilemapComponent>();
+            if (!tr || !tm) continue;
+            // Tileset must resolve to a TilesetAsset (not a raw
+            // texture) for per-tile metadata to exist.
+            const auto* tsEntry = m_assetDb.FindByGuid(tm->tileset);
+            if (!tsEntry || tsEntry->typeName != "Tileset") continue;
+            SceneEditor::TilesetAsset* ts =
+                m_assetDb.GetTileset(tm->tileset);
+            if (!ts) continue;
+            // World units per cell.
+            SceneEditor::TextureImportSettings imp;
+            if (const auto* texEntry =
+                    m_assetDb.FindByGuid(ts->texture)) {
+                imp.FromJson(texEntry->importSettings);
+            }
+            const float cellWorldW =
+                float(ts->cellPixelW) / imp.pixelsPerUnit;
+            const float cellWorldH =
+                float(ts->cellPixelH) / imp.pixelsPerUnit;
+            const float rotRad = tr->rotation
+                * 3.14159265358979323846f / 180.0f;
+            const float cosR = std::cos(rotRad);
+            const float sinR = std::sin(rotRad);
+            const float halfX = cellWorldW * 0.5f * tr->scale.x;
+            const float halfY = cellWorldH * 0.5f * tr->scale.y;
+            for (const auto& kv : tm->cells) {
+                const int gx = kv.first.first;
+                const int gy = kv.first.second;
+                const int idx = kv.second;
+                auto tIt = ts->tiles.find(idx);
+                if (tIt == ts->tiles.end() || !tIt->second.collides)
+                    continue;
+                // Cell centre in entity-local coordinates, then
+                // rotate into world.
+                const float lx = (float(gx) + 0.5f) * cellWorldW;
+                const float ly = (float(gy) + 0.5f) * cellWorldH;
+                const float wx = tr->position.x +
+                    cosR * lx - sinR * ly;
+                const float wy = tr->position.y +
+                    sinR * lx + cosR * ly;
+                ColliderInfo ci;
+                ci.id            = SyntheticCellId(id, gx, gy);
+                ci.name          = e->name;
+                ci.hasScript     = false;
+                ci.entryFunction.clear();
+                ci.isTrigger     = false;
+                ci.kind          = ColliderKind::Box;
+                ci.layer         = "Default";
+                ci.cx            = wx;
+                ci.cy            = wy;
+                ci.radius        = 0.0f;
+                ci.vx            = 0.0f;
+                ci.vy            = 0.0f;
+                ci.halfX         = halfX;
+                ci.halfY         = halfY;
+                ci.cosR          = cosR;
+                ci.sinR          = sinR;
+                const float ex = std::fabs(cosR) * halfX +
+                                 std::fabs(sinR) * halfY;
+                const float ey = std::fabs(sinR) * halfX +
+                                 std::fabs(cosR) * halfY;
+                ci.minX = wx - ex;
+                ci.maxX = wx + ex;
+                ci.minY = wy - ey;
+                ci.maxY = wy + ey;
+                m_syntheticColliderNames[ci.id] = e->name;
+                infos.push_back(std::move(ci));
+            }
+        }
         // Box-vs-axis projection. Returns (min, max) of the
         // box's footprint along the unit axis (ax, ay). The
         // half-extent along the axis is the sum of each local
@@ -1027,21 +1117,33 @@ private:
                 (aBc && aBc->isTrigger) || (aCc && aCc->isTrigger);
             const bool bTrigger =
                 (bBc && bBc->isTrigger) || (bCc && bCc->isTrigger);
-            const bool wasSolid = ea && eb && !aTrigger && !bTrigger;
+            // M7c18: synthetic per-tile colliders are always
+            // solid + don't carry triggers, so a real <-> cell
+            // pair routes through OnCollisionExit even when one
+            // side has no Entity to look up.
+            auto SyntheticName = [&](SceneEditor::EntityId id) {
+                auto it = m_syntheticColliderNames.find(id);
+                return it != m_syntheticColliderNames.end()
+                    ? it->second : std::string{};
+            };
+            const bool aSyn = !ea &&
+                m_syntheticColliderNames.count(key.first);
+            const bool bSyn = !eb &&
+                m_syntheticColliderNames.count(key.second);
+            const bool wasSolid = (ea || aSyn) && (eb || bSyn) &&
+                !aTrigger && !bTrigger;
             if (ea) {
                 auto* sc =
                     ea->GetComponent<SceneEditor::ScriptComponent>();
                 if (sc) {
+                    const std::string otherName = eb
+                        ? eb->name : SyntheticName(key.second);
                     if (wasSolid) {
                         m_scriptHost.CallOnCollisionExit(
-                            ea->name,
-                            eb ? eb->name : std::string{},
-                            sc->entryFunction);
+                            ea->name, otherName, sc->entryFunction);
                     } else {
                         m_scriptHost.CallOnTriggerExit(
-                            ea->name,
-                            eb ? eb->name : std::string{},
-                            sc->entryFunction);
+                            ea->name, otherName, sc->entryFunction);
                     }
                 }
             }
@@ -1049,16 +1151,14 @@ private:
                 auto* sc =
                     eb->GetComponent<SceneEditor::ScriptComponent>();
                 if (sc) {
+                    const std::string otherName = ea
+                        ? ea->name : SyntheticName(key.first);
                     if (wasSolid) {
                         m_scriptHost.CallOnCollisionExit(
-                            eb->name,
-                            ea ? ea->name : std::string{},
-                            sc->entryFunction);
+                            eb->name, otherName, sc->entryFunction);
                     } else {
                         m_scriptHost.CallOnTriggerExit(
-                            eb->name,
-                            ea ? ea->name : std::string{},
-                            sc->entryFunction);
+                            eb->name, otherName, sc->entryFunction);
                     }
                 }
             }
@@ -8653,6 +8753,14 @@ private:
     std::set<std::pair<SceneEditor::EntityId,
                        SceneEditor::EntityId>>
                         m_collisionPairs;
+    // M7c18: per-tile collider synthetic IDs map to their parent
+    // tilemap entity's display name. The collision system treats
+    // each flagged tile as an independent static box (so a body
+    // hitting a corner sees the slab face it actually contacted),
+    // but events report the tilemap's name as "other" so script
+    // handlers don't need to know about per-cell synthetic ids.
+    std::unordered_map<SceneEditor::EntityId, std::string>
+                        m_syntheticColliderNames;
 
     // REPL input line at the bottom of the Console panel. Up /
     // Down arrows scroll through submitted history; Enter dispatches
