@@ -15,6 +15,7 @@
 #include "project/Project.h"
 #include "scene/AnimatorComponent.h"
 #include "scene/BoxColliderComponent.h"
+#include "audio/Audio.h"
 #include "scene/CapsuleColliderComponent.h"
 #include "scene/CircleColliderComponent.h"
 #include "scene/EdgeColliderComponent.h"
@@ -294,6 +295,11 @@ public:
         TickScripts (ImGui::GetIO().DeltaTime);
         TickPhysics (ImGui::GetIO().DeltaTime);
         TickAnimators(ImGui::GetIO().DeltaTime);
+        // M8c5: top up the music stream's buffer queue so a
+        // streamed OGG / WAV keeps decoding past the
+        // PlayMusic pre-fill (~280 ms of headroom at the
+        // default 4096-frame chunk).
+        SceneEditor::Audio::UpdateMusic();
         DrawHierarchyPanel();
         DrawInspectorPanel();
         DrawViewportPanel();

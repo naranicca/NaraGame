@@ -19,9 +19,32 @@
 // M8c3 vendored decoders -- only included when CMake sees
 // the corresponding header / source in third_party/audio/.
 #if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
-extern "C" int stb_vorbis_decode_filename(
+extern "C" {
+int stb_vorbis_decode_filename(
     const char* filename, int* channels, int* sample_rate,
     short** output);
+// Streaming API forward decls -- the impl lives in
+// third_party/audio/stb_vorbis.c. Keep these signatures in
+// sync with that file's public header section.
+typedef struct stb_vorbis stb_vorbis;
+typedef struct {
+    unsigned int sample_rate;
+    int          channels;
+    unsigned int setup_memory_required;
+    unsigned int setup_temp_memory_required;
+    unsigned int temp_memory_required;
+    int          max_frame_size;
+} stb_vorbis_info;
+stb_vorbis*     stb_vorbis_open_filename(const char* filename,
+                                          int* error,
+                                          const void* alloc_buffer);
+void            stb_vorbis_close(stb_vorbis* f);
+stb_vorbis_info stb_vorbis_get_info(stb_vorbis* f);
+int             stb_vorbis_get_samples_short_interleaved(
+                    stb_vorbis* f, int channels,
+                    short* buffer, int num_shorts);
+int             stb_vorbis_seek_start(stb_vorbis* f);
+} // extern "C"
 #endif
 #if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
 #define MINIMP3_IMPLEMENTATION
@@ -92,19 +115,24 @@ bool Initialize() {
     return true;
 }
 
-// Helper to fill the SoundClip's WAVEFORMATEX from a
-// channels + sample_rate pair (16-bit PCM). All decoders
-// produce 16-bit PCM so this format header serves OGG /
-// MP3 / FLAC etc the same way it serves WAV.
-void FillPcmFormat(SoundClip& out, int channels, int sampleRate) {
-    out.format.wFormatTag      = WAVE_FORMAT_PCM;
-    out.format.nChannels       = WORD(channels);
-    out.format.nSamplesPerSec  = DWORD(sampleRate);
-    out.format.wBitsPerSample  = 16;
-    out.format.nBlockAlign     = WORD(channels * 2);
-    out.format.nAvgBytesPerSec =
+// Helper to fill a WAVEFORMATEX from a (channels,
+// sample_rate) pair (16-bit PCM). All decoders produce
+// 16-bit PCM so this format header serves OGG / MP3 / FLAC
+// etc the same way it serves WAV.
+void FillPcmFormatEx(WAVEFORMATEX& wfx, int channels,
+                      int sampleRate) {
+    wfx.wFormatTag      = WAVE_FORMAT_PCM;
+    wfx.nChannels       = WORD(channels);
+    wfx.nSamplesPerSec  = DWORD(sampleRate);
+    wfx.wBitsPerSample  = 16;
+    wfx.nBlockAlign     = WORD(channels * 2);
+    wfx.nAvgBytesPerSec =
         DWORD(sampleRate * channels * 2);
-    out.format.cbSize          = 0;
+    wfx.cbSize          = 0;
+}
+inline void FillPcmFormat(SoundClip& out, int channels,
+                           int sampleRate) {
+    FillPcmFormatEx(out.format, channels, sampleRate);
 }
 
 // Minimum-viable WAV RIFF parser. Handles PCM `fmt ` +
@@ -287,7 +315,292 @@ void Audio::Stop() {
     g_engine->StartEngine();
 }
 
+// ---------------------------------------------------------
+// M8c5 streaming music.
+// ---------------------------------------------------------
+namespace {
+
+struct MusicStream {
+    enum class Fmt { Wav, Ogg };
+    Fmt              format        = Fmt::Wav;
+    // WAV streaming state.
+    FILE*            wavFile       = nullptr;
+    long             wavDataStart  = 0;
+    DWORD            wavDataLeft   = 0;
+    // OGG streaming state (stb_vorbis*).
+    void*            oggHandle     = nullptr;
+    // XAudio2 voice + format.
+    IXAudio2SourceVoice* voice     = nullptr;
+    WAVEFORMATEX     wfx{};
+    // Buffer ring -- 3 PCM chunks alive at a time. Held in
+    // vectors so XAudio2's pAudioData pointers stay valid
+    // until the buffer is consumed.
+    static constexpr int kBufferCount = 3;
+    std::vector<uint8_t> buffers[kBufferCount];
+    int              nextBuf       = 0;
+    // Streaming policy.
+    bool             loop          = false;
+    bool             eof           = false;
+    std::string      sourcePath;
+};
+
+std::unique_ptr<MusicStream> g_music;
+std::mutex                   g_musicMutex;
+
+// Parse the RIFF header up to the start of the `data`
+// chunk + leave the FILE* positioned ready to stream.
+// Returns false on malformed input.
+bool OpenWavStream(const std::string& path, MusicStream& s) {
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+    char riff[12];
+    if (fread(riff, 1, 12, f) != 12 ||
+        std::memcmp(riff,     "RIFF", 4) != 0 ||
+        std::memcmp(riff + 8, "WAVE", 4) != 0) {
+        fclose(f); return false;
+    }
+    bool fmtRead = false;
+    while (!feof(f)) {
+        char hdr[8];
+        if (fread(hdr, 1, 8, f) != 8) break;
+        uint32_t size = 0;
+        std::memcpy(&size, hdr + 4, 4);
+        if (std::memcmp(hdr, "fmt ", 4) == 0) {
+            if (size < 16) { fclose(f); return false; }
+            std::vector<uint8_t> buf(size);
+            if (fread(buf.data(), 1, size, f) != size) {
+                fclose(f); return false;
+            }
+            const size_t copySize =
+                std::min<size_t>(size, sizeof(WAVEFORMATEX));
+            std::memcpy(&s.wfx, buf.data(), copySize);
+            if (s.wfx.wFormatTag != WAVE_FORMAT_PCM &&
+                s.wfx.wFormatTag != WAVE_FORMAT_EXTENSIBLE) {
+                fclose(f); return false;
+            }
+            fmtRead = true;
+        } else if (std::memcmp(hdr, "data", 4) == 0) {
+            if (!fmtRead) { fclose(f); return false; }
+            s.wavFile      = f;
+            s.wavDataStart = ftell(f);
+            s.wavDataLeft  = size;
+            return true;
+        } else {
+            if (size & 1) ++size;
+            fseek(f, size, SEEK_CUR);
+        }
+    }
+    fclose(f);
+    return false;
+}
+
+// Fill `out` with up to `framesPerCh` interleaved PCM
+// samples. Returns true if any samples were produced;
+// false on clean EOF.
+bool DecodeChunk(MusicStream& s, std::vector<uint8_t>& out,
+                  int framesPerCh) {
+    const int  channels = s.wfx.nChannels;
+    const int  bytesPerFrame = channels * 2;
+    const size_t targetBytes = size_t(framesPerCh) *
+                                size_t(bytesPerFrame);
+    out.resize(targetBytes);
+    if (s.format == MusicStream::Fmt::Wav) {
+        if (!s.wavFile) return false;
+        const size_t want =
+            std::min<size_t>(targetBytes, s.wavDataLeft);
+        if (want == 0) return false;
+        const size_t got = fread(out.data(), 1, want, s.wavFile);
+        if (got == 0) return false;
+        s.wavDataLeft -= DWORD(got);
+        out.resize(got);
+        return true;
+    }
+#if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
+    if (s.format == MusicStream::Fmt::Ogg && s.oggHandle) {
+        stb_vorbis* v = reinterpret_cast<stb_vorbis*>(s.oggHandle);
+        const int gotFrames =
+            stb_vorbis_get_samples_short_interleaved(
+                v, channels,
+                reinterpret_cast<short*>(out.data()),
+                framesPerCh * channels);
+        if (gotFrames <= 0) return false;
+        out.resize(size_t(gotFrames) * bytesPerFrame);
+        return true;
+    }
+#endif
+    return false;
+}
+
+void RestartStream(MusicStream& s) {
+    if (s.format == MusicStream::Fmt::Wav) {
+        if (s.wavFile) {
+            fseek(s.wavFile, s.wavDataStart, SEEK_SET);
+            // Recompute wavDataLeft from total. Easiest:
+            // re-stat the file. Quick approach: track the
+            // original size, but for MVP just re-open.
+            std::string path = s.sourcePath;
+            fclose(s.wavFile);
+            s.wavFile = nullptr;
+            OpenWavStream(path, s);
+        }
+        return;
+    }
+#if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
+    if (s.format == MusicStream::Fmt::Ogg && s.oggHandle) {
+        stb_vorbis_seek_start(
+            reinterpret_cast<stb_vorbis*>(s.oggHandle));
+    }
+#endif
+}
+
+bool SubmitNextBuffer(MusicStream& s, int framesPerCh) {
+    auto& buf = s.buffers[s.nextBuf];
+    if (!DecodeChunk(s, buf, framesPerCh)) {
+        if (!s.loop) return false;
+        RestartStream(s);
+        if (!DecodeChunk(s, buf, framesPerCh)) return false;
+    }
+    XAUDIO2_BUFFER xbuf{};
+    xbuf.AudioBytes = UINT32(buf.size());
+    xbuf.pAudioData = buf.data();
+    xbuf.Flags      = 0;
+    HRESULT hr = s.voice->SubmitSourceBuffer(&xbuf);
+    if (FAILED(hr)) return false;
+    s.nextBuf = (s.nextBuf + 1) % MusicStream::kBufferCount;
+    return true;
+}
+
+} // namespace
+
+bool Audio::PlayMusic(const std::string& path, float volume,
+                      bool loop) {
+    if (path.empty()) return false;
+    if (!Initialize()) return false;
+    StopMusic();
+    auto s = std::make_unique<MusicStream>();
+    s->sourcePath = path;
+    s->loop       = loop;
+    // Detect format by extension; same convention LoadSound
+    // uses for the SFX cache path.
+    std::string lower = path;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                    [](unsigned char c) {
+                        return std::tolower(c);
+                    });
+    auto endsWith = [&](const char* suf) {
+        const size_t n = std::strlen(suf);
+        if (lower.size() < n) return false;
+        return std::memcmp(lower.data() + lower.size() - n,
+                            suf, n) == 0;
+    };
+    if (endsWith(".wav")) {
+        s->format = MusicStream::Fmt::Wav;
+        if (!OpenWavStream(path, *s)) return false;
+    }
+#if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
+    else if (endsWith(".ogg")) {
+        s->format = MusicStream::Fmt::Ogg;
+        stb_vorbis* v = stb_vorbis_open_filename(
+            path.c_str(), nullptr, nullptr);
+        if (!v) return false;
+        const stb_vorbis_info info = stb_vorbis_get_info(v);
+        if (info.channels <= 0 || info.sample_rate == 0) {
+            stb_vorbis_close(v); return false;
+        }
+        s->oggHandle = v;
+        FillPcmFormatEx(s->wfx, info.channels,
+                         int(info.sample_rate));
+    }
+#endif
+    else {
+        return false;
+    }
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    HRESULT hr = g_engine->CreateSourceVoice(
+        &s->voice, &s->wfx, 0,
+        XAUDIO2_DEFAULT_FREQ_RATIO,
+        nullptr, nullptr, nullptr);
+    if (FAILED(hr) || !s->voice) {
+        if (s->wavFile) fclose(s->wavFile);
+#if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
+        if (s->oggHandle)
+            stb_vorbis_close(reinterpret_cast<stb_vorbis*>(s->oggHandle));
+#endif
+        return false;
+    }
+    s->voice->SetVolume(volume);
+    // Pre-fill every buffer in the ring. Three chunks of
+    // 4096 frames @ 44.1 kHz = ~280 ms of headroom before
+    // UpdateMusic has to catch up.
+    bool primed = false;
+    for (int i = 0; i < MusicStream::kBufferCount; ++i) {
+        if (SubmitNextBuffer(*s, 4096)) primed = true;
+        else { s->eof = true; break; }
+    }
+    if (!primed) {
+        s->voice->DestroyVoice();
+        return false;
+    }
+    s->voice->Start(0);
+    std::lock_guard<std::mutex> lock(g_musicMutex);
+    g_music = std::move(s);
+    return true;
+}
+
+void Audio::StopMusic() {
+    std::lock_guard<std::mutex> lock(g_musicMutex);
+    if (!g_music) return;
+    if (g_music->voice) {
+        g_music->voice->Stop();
+        g_music->voice->FlushSourceBuffers();
+        g_music->voice->DestroyVoice();
+    }
+    if (g_music->wavFile) fclose(g_music->wavFile);
+#if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
+    if (g_music->oggHandle) {
+        stb_vorbis_close(
+            reinterpret_cast<stb_vorbis*>(g_music->oggHandle));
+    }
+#endif
+    g_music.reset();
+}
+
+void Audio::UpdateMusic() {
+    std::lock_guard<std::mutex> lock(g_musicMutex);
+    if (!g_music || !g_music->voice) return;
+    XAUDIO2_VOICE_STATE state{};
+    g_music->voice->GetState(&state,
+                              XAUDIO2_VOICE_NOSAMPLESPLAYED);
+    while (state.BuffersQueued < MusicStream::kBufferCount) {
+        if (g_music->eof) break;
+        if (!SubmitNextBuffer(*g_music, 4096)) {
+            g_music->eof = true;
+            break;
+        }
+        g_music->voice->GetState(&state,
+                                  XAUDIO2_VOICE_NOSAMPLESPLAYED);
+    }
+    if (g_music->eof && state.BuffersQueued == 0) {
+        // Track finished + not looping. Tear it down so
+        // a subsequent PlayMusic doesn't have to wait.
+        if (g_music->voice) {
+            g_music->voice->Stop();
+            g_music->voice->DestroyVoice();
+        }
+        if (g_music->wavFile) fclose(g_music->wavFile);
+#if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
+        if (g_music->oggHandle) {
+            stb_vorbis_close(
+                reinterpret_cast<stb_vorbis*>(g_music->oggHandle));
+        }
+#endif
+        g_music.reset();
+    }
+}
+
 void Audio::Shutdown() {
+    StopMusic();
     if (g_master) {
         g_master->DestroyVoice();
         g_master = nullptr;

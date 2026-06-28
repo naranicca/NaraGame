@@ -961,6 +961,75 @@ static int LuaAudioStop(lua_State* L) {
     return 0;
 }
 
+// audio.play_music(path_or_guid [, volume [, loop]]) -> bool.
+// M8c5 chunk-streamed music. WAV + OGG accepted; the file
+// is decoded into a small ring buffer rather than loaded
+// whole, so a multi-minute soundtrack stays out of the SFX
+// cache. The same GUID / absolute-path / project-relative
+// resolution audio.play uses applies here.
+static int LuaAudioPlayMusic(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    AssetDatabase* db = host ? host->BoundAssetDatabase() : nullptr;
+    const char* arg = luaL_checkstring(L, 1);
+    float volume = 1.0f;
+    bool  loop   = false;
+    if (lua_gettop(L) >= 2 && !lua_isnoneornil(L, 2)) {
+        volume = float(luaL_checknumber(L, 2));
+    }
+    if (lua_gettop(L) >= 3 && !lua_isnoneornil(L, 3)) {
+        loop = lua_toboolean(L, 3) != 0;
+    }
+    std::string resolved = arg;
+    auto looksLikeGuid = [](const std::string& s) {
+        if (s.size() != 36) return false;
+        return s[8] == '-' && s[13] == '-' &&
+               s[18] == '-' && s[23] == '-';
+    };
+    if (looksLikeGuid(resolved) && db) {
+        AssetGuid guid = AssetGuid::FromString(resolved);
+        if (!guid.IsValid()) { lua_pushboolean(L, 0); return 1; }
+        const AssetEntry* entry = db->FindByGuid(guid);
+        if (!entry || entry->typeName != "Audio") {
+            lua_pushboolean(L, 0); return 1;
+        }
+        const std::string& root = db->AssetsRoot();
+        const char sep = (!root.empty() &&
+            (root.back() == '/' || root.back() == '\\'))
+                ? '\0' : '/';
+        resolved = root;
+        if (sep) resolved.push_back(sep);
+        resolved.append(entry->relPath);
+    } else {
+        const bool isAbs =
+            (resolved.size() >= 2 && resolved[1] == ':') ||
+            (!resolved.empty() && (resolved[0] == '/' ||
+                                     resolved[0] == '\\'));
+        if (!isAbs && db) {
+            const std::string& root = db->AssetsRoot();
+            if (!root.empty()) {
+                const char sep =
+                    (root.back() == '/' || root.back() == '\\')
+                        ? '\0' : '/';
+                std::string joined = root;
+                if (sep) joined.push_back(sep);
+                joined.append(arg);
+                resolved = std::move(joined);
+            }
+        }
+    }
+    const bool ok = Audio::PlayMusic(resolved, volume, loop);
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+// audio.stop_music() -> nil. Tears the active music stream
+// down + closes its decoder handle.
+static int LuaAudioStopMusic(lua_State* L) {
+    (void)L;
+    Audio::StopMusic();
+    return 0;
+}
+
 // scene.overlap_circle(cx, cy, r) -> table of entity names.
 // Same area-query shape as overlap_box but with a virtual
 // circle. Box colliders use the nearest-point-on-box clamp,
@@ -1947,9 +2016,11 @@ ScriptHost::ScriptHost() {
     // project-relative paths through the asset DB without
     // bouncing through a global.
     static const luaL_Reg kAudioApi[] = {
-        {"play", LuaAudioPlay},
-        {"stop", LuaAudioStop},
-        {nullptr, nullptr},
+        {"play",       LuaAudioPlay},
+        {"stop",       LuaAudioStop},
+        {"play_music", LuaAudioPlayMusic},
+        {"stop_music", LuaAudioStopMusic},
+        {nullptr,      nullptr},
     };
     lua_newtable(L);
     lua_pushlightuserdata(L, this);
