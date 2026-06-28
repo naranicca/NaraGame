@@ -21,6 +21,7 @@
 #include "scene/CapsuleColliderComponent.h"
 #include "scene/CircleColliderComponent.h"
 #include "scene/EdgeColliderComponent.h"
+#include "scene/ParticleSystemComponent.h"
 #include "scene/PolygonColliderComponent.h"
 #include "scene/Component.h"
 #include "scene/Entity.h"
@@ -306,6 +307,7 @@ public:
             TickPhysics (ImGui::GetIO().DeltaTime);
             TickAnimators(ImGui::GetIO().DeltaTime);
             TickAudioSources(ImGui::GetIO().DeltaTime);
+            TickParticles(ImGui::GetIO().DeltaTime);
             SceneEditor::Audio::UpdateMusic();
             DrawViewportPanel();
             ImGui::Render();
@@ -327,6 +329,11 @@ public:
         // edge of Play (m_animPlaying false -> true) for any
         // enabled source flagged playOnStart.
         TickAudioSources(ImGui::GetIO().DeltaTime);
+        // M9c2 particle systems. Same Play-mode gate as
+        // animators -- emits + integrates while Play is on,
+        // resets the pool back to empty when Play flips off
+        // so the next play starts the burst cleanly.
+        TickParticles(ImGui::GetIO().DeltaTime);
         // M8c5: top up the music stream's buffer queue so a
         // streamed OGG / WAV keeps decoding past the
         // PlayMusic pre-fill (~280 ms of headroom at the
@@ -2407,6 +2414,124 @@ private:
                 m_scriptHost.AppendLine(
                     std::string("[audio-source] ") + e->name +
                     " -> " + entry->relPath);
+            }
+        }
+    }
+
+    // M9c2 particle systems. Same play-mode gating as audio +
+    // animators: when Play is off we reset every emitter back
+    // to a clean state (zero live particles, fresh start
+    // flag) so toggling Play on always restarts the burst.
+    // When Play is on we emit, integrate gravity, and cull
+    // dead particles in one swap-to-end pass. Cost is O(live)
+    // per system; the fixed pool means no allocation past
+    // the first frame.
+    void TickParticles(float dt) {
+        std::vector<SceneEditor::EntityId> ids;
+        ids.reserve(64);
+        CollectAllEntities(m_scene.Roots(), ids);
+        if (!m_animPlaying) {
+            for (SceneEditor::EntityId id : ids) {
+                SceneEditor::Entity* e = m_scene.Get(id);
+                if (!e) continue;
+                auto* ps = e->GetComponent<
+                    SceneEditor::ParticleSystemComponent>();
+                if (!ps) continue;
+                ps->_started      = false;
+                ps->_liveCount    = 0;
+                ps->_emitAccum    = 0.0f;
+                ps->_emittedTotal = 0;
+            }
+            return;
+        }
+        // xorshift32: cheap PRNG that just needs a non-zero
+        // seed. Lazy seeding from the entity id + a tick of
+        // the frame counter keeps two systems in the same
+        // scene out of phase.
+        auto xs = [](std::uint32_t& s) -> std::uint32_t {
+            if (s == 0) s = 0x9E3779B9u;
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            return s;
+        };
+        auto frand = [&](std::uint32_t& s, float lo, float hi) {
+            const std::uint32_t r = xs(s);
+            const float u = float(r) * (1.0f / 4294967296.0f);
+            return lo + (hi - lo) * u;
+        };
+        for (SceneEditor::EntityId id : ids) {
+            SceneEditor::Entity* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* ps = e->GetComponent<
+                SceneEditor::ParticleSystemComponent>();
+            if (!ps) continue;
+            auto* tr = e->GetComponent<
+                SceneEditor::TransformComponent>();
+            if (!tr) continue;
+            if (ps->maxParticles < 1) ps->maxParticles = 1;
+            if (ps->maxParticles > 4096) ps->maxParticles = 4096;
+            if (int(ps->_pool.size()) != ps->maxParticles) {
+                ps->_pool.assign(size_t(ps->maxParticles),
+                    SceneEditor::ParticleSystemComponent::Particle{});
+                ps->_liveCount = 0;
+            }
+            if (!ps->_started) {
+                ps->_started = true;
+                if (!ps->playOnStart) continue;
+                ps->_rng = std::uint32_t(id) * 2654435761u + 1u;
+            } else if (!ps->playOnStart && ps->_liveCount == 0 &&
+                       ps->_emittedTotal == 0) {
+                continue;
+            }
+            // Emission step. Skip when looping has finished
+            // a single non-loop batch.
+            const bool emissionOpen =
+                ps->loop ||
+                ps->_emittedTotal < ps->maxParticles;
+            if (emissionOpen && ps->emissionRate > 0.0f) {
+                ps->_emitAccum += ps->emissionRate * dt;
+                while (ps->_emitAccum >= 1.0f &&
+                       ps->_liveCount < ps->maxParticles &&
+                       (ps->loop ||
+                        ps->_emittedTotal < ps->maxParticles)) {
+                    ps->_emitAccum -= 1.0f;
+                    auto& p = ps->_pool[size_t(ps->_liveCount++)];
+                    ++ps->_emittedTotal;
+                    p.pos = { tr->position.x, tr->position.y };
+                    const float ang = frand(ps->_rng,
+                        ps->dirAngleMinDeg,
+                        ps->dirAngleMaxDeg) *
+                        (3.14159265358979323846f / 180.0f);
+                    const float spd = frand(ps->_rng,
+                        ps->startSpeedMin, ps->startSpeedMax);
+                    p.vel = { std::cos(ang) * spd,
+                              std::sin(ang) * spd };
+                    p.age      = 0.0f;
+                    p.lifetime = frand(ps->_rng,
+                        ps->lifetimeMin,
+                        std::max(ps->lifetimeMin,
+                                  ps->lifetimeMax));
+                    p.size     = frand(ps->_rng,
+                        ps->startSizeMin, ps->startSizeMax);
+                }
+            }
+            // Integrate + cull. Iterate while shrinking
+            // _liveCount: dead particles get the last live
+            // particle copied over them, no allocation.
+            int i = 0;
+            while (i < ps->_liveCount) {
+                auto& p = ps->_pool[size_t(i)];
+                p.vel.x += ps->gravity.x * dt;
+                p.vel.y += ps->gravity.y * dt;
+                p.pos.x += p.vel.x * dt;
+                p.pos.y += p.vel.y * dt;
+                p.age   += dt;
+                if (p.age >= p.lifetime) {
+                    p = ps->_pool[size_t(--ps->_liveCount)];
+                } else {
+                    ++i;
+                }
             }
         }
     }
@@ -6915,9 +7040,106 @@ private:
             DrawEdgeColliderEditor(entity, *ec);
         } else if (auto* rb = dynamic_cast<SceneEditor::Rigidbody2DComponent*>(comp)) {
             DrawRigidbody2DEditor(entity, *rb);
+        } else if (auto* ps = dynamic_cast<SceneEditor::ParticleSystemComponent*>(comp)) {
+            DrawParticleSystemEditor(entity, *ps);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
         }
+    }
+
+    // M9c2 Particle System inspector. The numeric ranges
+    // (lifetime / speed / size / angle) get min-max pairs;
+    // colour pickers do startColor / endColor with alpha so
+    // the user can build a fade-out tail. Reset clears every
+    // live particle + re-arms the rising-edge auto-play
+    // gate, which is the easiest way to preview the new
+    // settings without leaving Play mode.
+    void DrawParticleSystemEditor(SceneEditor::Entity& /*entity*/,
+                                   SceneEditor::ParticleSystemComponent& ps) {
+        ImGui::Text("Live: %d / %d", ps._liveCount, ps.maxParticles);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset")) {
+            ps._liveCount    = 0;
+            ps._emitAccum    = 0.0f;
+            ps._emittedTotal = 0;
+            ps._started      = false;
+        }
+
+        int mp = ps.maxParticles;
+        if (ImGui::DragInt("Max Particles", &mp, 1.0f, 1, 4096)) {
+            UndoSnapshot();
+            if (mp < 1) mp = 1;
+            if (mp > 4096) mp = 4096;
+            ps.maxParticles = mp;
+        }
+        if (ImGui::DragFloat("Emission Rate", &ps.emissionRate,
+                              0.5f, 0.0f, 0.0f, "%.1f /sec")) {
+            UndoSnapshot();
+            if (ps.emissionRate < 0.0f) ps.emissionRate = 0.0f;
+        }
+
+        float lt[2] = { ps.lifetimeMin, ps.lifetimeMax };
+        if (ImGui::DragFloat2("Lifetime (min/max)", lt, 0.02f,
+                               0.0f, 0.0f, "%.2f s")) {
+            UndoSnapshot();
+            if (lt[0] < 0.01f) lt[0] = 0.01f;
+            if (lt[1] < lt[0]) lt[1] = lt[0];
+            ps.lifetimeMin = lt[0]; ps.lifetimeMax = lt[1];
+        }
+        float sp[2] = { ps.startSpeedMin, ps.startSpeedMax };
+        if (ImGui::DragFloat2("Start Speed (min/max)", sp, 0.05f,
+                               0.0f, 0.0f, "%.2f")) {
+            UndoSnapshot();
+            if (sp[1] < sp[0]) sp[1] = sp[0];
+            ps.startSpeedMin = sp[0]; ps.startSpeedMax = sp[1];
+        }
+        float sz[2] = { ps.startSizeMin, ps.startSizeMax };
+        if (ImGui::DragFloat2("Start Size (min/max)", sz, 0.01f,
+                               0.001f, 0.0f, "%.3f")) {
+            UndoSnapshot();
+            if (sz[0] < 0.001f) sz[0] = 0.001f;
+            if (sz[1] < sz[0])  sz[1] = sz[0];
+            ps.startSizeMin = sz[0]; ps.startSizeMax = sz[1];
+        }
+        float ang[2] = { ps.dirAngleMinDeg, ps.dirAngleMaxDeg };
+        if (ImGui::DragFloat2("Direction (deg, min/max)", ang,
+                               1.0f, -360.0f, 720.0f, "%.0f")) {
+            UndoSnapshot();
+            if (ang[1] < ang[0]) ang[1] = ang[0];
+            ps.dirAngleMinDeg = ang[0]; ps.dirAngleMaxDeg = ang[1];
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Emission cone in degrees. 0 = +X, 90 = +Y (up),\n"
+                "180 = -X. (45, 135) gives an upward fan;\n"
+                "(0, 360) is omnidirectional.");
+        }
+
+        float sc[4] = { ps.startColor.r, ps.startColor.g,
+                        ps.startColor.b, ps.startColor.a };
+        if (ImGui::ColorEdit4("Start Color", sc)) {
+            UndoSnapshot();
+            ps.startColor = { sc[0], sc[1], sc[2], sc[3] };
+        }
+        float ec[4] = { ps.endColor.r, ps.endColor.g,
+                        ps.endColor.b, ps.endColor.a };
+        if (ImGui::ColorEdit4("End Color", ec)) {
+            UndoSnapshot();
+            ps.endColor = { ec[0], ec[1], ec[2], ec[3] };
+        }
+
+        float gv[2] = { ps.gravity.x, ps.gravity.y };
+        if (ImGui::DragFloat2("Gravity", gv, 0.05f, 0.0f, 0.0f,
+                               "%.2f")) {
+            UndoSnapshot();
+            ps.gravity = { gv[0], gv[1] };
+        }
+
+        if (ImGui::Checkbox("Play On Start", &ps.playOnStart)) {
+            UndoSnapshot();
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Loop", &ps.loop)) UndoSnapshot();
     }
 
     // Rigidbody2D inspector. velocity + gravity DragFloat2s,
@@ -9045,12 +9267,57 @@ private:
                 }
             }
         }
-        for (SceneEditor::EntityId id : markers) {
+        // Marker entities are editor-only -- in standalone they
+        // would just litter the screen with debug glyphs.
+        if (!m_standalone) {
+            for (SceneEditor::EntityId id : markers) {
+                const auto* e = m_scene.Get(id);
+                if (!e) continue;
+                const ImVec2 wp = EntityWorldPos(*e);
+                const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
+                DrawMarkerEntity(dl, *e, c, id == m_selection);
+            }
+        }
+
+        // M9c2 particle systems. Each live particle is an
+        // axis-aligned coloured quad sized by `size` (world
+        // units) and tinted by lerping startColor -> endColor
+        // across age/lifetime. Drawn after sprites/tilemaps
+        // so smoke / sparks naturally sit on top of the scene.
+        for (SceneEditor::EntityId id : ids) {
             const auto* e = m_scene.Get(id);
-            if (!e) continue;
-            const ImVec2 wp = EntityWorldPos(*e);
-            const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
-            DrawMarkerEntity(dl, *e, c, id == m_selection);
+            if (!e || !e->enabled) continue;
+            const auto* ps =
+                e->GetComponent<SceneEditor::ParticleSystemComponent>();
+            if (!ps || ps->_liveCount <= 0) continue;
+            for (int i = 0; i < ps->_liveCount; ++i) {
+                const auto& p = ps->_pool[size_t(i)];
+                const float t = (p.lifetime > 0.0f)
+                    ? (p.age / p.lifetime) : 1.0f;
+                const float r = ps->startColor.r +
+                    (ps->endColor.r - ps->startColor.r) * t;
+                const float g = ps->startColor.g +
+                    (ps->endColor.g - ps->startColor.g) * t;
+                const float b = ps->startColor.b +
+                    (ps->endColor.b - ps->startColor.b) * t;
+                const float a = ps->startColor.a +
+                    (ps->endColor.a - ps->startColor.a) * t;
+                const float clA = (a < 0.0f) ? 0.0f :
+                                  ((a > 1.0f) ? 1.0f : a);
+                if (clA <= 0.001f) continue;
+                const ImVec2 sc = WorldToScreen(
+                    ImVec2{p.pos.x, p.pos.y}, panelMin, panelSize);
+                const float half = p.size * 0.5f * m_viewCam.zoom;
+                const ImU32 col = IM_COL32(
+                    int(r * 255.0f),
+                    int(g * 255.0f),
+                    int(b * 255.0f),
+                    int(clA * 255.0f));
+                dl->AddRectFilled(
+                    ImVec2{sc.x - half, sc.y - half},
+                    ImVec2{sc.x + half, sc.y + half},
+                    col);
+            }
         }
 
         // Collider gizmos -- box outlines + circle outlines.

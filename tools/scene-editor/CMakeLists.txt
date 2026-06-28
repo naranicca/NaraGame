@@ -53,6 +53,7 @@ add_executable(scene-editor
     src/scene/AudioSourceComponent.cpp
     src/scene/Component.cpp
     src/scene/EdgeColliderComponent.cpp
+    src/scene/ParticleSystemComponent.cpp
     src/scene/PolygonColliderComponent.cpp
     src/scene/Rigidbody2DComponent.cpp
     src/scene/Scene.cpp

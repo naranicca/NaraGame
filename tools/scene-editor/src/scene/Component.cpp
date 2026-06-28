@@ -7,6 +7,7 @@
 #include "CapsuleColliderComponent.h"
 #include "CircleColliderComponent.h"
 #include "EdgeColliderComponent.h"
+#include "ParticleSystemComponent.h"
 #include "PolygonColliderComponent.h"
 #include "Rigidbody2DComponent.h"
 #include "ScriptComponent.h"
@@ -71,6 +72,8 @@ void RegisterBuiltinComponents() {
                [] { return std::make_unique<EdgeColliderComponent>(); });
     r.Register(Rigidbody2DComponent::StaticTypeName(),
                [] { return std::make_unique<Rigidbody2DComponent>(); });
+    r.Register(ParticleSystemComponent::StaticTypeName(),
+               [] { return std::make_unique<ParticleSystemComponent>(); });
 }
 
 } // namespace SceneEditor
