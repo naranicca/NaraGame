@@ -31,6 +31,15 @@ enum class TileColliderShape {
     //                   filled bottom-left triangle.
     SlopeRight,
     SlopeLeft,
+    // M7c23: 22.5-degree gentle slopes -- half-height variants
+    // that pair with a flat tile next to them so a body climbs
+    // half a cell per tile. The hypotenuse anchors at one
+    // bottom corner + rises to the mid-height of the opposite
+    // side.
+    //   SlopeRightHalf: anchor (0, 0), top at (1, 0.5).
+    //   SlopeLeftHalf:  anchor (1, 0), top at (0, 0.5).
+    SlopeRightHalf,
+    SlopeLeftHalf,
 };
 
 struct TilesetTile {

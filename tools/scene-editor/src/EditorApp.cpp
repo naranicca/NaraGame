@@ -592,10 +592,14 @@ private:
             // Circle bodies hitting a slope cell get pushed
             // perpendicular to the hypotenuse instead of along
             // the AABB faces.
-            //   None  = not a slope (default)
-            //   Right = / hypotenuse, filled bottom-right
-            //   Left  = \ hypotenuse, filled bottom-left
-            enum class SlopeShape { None, Right, Left };
+            //   None       = not a slope (default)
+            //   Right      = / hypotenuse, filled bottom-right
+            //   Left       = \ hypotenuse, filled bottom-left
+            //   RightHalf  = 22.5° / from bottom-left to mid-right
+            //   LeftHalf   = 22.5° \ from bottom-right to mid-left
+            enum class SlopeShape {
+                None, Right, Left, RightHalf, LeftHalf
+            };
             SlopeShape              slope = SlopeShape::None;
         };
         std::vector<ColliderInfo> infos;
@@ -731,12 +735,24 @@ private:
                 ColliderInfo::SlopeShape tileSlope =
                     ColliderInfo::SlopeShape::None;
                 if (!tileTrigger) {
-                    if (tIt->second.shape ==
-                        SceneEditor::TileColliderShape::SlopeRight)
+                    using TileShape =
+                        SceneEditor::TileColliderShape;
+                    switch (tIt->second.shape) {
+                    case TileShape::SlopeRight:
                         tileSlope = ColliderInfo::SlopeShape::Right;
-                    else if (tIt->second.shape ==
-                        SceneEditor::TileColliderShape::SlopeLeft)
+                        break;
+                    case TileShape::SlopeLeft:
                         tileSlope = ColliderInfo::SlopeShape::Left;
+                        break;
+                    case TileShape::SlopeRightHalf:
+                        tileSlope = ColliderInfo::SlopeShape::RightHalf;
+                        break;
+                    case TileShape::SlopeLeftHalf:
+                        tileSlope = ColliderInfo::SlopeShape::LeftHalf;
+                        break;
+                    default:
+                        break;
+                    }
                 }
                 // Cell centre in entity-local coordinates, then
                 // rotate into world.
@@ -839,35 +855,67 @@ private:
         // moving entity A by (dx, dy) separates it from B.
         // Caller pushes B by the opposite vector. Used by the
         // solid (non-trigger) push-out path.
+        // M7c23: slope shape parameterised by per-shape
+        // (leftH, rightH) pair. Defined before the MTV helper
+        // so the lambda capture works without forward refs.
+        auto SlopeHeights = [](ColliderInfo::SlopeShape s,
+                               float& leftH, float& rightH) {
+            switch (s) {
+            case ColliderInfo::SlopeShape::Right:
+                leftH = 0.0f; rightH = 1.0f; break;
+            case ColliderInfo::SlopeShape::Left:
+                leftH = 1.0f; rightH = 0.0f; break;
+            case ColliderInfo::SlopeShape::RightHalf:
+                leftH = 0.0f; rightH = 0.5f; break;
+            case ColliderInfo::SlopeShape::LeftHalf:
+                leftH = 0.5f; rightH = 0.0f; break;
+            default:
+                leftH = 0.0f; rightH = 0.0f; break;
+            }
+        };
+        auto SlopeHypotenuse = [&SlopeHeights](
+                                const ColliderInfo& slope,
+                                float& P0x, float& P0y,
+                                float& P1x, float& P1y,
+                                float& outNx, float& outNy) {
+            float leftH, rightH;
+            SlopeHeights(slope.slope, leftH, rightH);
+            const float fullH = 2.0f * slope.halfY;
+            const float bl_x = slope.cx - slope.halfX;
+            const float bl_y = slope.cy - slope.halfY;
+            const float br_x = slope.cx + slope.halfX;
+            const float br_y = slope.cy - slope.halfY;
+            P0x = bl_x;
+            P0y = bl_y + leftH * fullH;
+            P1x = br_x;
+            P1y = br_y + rightH * fullH;
+            const float dx = P1x - P0x;
+            const float dy = P1y - P0y;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 1e-6f) {
+                outNx = 0.0f; outNy = 1.0f;
+                return;
+            }
+            // Rotate hypotenuse direction 90-deg CCW. Filled
+            // triangle sits below the hypotenuse, so the
+            // resulting normal points up-and-outward for both
+            // / and \ orientations + half variants.
+            outNx = -dy / len;
+            outNy =  dx / len;
+        };
+
         // M7c22: slope-vs-circle MTV. Pushes the circle out
         // perpendicular to the slope hypotenuse + radial at
         // segment endpoints. Returned vector moves `a` away
         // from `b`; when `a` is the slope (static), Resolve's
         // share=0 logic drops the slope-side push + the circle
         // gets pushed by the opposite vector.
-        auto SlopeCircleMtv = [](const ColliderInfo& slope,
-                                 const ColliderInfo& circ,
-                                 float& outX, float& outY) {
-            // Re-derive hypotenuse + outward normal in one
-            // place (avoids dragging another lambda capture
-            // through the closure list).
-            const float bl_x = slope.cx - slope.halfX;
-            const float bl_y = slope.cy - slope.halfY;
-            const float br_x = slope.cx + slope.halfX;
-            const float br_y = slope.cy - slope.halfY;
-            const float tl_x = slope.cx - slope.halfX;
-            const float tl_y = slope.cy + slope.halfY;
-            const float tr_x = slope.cx + slope.halfX;
-            const float tr_y = slope.cy + slope.halfY;
-            const float invSqrt2 = 0.70710678118f;
+        auto SlopeCircleMtv = [&SlopeHypotenuse](
+                                const ColliderInfo& slope,
+                                const ColliderInfo& circ,
+                                float& outX, float& outY) {
             float P0x, P0y, P1x, P1y, nx, ny;
-            if (slope.slope == ColliderInfo::SlopeShape::Right) {
-                P0x = bl_x; P0y = bl_y; P1x = tr_x; P1y = tr_y;
-                nx = -invSqrt2; ny = invSqrt2;
-            } else {
-                P0x = br_x; P0y = br_y; P1x = tl_x; P1y = tl_y;
-                nx = invSqrt2;  ny = invSqrt2;
-            }
+            SlopeHypotenuse(slope, P0x, P0y, P1x, P1y, nx, ny);
             const float sx = P1x - P0x;
             const float sy = P1y - P0y;
             const float segLenSq = sx * sx + sy * sy;
@@ -1037,27 +1085,6 @@ private:
         // returns true when the closest-point distance is less
         // than the circle radius. The outward normal points
         // toward the unfilled triangle.
-        auto SlopeHypotenuse = [](const ColliderInfo& slope,
-                                  float& P0x, float& P0y,
-                                  float& P1x, float& P1y,
-                                  float& outNx, float& outNy) {
-            const float bl_x = slope.cx - slope.halfX;
-            const float bl_y = slope.cy - slope.halfY;
-            const float br_x = slope.cx + slope.halfX;
-            const float br_y = slope.cy - slope.halfY;
-            const float tl_x = slope.cx - slope.halfX;
-            const float tl_y = slope.cy + slope.halfY;
-            const float tr_x = slope.cx + slope.halfX;
-            const float tr_y = slope.cy + slope.halfY;
-            const float invSqrt2 = 0.70710678118f;
-            if (slope.slope == ColliderInfo::SlopeShape::Right) {
-                P0x = bl_x; P0y = bl_y; P1x = tr_x; P1y = tr_y;
-                outNx = -invSqrt2; outNy = invSqrt2;
-            } else {
-                P0x = br_x; P0y = br_y; P1x = tl_x; P1y = tl_y;
-                outNx = invSqrt2;  outNy = invSqrt2;
-            }
-        };
         auto SlopeCircleOverlap = [&SlopeHypotenuse](
                 const ColliderInfo& slope,
                 const ColliderInfo& circ) {
@@ -4739,8 +4766,8 @@ private:
         const int texCols = int(tex->Width())  / ts->cellPixelW;
         const int texRows = int(tex->Height()) / ts->cellPixelH;
         ImGui::TextDisabled("%d x %d tiles  -- click cycles "
-                            "blank -> Box -> OneWay -> SlopeR -> "
-                            "SlopeL -> Trigger -> blank",
+                            "blank -> Box -> OneWay -> SlopeR/L "
+                            "(45/22.5) -> Trigger -> blank",
                             texCols, texRows);
 
         // Preview area.
@@ -4801,28 +4828,33 @@ private:
                 fill = IM_COL32(220,  60,  60,  90);
                 edge = IM_COL32(255, 100, 100, 255);
             }
-            // Slope tiles draw as triangles to communicate
-            // which half of the cell is filled. Other modes
-            // stay as a full rect.
+            // Slope tiles draw as triangles that match the
+            // filled portion of the cell. Half-height variants
+            // shrink the triangle vertically. Trigger + Box +
+            // OneWay still draw as a full rect.
+            using ShapeT = SceneEditor::TileColliderShape;
             const auto shape = kv.second.shape;
-            if (!kv.second.isTrigger &&
-                shape == SceneEditor::TileColliderShape::SlopeRight) {
-                // Filled bottom-right triangle (screen Y down).
-                dl->AddTriangleFilled(
-                    ImVec2{a.x, b.y}, ImVec2{b.x, b.y},
-                    ImVec2{b.x, a.y}, fill);
-                dl->AddTriangle(
-                    ImVec2{a.x, b.y}, ImVec2{b.x, b.y},
-                    ImVec2{b.x, a.y}, edge, 2.0f);
-            } else if (!kv.second.isTrigger &&
-                       shape == SceneEditor::TileColliderShape::SlopeLeft) {
-                // Filled bottom-left triangle.
-                dl->AddTriangleFilled(
-                    ImVec2{a.x, b.y}, ImVec2{b.x, b.y},
-                    ImVec2{a.x, a.y}, fill);
-                dl->AddTriangle(
-                    ImVec2{a.x, b.y}, ImVec2{b.x, b.y},
-                    ImVec2{a.x, a.y}, edge, 2.0f);
+            const float midY = (a.y + b.y) * 0.5f;
+            ImVec2 v0, v1, v2;
+            bool isSlope = !kv.second.isTrigger;
+            if (isSlope && shape == ShapeT::SlopeRight) {
+                v0 = ImVec2{a.x, b.y}; v1 = ImVec2{b.x, b.y};
+                v2 = ImVec2{b.x, a.y};
+            } else if (isSlope && shape == ShapeT::SlopeLeft) {
+                v0 = ImVec2{a.x, b.y}; v1 = ImVec2{b.x, b.y};
+                v2 = ImVec2{a.x, a.y};
+            } else if (isSlope && shape == ShapeT::SlopeRightHalf) {
+                v0 = ImVec2{a.x, b.y}; v1 = ImVec2{b.x, b.y};
+                v2 = ImVec2{b.x, midY};
+            } else if (isSlope && shape == ShapeT::SlopeLeftHalf) {
+                v0 = ImVec2{a.x, b.y}; v1 = ImVec2{b.x, b.y};
+                v2 = ImVec2{a.x, midY};
+            } else {
+                isSlope = false;
+            }
+            if (isSlope) {
+                dl->AddTriangleFilled(v0, v1, v2, fill);
+                dl->AddTriangle(v0, v1, v2, edge, 2.0f);
             } else {
                 dl->AddRectFilled(a, b, fill);
                 dl->AddRect(a, b, edge, 0.0f, 0, 2.0f);
@@ -4859,8 +4891,14 @@ private:
                 } else if (!it->second.isTrigger &&
                            it->second.shape == Shape::SlopeRight) {
                     it->second.shape = Shape::SlopeLeft;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeLeft) {
+                    it->second.shape = Shape::SlopeRightHalf;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeRightHalf) {
+                    it->second.shape = Shape::SlopeLeftHalf;
                 } else if (!it->second.isTrigger) {
-                    // SlopeLeft -> Trigger (Box-shape trigger).
+                    // SlopeLeftHalf -> Trigger (Box trigger).
                     it->second.isTrigger = true;
                     it->second.shape = Shape::Box;
                 } else {

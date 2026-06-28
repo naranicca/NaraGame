@@ -44,10 +44,12 @@ void TilesetAsset::FromJson(const Value& root) {
         td.collides  = t.GetBool("collides",  false);
         td.isTrigger = t.GetBool("isTrigger", false);
         const std::string shapeStr = t.GetString("shape", "Box");
-        if      (shapeStr == "OneWay")     td.shape = TileColliderShape::OneWay;
-        else if (shapeStr == "SlopeRight") td.shape = TileColliderShape::SlopeRight;
-        else if (shapeStr == "SlopeLeft")  td.shape = TileColliderShape::SlopeLeft;
-        else                                td.shape = TileColliderShape::Box;
+        if      (shapeStr == "OneWay")          td.shape = TileColliderShape::OneWay;
+        else if (shapeStr == "SlopeRight")      td.shape = TileColliderShape::SlopeRight;
+        else if (shapeStr == "SlopeLeft")       td.shape = TileColliderShape::SlopeLeft;
+        else if (shapeStr == "SlopeRightHalf")  td.shape = TileColliderShape::SlopeRightHalf;
+        else if (shapeStr == "SlopeLeftHalf")   td.shape = TileColliderShape::SlopeLeftHalf;
+        else                                     td.shape = TileColliderShape::Box;
         tiles[idx] = td;
     }
 }
@@ -66,10 +68,12 @@ Value TilesetAsset::ToJson() const {
         t.Add("isTrigger", Value::MakeBool(kv.second.isTrigger));
         const char* shapeStr = "Box";
         switch (kv.second.shape) {
-            case TileColliderShape::OneWay:     shapeStr = "OneWay";     break;
-            case TileColliderShape::SlopeRight: shapeStr = "SlopeRight"; break;
-            case TileColliderShape::SlopeLeft:  shapeStr = "SlopeLeft";  break;
-            case TileColliderShape::Box:        default:                 break;
+            case TileColliderShape::OneWay:         shapeStr = "OneWay";         break;
+            case TileColliderShape::SlopeRight:     shapeStr = "SlopeRight";     break;
+            case TileColliderShape::SlopeLeft:      shapeStr = "SlopeLeft";      break;
+            case TileColliderShape::SlopeRightHalf: shapeStr = "SlopeRightHalf"; break;
+            case TileColliderShape::SlopeLeftHalf:  shapeStr = "SlopeLeftHalf";  break;
+            case TileColliderShape::Box:            default:                     break;
         }
         t.Add("shape", Value::MakeString(shapeStr));
         arr.Push(std::move(t));
