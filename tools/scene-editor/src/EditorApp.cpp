@@ -288,9 +288,8 @@ public:
         DrawMainMenuBar();
         HandleGlobalShortcuts();
         TickAssetFileWatcher(ImGui::GetIO().DeltaTime);
-        TickScripts    (ImGui::GetIO().DeltaTime);
-        TickRigidbodies(ImGui::GetIO().DeltaTime);
-        TickColliders  (ImGui::GetIO().DeltaTime);
+        TickScripts (ImGui::GetIO().DeltaTime);
+        TickPhysics (ImGui::GetIO().DeltaTime);
         TickAnimators(ImGui::GetIO().DeltaTime);
         DrawHierarchyPanel();
         DrawInspectorPanel();
@@ -507,6 +506,23 @@ private:
     // pairs and OnTriggerExit on ones that left contact. Both
     // sides of the pair receive the dispatch with the other
     // entity name as the second argument.
+    // M7c14: physics runs at a fixed sub-step ratio so a fast
+    // body (Rigidbody2D with a big velocity, or a script
+    // calling transform.translate by a large delta) doesn't
+    // tunnel through thin colliders inside a single render
+    // frame. The integrator + collision detection both step
+    // dt/kPhysicsSubSteps at a time; per-frame Lua callbacks
+    // (Update, raycast, overlap) still see the full dt as
+    // "this frame".
+    static constexpr int kPhysicsSubSteps = 4;
+    void TickPhysics(float dt) {
+        const float subDt = dt / float(kPhysicsSubSteps);
+        for (int i = 0; i < kPhysicsSubSteps; ++i) {
+            TickRigidbodies(subDt);
+            TickColliders  (subDt);
+        }
+    }
+
     // Semi-implicit Euler integrator for every entity that
     // carries a Rigidbody2D + Transform. Runs before
     // TickColliders so the M7c5 push-out path sees the
