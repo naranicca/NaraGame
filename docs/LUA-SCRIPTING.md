@@ -72,13 +72,13 @@ argument.
 
 ## API surface
 
-The host registers nine global tables: `animator`, `transform`,
-`sprite`, `rigidbody`, `input`, `time`, `audio`, `scene`, `math`
-(extension methods on the stdlib `math` table). Every API entry
-takes the target entity's name as its first argument (when
-applicable). Missing entities and missing components are silent
-no-ops that return a sensible default rather than raising
-errors.
+The host registers ten global tables: `animator`, `transform`,
+`sprite`, `rigidbody`, `input`, `time`, `audio`, `particle`,
+`scene`, `math` (extension methods on the stdlib `math`
+table). Every API entry takes the target entity's name as its
+first argument (when applicable). Missing entities and missing
+components are silent no-ops that return a sensible default
+rather than raising errors.
 
 ### `animator.*`
 
@@ -284,6 +284,31 @@ pushes the persisted JSON values back in. Wire a settings UI
 through the modal if you want persistence; use `audio.*` from
 script land for transient ducking / fades.
 
+### `particle.*`
+
+Controls a `ParticleSystemComponent` (M9c2) at runtime. The
+component's inspector fields (emission rate, lifetime range,
+colour ramp, gravity, ...) edit the steady-state behaviour;
+this table is the script-side hook for explicit bursts, runtime
+rate changes, and play/stop toggles.
+
+| Function | Returns | Notes |
+| -------- | ------- | ----- |
+| `particle.emit(entity, count?)`             | int (actually emitted) | Adds up to `count` particles (default 1) to the live pool *now*, sampled from the same min/max ranges the auto-emit path uses. Cap is the component's `maxParticles`; over-cap requests return what fit. |
+| `particle.clear(entity)`                    | bool | Wipes the live pool without touching emission settings. |
+| `particle.set_emission_rate(entity, rate)`  | bool | Live-tune the per-second auto-emission rate. 0 disables continuous emission while leaving `particle.emit` bursts untouched. Negative values clamp to 0. |
+| `particle.get_count(entity)`                | int  | Current live particle count -- useful for pacing the next burst or detecting "finished". |
+| `particle.set_playing(entity, bool)`        | bool | Toggles the auto-emit + integrate path. `false` freezes new emissions; `true` resumes from where the emitter left off without re-firing `playOnStart`. `particle.clear` is the "wipe to zero" sibling. |
+| `particle.is_playing(entity)`               | bool | True when the emitter's auto-play gate is still on. |
+
+Script-driven bursts (explosion on hit, sparkle on pickup):
+emit on demand with `particle.emit` and leave `emissionRate =
+0` in the inspector so the component only fires when Lua asks.
+Steady-state ambience (smoke, dust, fountains): use a non-zero
+`emissionRate` and let `TickParticles` handle it; reach for
+`set_emission_rate` only when a runtime event needs to thin
+or thicken the stream.
+
 ### `scene.*`
 
 Twenty-four entries spanning entity / component / hierarchy /
@@ -318,7 +343,8 @@ Component type names match the C++ `Component::TypeName()`
 strings: `"Transform"`, `"SpriteRenderer"`, `"Tilemap"`,
 `"Animator"`, `"Script"`, `"BoxCollider"`, `"CircleCollider"`,
 `"CapsuleCollider"`, `"PolygonCollider"`, `"EdgeCollider"`,
-`"Rigidbody2D"`, `"AudioSource"`, `"AudioListener"`.
+`"Rigidbody2D"`, `"AudioSource"`, `"AudioListener"`,
+`"ParticleSystem"`.
 
 ### Physics components
 
@@ -429,6 +455,12 @@ pairs cost no per-shape math and never fire events.
 | --------- | ---------- | ----- |
 | `AudioSource` | `clip` (Audio GUID), `volume`, `playOnStart`, `loop`, `is3D`, `minDistance`, `maxDistance` | Auto-plays its clip on rising-edge play-mode entry. `loop = true` routes through `play_music` (streaming + loop); `loop = false` uses the SFX cache. `is3D` toggles distance attenuation + stereo pan against the active AudioListener (M8c8). `is3D + loop` is silently ignored -- streaming voices don't update as the entity moves yet |
 | `AudioListener` | -- (marker component) | Attach to the player / camera / follow-target. The runtime takes the listener's Transform position as the reference point for 3D source attenuation + stereo pan. First enabled entity carrying the component wins -- only one active per scene |
+
+### VFX components (M9c2)
+
+| Component | Key fields | Notes |
+| --------- | ---------- | ----- |
+| `ParticleSystem` | `maxParticles`, `emissionRate`, `lifetimeMin/Max`, `startSpeedMin/Max`, `startSizeMin/Max`, `dirAngleMinDeg/MaxDeg`, `startColor`, `endColor`, `gravity`, `playOnStart`, `loop` | Entity-attached 2D emitter. Ticks under the same Play-mode gate as audio + animators; renders coloured quads in `DrawEntities` after sprite/tilemap. See `particle.*` for the script-side hooks (`emit` / `clear` / `set_emission_rate` / `get_count` / `set_playing` / `is_playing`) |
 
 For script-driven SFX (footsteps, gunfire, jump SFX) use
 `audio.play` / `audio.spawn` from Lua directly. `AudioSource`

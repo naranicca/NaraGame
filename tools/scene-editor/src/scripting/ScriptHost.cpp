@@ -7,6 +7,7 @@
 #include "../scene/BoxColliderComponent.h"
 #include "../scene/CircleColliderComponent.h"
 #include "../scene/Component.h"
+#include "../scene/ParticleSystemComponent.h"
 #include "../scene/Rigidbody2DComponent.h"
 #include "../scene/Entity.h"
 #include "../scene/Scene.h"
@@ -1196,6 +1197,160 @@ static std::string ResolveAudioPath(ScriptHost* host,
     return resolved;
 }
 
+// M9c3 particle.* helpers. Same FindByName + GetComponent
+// pattern every other component-targeted API uses. A nil
+// component lookup just returns the binding's failure value
+// (false / 0) so a stale entity name doesn't raise.
+static ParticleSystemComponent* FindParticleSystem(
+        ScriptHost* host, const char* entityName) {
+    if (!host || !host->BoundScene() || !entityName) return nullptr;
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) return nullptr;
+    return e->GetComponent<ParticleSystemComponent>();
+}
+
+// particle.emit(entity, count?) -> int actually emitted.
+// Pulls the entity's Transform position, samples the same
+// range fields the auto-emit path uses, and fills slots
+// directly into the live pool until either `count` slots are
+// taken or the pool's maxParticles cap is reached. count
+// defaults to 1; emission Rate / playOnStart / loop are
+// untouched -- this is an extra burst on top of whatever the
+// component is already doing.
+static int LuaParticleEmit(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    int count = 1;
+    if (lua_gettop(L) >= 2 && !lua_isnoneornil(L, 2)) {
+        count = int(luaL_checkinteger(L, 2));
+    }
+    if (count <= 0) { lua_pushinteger(L, 0); return 1; }
+    ParticleSystemComponent* ps = FindParticleSystem(host, name);
+    if (!ps) { lua_pushinteger(L, 0); return 1; }
+    Entity* e = host->BoundScene()->FindByName(name);
+    TransformComponent* tr = e ? e->GetComponent<TransformComponent>()
+                                : nullptr;
+    if (!tr) { lua_pushinteger(L, 0); return 1; }
+    // Lazy-resize the pool so emit-before-the-first-Tick still
+    // works. The Tick path uses the same idiom.
+    if (ps->maxParticles < 1) ps->maxParticles = 1;
+    if (int(ps->_pool.size()) != ps->maxParticles) {
+        ps->_pool.assign(size_t(ps->maxParticles),
+            ParticleSystemComponent::Particle{});
+        ps->_liveCount = 0;
+    }
+    // Seed lazily the same way Tick does so two adjacent
+    // particle.emit calls on a brand-new component don't
+    // emit identical sequences.
+    if (ps->_rng == 0) ps->_rng = 0x9E3779B9u + 1u;
+    auto xs = [](std::uint32_t& s) -> std::uint32_t {
+        if (s == 0) s = 0x9E3779B9u;
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        return s;
+    };
+    auto frand = [&](std::uint32_t& s, float lo, float hi) {
+        const std::uint32_t r = xs(s);
+        const float u = float(r) * (1.0f / 4294967296.0f);
+        return lo + (hi - lo) * u;
+    };
+    int emitted = 0;
+    while (emitted < count &&
+           ps->_liveCount < ps->maxParticles) {
+        auto& p = ps->_pool[size_t(ps->_liveCount++)];
+        ++ps->_emittedTotal;
+        ++emitted;
+        p.pos = { tr->position.x, tr->position.y };
+        const float ang = frand(ps->_rng,
+            ps->dirAngleMinDeg, ps->dirAngleMaxDeg) *
+            (3.14159265358979323846f / 180.0f);
+        const float spd = frand(ps->_rng,
+            ps->startSpeedMin, ps->startSpeedMax);
+        p.vel = { std::cos(ang) * spd,
+                  std::sin(ang) * spd };
+        p.age      = 0.0f;
+        p.lifetime = frand(ps->_rng,
+            ps->lifetimeMin,
+            std::max(ps->lifetimeMin, ps->lifetimeMax));
+        p.size     = frand(ps->_rng,
+            ps->startSizeMin, ps->startSizeMax);
+    }
+    lua_pushinteger(L, emitted);
+    return 1;
+}
+
+// particle.clear(entity) -> bool. Wipes the live pool without
+// touching emission settings. Useful when an explosion finished
+// + the next state shouldn't carry over residual smoke.
+static int LuaParticleClear(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    ParticleSystemComponent* ps = FindParticleSystem(host, name);
+    if (!ps) { lua_pushboolean(L, 0); return 1; }
+    ps->_liveCount    = 0;
+    ps->_emitAccum    = 0.0f;
+    ps->_emittedTotal = 0;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// particle.set_emission_rate(entity, rate) -> bool. Live tune
+// the per-second rate. 0 disables continuous emission while
+// leaving particle.emit() bursts untouched.
+static int LuaParticleSetEmissionRate(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    const float rate = float(luaL_checknumber(L, 2));
+    ParticleSystemComponent* ps = FindParticleSystem(host, name);
+    if (!ps) { lua_pushboolean(L, 0); return 1; }
+    ps->emissionRate = (rate < 0.0f) ? 0.0f : rate;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// particle.get_count(entity) -> int. Live particle count;
+// useful for pacing the next burst or detecting "finished".
+static int LuaParticleGetCount(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    ParticleSystemComponent* ps = FindParticleSystem(host, name);
+    lua_pushinteger(L, ps ? ps->_liveCount : 0);
+    return 1;
+}
+
+// particle.set_playing(entity, bool) -> bool. Toggles the
+// auto-emit + integrate path. Setting to false freezes new
+// emissions; setting back to true (without resetting) picks
+// up where the emitter left off. particle.clear is the
+// "wipe to zero" sibling.
+static int LuaParticleSetPlaying(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    const bool on    = (lua_toboolean(L, 2) != 0);
+    ParticleSystemComponent* ps = FindParticleSystem(host, name);
+    if (!ps) { lua_pushboolean(L, 0); return 1; }
+    // _started gates the rising-edge auto-play in Tick. Flip
+    // it directly so the runtime doesn't fire playOnStart
+    // again when we toggle back on.
+    ps->_started    = on;
+    ps->playOnStart = on;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// particle.is_playing(entity) -> bool. True when the
+// component's _started flag is set + playOnStart says emission
+// should continue. Mirrors the auto-emit gate the Tick uses.
+static int LuaParticleIsPlaying(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    ParticleSystemComponent* ps = FindParticleSystem(host, name);
+    lua_pushboolean(L,
+        (ps && ps->_started && ps->playOnStart) ? 1 : 0);
+    return 1;
+}
+
 // scene.overlap_circle(cx, cy, r) -> table of entity names.
 // Same area-query shape as overlap_box but with a virtual
 // circle. Box colliders use the nearest-point-on-box clamp,
@@ -2203,6 +2358,22 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kAudioApi, 1);
     lua_setglobal(L, "audio");
+    // M9c3 particle table. Same upvalue idiom as audio --
+    // every binding takes the target entity name as its
+    // first argument + resolves through ScriptHost::BoundScene.
+    static const luaL_Reg kParticleApi[] = {
+        {"emit",               LuaParticleEmit},
+        {"clear",              LuaParticleClear},
+        {"set_emission_rate",  LuaParticleSetEmissionRate},
+        {"get_count",          LuaParticleGetCount},
+        {"set_playing",        LuaParticleSetPlaying},
+        {"is_playing",         LuaParticleIsPlaying},
+        {nullptr,              nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kParticleApi, 1);
+    lua_setglobal(L, "particle");
     static const luaL_Reg kSceneApi[] = {
         {"create_entity",     LuaSceneCreateEntity},
         {"destroy_entity",    LuaSceneDestroyEntity},
