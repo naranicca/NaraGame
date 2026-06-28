@@ -33,6 +33,24 @@ public:
     // M8c2 SFX path is one-shot.
     bool         loop        = false;
 
+    // M8c8 3D positional audio. When `is3D` is true the
+    // runtime measures the distance + horizontal offset
+    // between this entity's Transform + the active
+    // AudioListenerComponent's Transform, attenuates the
+    // volume linearly across [minDistance, maxDistance],
+    // and pans the mono source toward the side it sits on
+    // relative to the listener. Stereo source files keep
+    // the attenuation but skip the pan -- they already
+    // carry their own L/R balance.
+    //
+    // 3D + loop is ignored on purpose: streaming voices
+    // play once + don't update as the entity moves; a
+    // follow-up commit can wire X3DAudio if "music that
+    // tracks a 3D object" shows up as a real use case.
+    bool         is3D         = false;
+    float        minDistance  = 1.0f;
+    float        maxDistance  = 10.0f;
+
     // Runtime-only -- not serialized. Reset on every
     // play-mode entry so a single Play press triggers
     // exactly one auto-fire.

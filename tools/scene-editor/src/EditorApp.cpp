@@ -16,6 +16,7 @@
 #include "scene/AnimatorComponent.h"
 #include "scene/BoxColliderComponent.h"
 #include "audio/Audio.h"
+#include "scene/AudioListenerComponent.h"
 #include "scene/AudioSourceComponent.h"
 #include "scene/CapsuleColliderComponent.h"
 #include "scene/CircleColliderComponent.h"
@@ -2313,12 +2314,73 @@ private:
             if (as->loop) {
                 SceneEditor::Audio::PlayMusic(
                     abs, as->volume, true);
+                m_scriptHost.AppendLine(
+                    std::string("[audio-source] ") + e->name +
+                    " -> " + entry->relPath + " (loop)");
+            } else if (as->is3D) {
+                // M8c8 3D: find the active listener +
+                // compute attenuation + pan against the
+                // source's own Transform position.
+                float lx = 0.0f, ly = 0.0f;
+                bool foundListener = false;
+                for (SceneEditor::EntityId lid : ids) {
+                    SceneEditor::Entity* le = m_scene.Get(lid);
+                    if (!le || !le->enabled) continue;
+                    auto* al = le->GetComponent<
+                        SceneEditor::AudioListenerComponent>();
+                    if (!al) continue;
+                    auto* lt = le->GetComponent<
+                        SceneEditor::TransformComponent>();
+                    if (!lt) continue;
+                    lx = lt->position.x;
+                    ly = lt->position.y;
+                    foundListener = true;
+                    break;
+                }
+                auto* st = e->GetComponent<
+                    SceneEditor::TransformComponent>();
+                if (!foundListener || !st) {
+                    SceneEditor::Audio::Play(abs, as->volume);
+                    m_scriptHost.AppendLine(
+                        std::string("[audio-source] ") + e->name +
+                        " -> " + entry->relPath +
+                        " (3D requested, no listener -> 2D)");
+                } else {
+                    const float dx = st->position.x - lx;
+                    const float dy = st->position.y - ly;
+                    const float dist = std::sqrt(dx * dx + dy * dy);
+                    float atten = 1.0f;
+                    if (dist >= as->maxDistance) {
+                        atten = 0.0f;
+                    } else if (dist > as->minDistance &&
+                                as->maxDistance > as->minDistance) {
+                        atten =
+                            (as->maxDistance - dist) /
+                            (as->maxDistance - as->minDistance);
+                    }
+                    float pan = 0.0f;
+                    if (as->maxDistance > 0.0f) {
+                        pan = dx / as->maxDistance;
+                        if (pan < -1.0f) pan = -1.0f;
+                        if (pan >  1.0f) pan =  1.0f;
+                    }
+                    SceneEditor::Audio::PlayPositional(
+                        abs, as->volume * atten, pan);
+                    char log[256];
+                    std::snprintf(log, sizeof(log),
+                        "[audio-source] %s -> %s "
+                        "(dist=%.2f atten=%.2f pan=%+.2f)",
+                        e->name.c_str(),
+                        entry->relPath.c_str(),
+                        dist, atten, pan);
+                    m_scriptHost.AppendLine(log);
+                }
             } else {
                 SceneEditor::Audio::Play(abs, as->volume);
+                m_scriptHost.AppendLine(
+                    std::string("[audio-source] ") + e->name +
+                    " -> " + entry->relPath);
             }
-            m_scriptHost.AppendLine(
-                std::string("[audio-source] ") + e->name +
-                " -> " + entry->relPath);
         }
     }
 
@@ -6695,6 +6757,8 @@ private:
             DrawScriptEditor(entity, *sc);
         } else if (auto* as = dynamic_cast<SceneEditor::AudioSourceComponent*>(comp)) {
             DrawAudioSourceEditor(entity, *as);
+        } else if (auto* al = dynamic_cast<SceneEditor::AudioListenerComponent*>(comp)) {
+            DrawAudioListenerEditor(entity, *al);
         } else if (auto* bc = dynamic_cast<SceneEditor::BoxColliderComponent*>(comp)) {
             DrawBoxColliderEditor(entity, *bc);
         } else if (auto* cc = dynamic_cast<SceneEditor::CircleColliderComponent*>(comp)) {
@@ -6965,6 +7029,17 @@ private:
         DrawColliderLayerCombo(pgc.layer);
     }
 
+    // M8c8 AudioListener inspector. No editable fields; the
+    // component is a marker so the runtime knows where to
+    // anchor 3D attenuation + panning.
+    void DrawAudioListenerEditor(SceneEditor::Entity& /*entity*/,
+                                  SceneEditor::AudioListenerComponent& /*al*/) {
+        ImGui::TextDisabled(
+            "Audio reference point for 3D AudioSources.");
+        ImGui::TextDisabled(
+            "Only the first enabled listener is active.");
+    }
+
     // M8c7 AudioSource inspector. Clip combo over the asset
     // DB's Audio entries + the standard 0-1 volume slider +
     // two policy checkboxes (Play On Start / Loop). Loop
@@ -7015,6 +7090,30 @@ private:
         ImGui::TextDisabled(
             "Loop routes through the streaming voice; non-loop "
             "fires the cached SFX path.");
+        // M8c8 3D-positional block. Hidden when is3D is off
+        // so the inspector stays compact for 2D sources.
+        bool is3D = as.is3D;
+        if (ImGui::Checkbox("3D Positional", &is3D)) {
+            UndoSnapshot();
+            as.is3D = is3D;
+        }
+        if (as.is3D) {
+            if (ImGui::DragFloat("Min Distance", &as.minDistance,
+                                  0.05f, 0.0f, 0.0f, "%.2f")) {
+                UndoSnapshot();
+                if (as.minDistance < 0.0f) as.minDistance = 0.0f;
+            }
+            if (ImGui::DragFloat("Max Distance", &as.maxDistance,
+                                  0.05f, 0.0f, 0.0f, "%.2f")) {
+                UndoSnapshot();
+                if (as.maxDistance < as.minDistance + 0.01f) {
+                    as.maxDistance = as.minDistance + 0.01f;
+                }
+            }
+            ImGui::TextDisabled(
+                "Linear attenuation between min + max distance. "
+                "Pan from horizontal offset / maxDistance.");
+        }
     }
 
     // Same shape as DrawBoxColliderEditor but with a single

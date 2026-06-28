@@ -306,6 +306,54 @@ bool Audio::Play(const std::string& absolutePath, float volume) {
     return true;
 }
 
+bool Audio::PlayPositional(const std::string& absolutePath,
+                            float volume, float pan) {
+    if (absolutePath.empty()) return false;
+    if (!Initialize()) return false;
+    SoundClip* clip = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        auto it = g_cache.find(absolutePath);
+        if (it == g_cache.end()) {
+            SoundClip fresh;
+            if (!LoadSound(absolutePath, fresh)) return false;
+            it = g_cache.emplace(absolutePath,
+                                  std::move(fresh)).first;
+        }
+        clip = &it->second;
+    }
+    IXAudio2SourceVoice* voice = nullptr;
+    HRESULT hr = g_engine->CreateSourceVoice(
+        &voice, &clip->format, 0,
+        XAUDIO2_DEFAULT_FREQ_RATIO,
+        &g_callback, nullptr, nullptr);
+    if (FAILED(hr) || !voice) return false;
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    voice->SetVolume(volume);
+    // Mono source -> stereo pan matrix. Stereo sources
+    // already encode L/R balance, so we leave their
+    // matrix at the identity default.
+    if (clip->format.nChannels == 1) {
+        if (pan < -1.0f) pan = -1.0f;
+        if (pan >  1.0f) pan =  1.0f;
+        const float left  = (1.0f - pan) * 0.5f;
+        const float right = (1.0f + pan) * 0.5f;
+        const float matrix[2] = { left, right };
+        voice->SetOutputMatrix(nullptr, 1, 2, matrix);
+    }
+    XAUDIO2_BUFFER buffer{};
+    buffer.AudioBytes = UINT32(clip->data.size());
+    buffer.pAudioData = clip->data.data();
+    buffer.Flags      = XAUDIO2_END_OF_STREAM;
+    buffer.pContext   = voice;
+    hr = voice->SubmitSourceBuffer(&buffer);
+    if (FAILED(hr)) { voice->DestroyVoice(); return false; }
+    hr = voice->Start(0);
+    if (FAILED(hr)) { voice->DestroyVoice(); return false; }
+    return true;
+}
+
 void Audio::Stop() {
     if (!g_engine) return;
     // XAudio2 doesn't expose a "stop all source voices"

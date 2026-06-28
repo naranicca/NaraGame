@@ -29,6 +29,15 @@ public:
     // even for typo'd paths.
     static bool Play(const std::string& absolutePath,
                      float           volume = 1.0f);
+    // M8c8 3D-positional one-shot. Same lookup + cache as
+    // Play(), but applies a stereo pan via SetOutputMatrix
+    // for mono sources. `pan` is in [-1, 1]: -1 = full
+    // left, 0 = centred, +1 = full right. Stereo sources
+    // get the volume but skip the matrix (they already
+    // carry their own L/R balance).
+    static bool PlayPositional(const std::string& absolutePath,
+                                float volume,
+                                float pan);
     // Stops all currently-playing SFX source voices.
     static void Stop();
     // Explicit teardown -- normally the static engine is
