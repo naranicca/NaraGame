@@ -582,6 +582,12 @@ private:
             // logic stays uniform.
             float                   halfX, halfY;
             float                   cosR, sinR;
+            // M7c21: tile-driven OneWay flag. Only the per-tile
+            // synthetic infos ever set this; the pair loop
+            // suppresses contacts whose MTV would push the body
+            // sideways or downward, so jump-through platforms
+            // pass when the body's MTV doesn't point up.
+            bool                    oneWay = false;
         };
         std::vector<ColliderInfo> infos;
         infos.reserve(32);
@@ -709,6 +715,10 @@ private:
                 if (!tIt->second.collides && !tIt->second.isTrigger)
                     continue;
                 const bool tileTrigger = tIt->second.isTrigger;
+                const bool tileOneWay =
+                    !tileTrigger &&
+                    tIt->second.shape ==
+                        SceneEditor::TileColliderShape::OneWay;
                 // Cell centre in entity-local coordinates, then
                 // rotate into world.
                 const float lx = (float(gx) + 0.5f) * cellWorldW;
@@ -723,6 +733,7 @@ private:
                 ci.hasScript     = false;
                 ci.entryFunction.clear();
                 ci.isTrigger     = tileTrigger;
+                ci.oneWay        = tileOneWay;
                 ci.kind          = ColliderKind::Box;
                 ci.layer         = tm->collisionLayer;
                 ci.cx            = wx;
@@ -970,6 +981,24 @@ private:
                 if (!m_project.CollisionLayersCollide(a.layer, b.layer))
                     continue;
                 if (!Overlap(a, b)) continue;
+                // M7c21: OneWay tiles only block when the MTV
+                // would push the other body upward. A body
+                // jumping up from below the platform produces
+                // a downward MTV (and a horizontal hit gives
+                // ~zero vertical), so we skip the pair entirely
+                // -- no contact events fire + no push-out
+                // applies. Triggers ignore oneWay because the
+                // trigger path doesn't push.
+                if (a.oneWay || b.oneWay) {
+                    float dx = 0.0f, dy = 0.0f;
+                    ComputeMTV(a, b, dx, dy);
+                    // ComputeMTV returns the MTV that moves `a`
+                    // away from `b`. We want the MTV applied to
+                    // the *other* (non-tile) side -- the moving
+                    // body -- to be upward (+Y).
+                    const float bodyMtvY = a.oneWay ? -dy : dy;
+                    if (bodyMtvY <= 1e-4f) continue;
+                }
                 const auto key =
                     a.id < b.id
                         ? std::pair<SceneEditor::EntityId,
@@ -4540,8 +4569,9 @@ private:
         }
         const int texCols = int(tex->Width())  / ts->cellPixelW;
         const int texRows = int(tex->Height()) / ts->cellPixelH;
-        ImGui::TextDisabled("%d x %d tiles  -- click a cell to cycle "
-                            "blank -> solid -> trigger -> blank",
+        ImGui::TextDisabled("%d x %d tiles  -- click cycles "
+                            "blank -> solid -> one-way -> trigger "
+                            "-> blank",
                             texCols, texRows);
 
         // Preview area.
@@ -4575,9 +4605,12 @@ private:
             dl->AddLine(ImVec2{x, imgMin.y},
                         ImVec2{x, imgMin.y + imgSize.y}, grid, 1.0f);
         }
-        // Highlight cells. Solid (collides + !isTrigger) = red.
-        // Trigger (isTrigger) = blue. M7c19 separates the two
-        // intents through the click cycle below.
+        // Highlight cells by mode:
+        //   Solid Box     = red    (M4 colour)
+        //   Solid OneWay  = orange (visually closer to solid +
+        //                            cues the "directional" intent)
+        //   Trigger       = blue   (M7c19 colour)
+        // Cells with no flag set don't draw an overlay.
         for (const auto& kv : ts->tiles) {
             if (!kv.second.collides && !kv.second.isTrigger) continue;
             const int idx = kv.first;
@@ -4588,13 +4621,17 @@ private:
                            imgMin.y +  row      * cellScreenH};
             const ImVec2 b{imgMin.x + (col + 1) * cellScreenW,
                            imgMin.y + (row + 1) * cellScreenH};
-            const bool trigger = kv.second.isTrigger;
-            const ImU32 fill = trigger
-                ? IM_COL32( 60, 140, 220,  90)
-                : IM_COL32(220,  60,  60,  90);
-            const ImU32 edge = trigger
-                ? IM_COL32(100, 170, 255, 255)
-                : IM_COL32(255, 100, 100, 255);
+            ImU32 fill, edge;
+            if (kv.second.isTrigger) {
+                fill = IM_COL32( 60, 140, 220,  90);
+                edge = IM_COL32(100, 170, 255, 255);
+            } else if (kv.second.shape == SceneEditor::TileColliderShape::OneWay) {
+                fill = IM_COL32(230, 150,  40,  90);
+                edge = IM_COL32(255, 180,  80, 255);
+            } else {
+                fill = IM_COL32(220,  60,  60,  90);
+                edge = IM_COL32(255, 100, 100, 255);
+            }
             dl->AddRectFilled(a, b, fill);
             dl->AddRect(a, b, edge, 0.0f, 0, 2.0f);
         }
@@ -4606,20 +4643,31 @@ private:
             const int col = px / ts->cellPixelW;
             const int row = py / ts->cellPixelH;
             if (col >= 0 && col < texCols && row >= 0 && row < texRows) {
-                // M7c19: cycle blank -> solid -> trigger ->
-                // blank. The dual flags let the runtime pick
-                // between OnCollision* and OnTrigger* without
-                // a separate registration step.
+                // M7c21: cycle blank -> solid Box -> solid OneWay
+                // -> trigger -> blank. The four-state cycle stays
+                // single-click + the runtime branches on the
+                // composed flags (collides + isTrigger + shape)
+                // without per-cell branching elsewhere.
                 const int idx = row * texCols + col;
                 auto it = ts->tiles.find(idx);
                 if (it == ts->tiles.end()) {
                     SceneEditor::TilesetTile t;
                     t.collides  = true;
                     t.isTrigger = false;
+                    t.shape     = SceneEditor::TileColliderShape::Box;
                     ts->tiles[idx] = t;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape ==
+                               SceneEditor::TileColliderShape::Box) {
+                    // solid Box -> solid OneWay
+                    it->second.shape =
+                        SceneEditor::TileColliderShape::OneWay;
                 } else if (!it->second.isTrigger) {
-                    // solid -> trigger
+                    // solid OneWay -> trigger (Box-shape trigger;
+                    // OneWay + trigger doesn't make sense)
                     it->second.isTrigger = true;
+                    it->second.shape =
+                        SceneEditor::TileColliderShape::Box;
                 } else {
                     // trigger -> blank
                     ts->tiles.erase(it);

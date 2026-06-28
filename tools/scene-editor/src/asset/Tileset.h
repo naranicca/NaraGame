@@ -12,6 +12,17 @@ namespace SceneEditor {
 // Per-tile metadata stored inside a Tileset. Sparse -- only the tiles
 // the user has flagged end up in the map; defaults (collides = false)
 // fall through automatically.
+// M7c21: per-tile collider shape. Box behaves like a regular
+// AABB / OBB (the M7c13 SAT path); OneWay drops collisions that
+// would push the body sideways or downward, so a falling body
+// lands on the platform but a body jumping up from below passes
+// right through. Useful for classic 2D-platformer "jump-through"
+// platforms.
+enum class TileColliderShape {
+    Box,
+    OneWay,
+};
+
 struct TilesetTile {
     bool collides = false;
     // M7c19: trigger-mode collision. When set alongside
@@ -20,6 +31,10 @@ struct TilesetTile {
     // useful for damage zones, pickups baked into the tilemap,
     // door / portal cells, etc.
     bool isTrigger = false;
+    // M7c21: collider shape selector (Box / OneWay). OneWay is
+    // ignored when isTrigger is true -- the M7c19 trigger path
+    // doesn't push, so the directional semantics don't apply.
+    TileColliderShape shape = TileColliderShape::Box;
 };
 
 // .ntileset asset: a named slice of a tileset texture + per-tile
