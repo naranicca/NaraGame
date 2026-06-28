@@ -559,6 +559,13 @@ private:
             float                   vx, vy;
             // M7c11: collision layer for filtering.
             std::string             layer;
+            // M7c13: oriented box. halfX / halfY live in the
+            // collider's local frame; cosR / sinR rotate them
+            // into world space. Circles set rotation = 0 and
+            // halfX = halfY = radius so the bounding AABB
+            // logic stays uniform.
+            float                   halfX, halfY;
+            float                   cosR, sinR;
         };
         std::vector<ColliderInfo> infos;
         infos.reserve(32);
@@ -590,10 +597,24 @@ private:
                 ci.cx        = tr->position.x + bc->offset.x;
                 ci.cy        = tr->position.y + bc->offset.y;
                 ci.radius    = 0.0f;
-                ci.minX      = ci.cx - halfX;
-                ci.maxX      = ci.cx + halfX;
-                ci.minY      = ci.cy - halfY;
-                ci.maxY      = ci.cy + halfY;
+                ci.halfX     = halfX;
+                ci.halfY     = halfY;
+                const float rotRad = tr->rotation
+                    * 3.14159265358979323846f / 180.0f;
+                ci.cosR      = std::cos(rotRad);
+                ci.sinR      = std::sin(rotRad);
+                // World-space bounding AABB of the rotated box
+                // -- the four corners' min/max along world axes.
+                // Used by the cheap top-level cull only; SAT
+                // does the precise test.
+                const float ex = std::fabs(ci.cosR) * halfX +
+                                 std::fabs(ci.sinR) * halfY;
+                const float ey = std::fabs(ci.sinR) * halfX +
+                                 std::fabs(ci.cosR) * halfY;
+                ci.minX      = ci.cx - ex;
+                ci.maxX      = ci.cx + ex;
+                ci.minY      = ci.cy - ey;
+                ci.maxY      = ci.cy + ey;
             } else {
                 const float scaleAvg =
                     (tr->scale.x + tr->scale.y) * 0.5f;
@@ -603,6 +624,10 @@ private:
                 ci.cx        = tr->position.x + cc->offset.x;
                 ci.cy        = tr->position.y + cc->offset.y;
                 ci.radius    = cc->radius * scaleAvg;
+                ci.halfX     = ci.radius;
+                ci.halfY     = ci.radius;
+                ci.cosR      = 1.0f;
+                ci.sinR      = 0.0f;
                 ci.minX      = ci.cx - ci.radius;
                 ci.maxX      = ci.cx + ci.radius;
                 ci.minY      = ci.cy - ci.radius;
@@ -610,26 +635,77 @@ private:
             }
             infos.push_back(std::move(ci));
         }
+        // Box-vs-axis projection. Returns (min, max) of the
+        // box's footprint along the unit axis (ax, ay). The
+        // half-extent along the axis is the sum of each local
+        // axis's |dot| with the test axis times its half-size,
+        // so a box rotated 45 deg projects sqrt(2)*halfX onto
+        // the world X axis -- the SAT invariant.
+        auto ProjectBox = [](const ColliderInfo& box,
+                             float ax, float ay,
+                             float& outMin, float& outMax) {
+            const float centerProj = box.cx * ax + box.cy * ay;
+            const float xExt = box.halfX *
+                std::fabs(box.cosR * ax + box.sinR * ay);
+            const float yExt = box.halfY *
+                std::fabs(-box.sinR * ax + box.cosR * ay);
+            const float ext = xExt + yExt;
+            outMin = centerProj - ext;
+            outMax = centerProj + ext;
+        };
+
+        // M7c13: Separating Axis Theorem for OBB-vs-OBB.
+        // Returns true + the MTV that pushes `a` out of `b`
+        // when the two boxes overlap. Falls through to false
+        // the moment any of the four candidate axes finds a
+        // separating gap, so the early-out is fast.
+        auto SatBoxBox = [&ProjectBox](const ColliderInfo& a,
+                                       const ColliderInfo& b,
+                                       float& mtvX, float& mtvY) {
+            const float axes[4][2] = {
+                {  a.cosR,  a.sinR },
+                { -a.sinR,  a.cosR },
+                {  b.cosR,  b.sinR },
+                { -b.sinR,  b.cosR },
+            };
+            float minOverlap = std::numeric_limits<float>::infinity();
+            float bestAx = 0.0f, bestAy = 0.0f;
+            for (int i = 0; i < 4; ++i) {
+                float aMin, aMax, bMin, bMax;
+                ProjectBox(a, axes[i][0], axes[i][1], aMin, aMax);
+                ProjectBox(b, axes[i][0], axes[i][1], bMin, bMax);
+                const float ov = std::min(aMax, bMax) - std::max(aMin, bMin);
+                if (ov < 0.0f) return false;
+                if (ov < minOverlap) {
+                    minOverlap = ov;
+                    bestAx = axes[i][0];
+                    bestAy = axes[i][1];
+                }
+            }
+            // Orient the MTV so it pushes `a` *away* from `b`
+            // (flip the axis when `b` sits on the +axis side
+            // of `a`).
+            const float d = (b.cx - a.cx) * bestAx +
+                            (b.cy - a.cy) * bestAy;
+            if (d > 0.0f) { bestAx = -bestAx; bestAy = -bestAy; }
+            mtvX = bestAx * minOverlap;
+            mtvY = bestAy * minOverlap;
+            return true;
+        };
+
         // Minimum translation vector returning (dx, dy) such that
         // moving entity A by (dx, dy) separates it from B.
         // Caller pushes B by the opposite vector. Used by the
         // solid (non-trigger) push-out path.
-        auto ComputeMTV = [](const ColliderInfo& a,
-                             const ColliderInfo& b,
-                             float& dx, float& dy) {
+        auto ComputeMTV = [&SatBoxBox](const ColliderInfo& a,
+                                       const ColliderInfo& b,
+                                       float& dx, float& dy) {
             dx = 0.0f; dy = 0.0f;
             if (a.kind == ColliderKind::Box &&
                 b.kind == ColliderKind::Box) {
-                // Box-vs-box: pick the smaller penetration axis.
-                const float ox = std::min(a.maxX - b.minX,
-                                          b.maxX - a.minX);
-                const float oy = std::min(a.maxY - b.minY,
-                                          b.maxY - a.minY);
-                if (ox <= oy) {
-                    dx = (a.cx < b.cx) ? -ox : ox;
-                } else {
-                    dy = (a.cy < b.cy) ? -oy : oy;
-                }
+                // SAT does the orientation work; the result is
+                // already an MTV pushing A out of B.
+                SatBoxBox(a, b, dx, dy);
                 return;
             }
             if (a.kind == ColliderKind::Circle &&
@@ -643,70 +719,59 @@ private:
                 dy = ey / dist * pen;
                 return;
             }
-            // Mixed: clamp the circle centre to the box, push the
-            // circle along the closest-point vector.
+            // Mixed: M7c13 routes the circle into the box's
+            // *local* frame so the M7c10 closest-point clamp
+            // works on the rotated box as if it were axis-
+            // aligned. The push vector then rotates back into
+            // world space.
             const bool aIsBox = (a.kind == ColliderKind::Box);
             const ColliderInfo& box = aIsBox ? a : b;
             const ColliderInfo& cir = aIsBox ? b : a;
-            const float cx2 = std::clamp(cir.cx, box.minX, box.maxX);
-            const float cy2 = std::clamp(cir.cy, box.minY, box.maxY);
-            float ex = cir.cx - cx2;
-            float ey = cir.cy - cy2;
+            // Circle centre in box-local coordinates: dot with
+            // each local axis. Box's X axis is (cosR, sinR);
+            // Y axis is (-sinR, cosR).
+            const float dxw = cir.cx - box.cx;
+            const float dyw = cir.cy - box.cy;
+            const float lx = box.cosR * dxw + box.sinR * dyw;
+            const float ly = -box.sinR * dxw + box.cosR * dyw;
+            const float cx2 = std::clamp(lx, -box.halfX, box.halfX);
+            const float cy2 = std::clamp(ly, -box.halfY, box.halfY);
+            float ex = lx - cx2;
+            float ey = ly - cy2;
             float dist = std::sqrt(ex * ex + ey * ey);
-            float pushX = 0.0f, pushY = 0.0f;
+            float pushLX = 0.0f, pushLY = 0.0f;
             if (dist < 1e-6f) {
-                // Circle centre deep inside the box. The
-                // closest-point clamp degenerates -- "nearest
-                // face" isn't safe because for a fast falling
-                // ball that overshot, the floor's *bottom* face
-                // is now the closest one + pushing toward it
-                // would complete the tunnel. We use the
-                // relative-velocity direction (circle minus box)
-                // to pick the face on the *entry* side instead:
-                // whichever face has its outward normal pointing
-                // most opposite to the circle's incoming motion.
-                // (M7c4 / M7c10 latent bug -- caught when a
-                // bouncing ball with restitution=0.8 stopped
-                // bouncing after the first impact.)
-                const float relVx = cir.vx - box.vx;
-                const float relVy = cir.vy - box.vy;
-                const float toLeft   = cir.cx - box.minX;
-                const float toRight  = box.maxX - cir.cx;
-                const float toBottom = cir.cy - box.minY;
-                const float toTop    = box.maxY - cir.cy;
-                // For each candidate face, the post-push exit
-                // depth is "face distance + radius". Score by
-                // (vel dot exit-normal): an inward velocity
-                // (component opposite to the face normal) gives
-                // a positive score. The face with the highest
-                // positive score is the one the body entered
-                // through, so we push along its normal.
-                struct Face {
-                    float nx, ny;   // outward normal
-                    float depth;    // exit push magnitude
-                };
+                // Circle centre deep inside the (rotated) box.
+                // Score each face by the velocity-relative
+                // entry direction, in local frame.
+                const float relVxW = cir.vx - box.vx;
+                const float relVyW = cir.vy - box.vy;
+                const float relVx =  box.cosR * relVxW + box.sinR * relVyW;
+                const float relVy = -box.sinR * relVxW + box.cosR * relVyW;
+                const float toLeft   = lx + box.halfX;
+                const float toRight  = box.halfX - lx;
+                const float toBottom = ly + box.halfY;
+                const float toTop    = box.halfY - ly;
+                struct Face { float nx, ny, depth; };
                 const Face faces[4] = {
                     { -1.0f,  0.0f, toLeft   + cir.radius },
                     {  1.0f,  0.0f, toRight  + cir.radius },
                     {  0.0f, -1.0f, toBottom + cir.radius },
                     {  0.0f,  1.0f, toTop    + cir.radius },
                 };
-                int bestIdx = -1;
+                int bestIdx = 0;
                 float bestScore = -1.0f;
                 for (int i = 0; i < 4; ++i) {
-                    const Face& f = faces[i];
-                    const float score = -(relVx * f.nx + relVy * f.ny);
+                    const float score = -(relVx * faces[i].nx +
+                                          relVy * faces[i].ny);
                     if (score > bestScore) {
                         bestScore = score;
                         bestIdx = i;
                     }
                 }
                 if (bestScore <= 0.0f) {
-                    // No clear velocity hint (body sitting at
-                    // rest somehow ended up inside) -- fall back
-                    // to the shallowest face.
-                    bestIdx = 0;
                     float bestDepth = faces[0].depth;
+                    bestIdx = 0;
                     for (int i = 1; i < 4; ++i) {
                         if (faces[i].depth < bestDepth) {
                             bestDepth = faces[i].depth;
@@ -714,14 +779,16 @@ private:
                         }
                     }
                 }
-                const Face& chosen = faces[bestIdx];
-                pushX = chosen.nx * chosen.depth;
-                pushY = chosen.ny * chosen.depth;
+                pushLX = faces[bestIdx].nx * faces[bestIdx].depth;
+                pushLY = faces[bestIdx].ny * faces[bestIdx].depth;
             } else {
                 const float pen = cir.radius - dist;
-                pushX = ex / dist * pen;
-                pushY = ey / dist * pen;
+                pushLX = ex / dist * pen;
+                pushLY = ey / dist * pen;
             }
+            // Rotate the local-frame push back to world.
+            const float pushX =  box.cosR * pushLX - box.sinR * pushLY;
+            const float pushY =  box.sinR * pushLX + box.cosR * pushLY;
             // mtv we built pushes the circle out of the box. If
             // A is the circle the result is direct; otherwise
             // flip the sign.
@@ -732,15 +799,19 @@ private:
             }
         };
 
-        // Per-shape overlap. Box-vs-box uses the same AABB check
-        // M7c1 shipped; circle-vs-circle compares centre
-        // distance to summed radii; circle-vs-box uses the
-        // standard "nearest point on box clamp" trick.
-        auto Overlap = [](const ColliderInfo& a, const ColliderInfo& b) {
+        // Per-shape overlap. Box-vs-box runs the M7c13 SAT
+        // pass; circle-vs-circle compares centre distance to
+        // summed radii; box-vs-circle uses the same local-frame
+        // clamp the rotated MTV path uses.
+        auto Overlap = [&SatBoxBox](const ColliderInfo& a, const ColliderInfo& b) {
             if (a.kind == ColliderKind::Box &&
                 b.kind == ColliderKind::Box) {
-                return !(a.maxX < b.minX || b.maxX < a.minX ||
-                         a.maxY < b.minY || b.maxY < a.minY);
+                // SAT yields a yes/no plus a throwaway MTV --
+                // we just need the boolean; ComputeMTV reruns
+                // SAT for the solid path so the redundant work
+                // is bounded.
+                float dxIgn = 0.0f, dyIgn = 0.0f;
+                return SatBoxBox(a, b, dxIgn, dyIgn);
             }
             if (a.kind == ColliderKind::Circle &&
                 b.kind == ColliderKind::Circle) {
@@ -749,15 +820,21 @@ private:
                 const float r  = a.radius + b.radius;
                 return dx * dx + dy * dy <= r * r;
             }
-            // One box, one circle. Pick whichever is the box.
+            // Box-Circle: route the circle into the box's
+            // local frame so the rotated box uses an axis-
+            // aligned clamp.
             const ColliderInfo& box =
                 a.kind == ColliderKind::Box ? a : b;
             const ColliderInfo& circ =
                 a.kind == ColliderKind::Box ? b : a;
-            const float cx2 = std::clamp(circ.cx, box.minX, box.maxX);
-            const float cy2 = std::clamp(circ.cy, box.minY, box.maxY);
-            const float dx  = circ.cx - cx2;
-            const float dy  = circ.cy - cy2;
+            const float dxw = circ.cx - box.cx;
+            const float dyw = circ.cy - box.cy;
+            const float lx =  box.cosR * dxw + box.sinR * dyw;
+            const float ly = -box.sinR * dxw + box.cosR * dyw;
+            const float cx2 = std::clamp(lx, -box.halfX, box.halfX);
+            const float cy2 = std::clamp(ly, -box.halfY, box.halfY);
+            const float dx  = lx - cx2;
+            const float dy  = ly - cy2;
             return dx * dx + dy * dy <= circ.radius * circ.radius;
         };
         // O(n^2) pair check. Fine for editor-scale entity counts;
@@ -7172,10 +7249,23 @@ private:
             const float halfY = bc->size.y * 0.5f * tr->scale.y;
             const float cx = tr->position.x + bc->offset.x;
             const float cy = tr->position.y + bc->offset.y;
-            const ImVec2 tl = WorldToScreen(
-                ImVec2(cx - halfX, cy + halfY), panelMin, panelSize);
-            const ImVec2 br = WorldToScreen(
-                ImVec2(cx + halfX, cy - halfY), panelMin, panelSize);
+            // M7c13: gizmo follows the same rotation the
+            // runtime collider sees, so what you see really is
+            // the SAT footprint.
+            const float rotRad = tr->rotation
+                * 3.14159265358979323846f / 180.0f;
+            const float cosR = std::cos(rotRad);
+            const float sinR = std::sin(rotRad);
+            auto Corner = [&](float lx, float ly) {
+                const float wx = cx + cosR * lx - sinR * ly;
+                const float wy = cy + sinR * lx + cosR * ly;
+                return WorldToScreen(ImVec2(wx, wy),
+                                     panelMin, panelSize);
+            };
+            const ImVec2 pTL = Corner(-halfX,  halfY);
+            const ImVec2 pTR = Corner( halfX,  halfY);
+            const ImVec2 pBR = Corner( halfX, -halfY);
+            const ImVec2 pBL = Corner(-halfX, -halfY);
             bool overlapping = false;
             for (const auto& key : m_collisionPairs) {
                 if (key.first == id || key.second == id) {
@@ -7189,7 +7279,8 @@ private:
                 : (sel ? IM_COL32(120, 255, 140, 255)
                        : IM_COL32(80,  220, 100, 180));
             const float thickness = sel ? 2.5f : 1.5f;
-            dl->AddRect(tl, br, col, 0.0f, 0, thickness);
+            const ImVec2 pts[5] = { pTL, pTR, pBR, pBL, pTL };
+            dl->AddPolyline(pts, 5, col, ImDrawFlags_None, thickness);
             // Centre tick to mark the offset origin.
             const ImVec2 origin = WorldToScreen(
                 ImVec2(cx, cy), panelMin, panelSize);
