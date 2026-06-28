@@ -597,8 +597,14 @@ private:
             //   Left       = \ hypotenuse, filled bottom-left
             //   RightHalf  = 22.5° / from bottom-left to mid-right
             //   LeftHalf   = 22.5° \ from bottom-right to mid-left
+            //   RightHigh  = 22.5° / from mid-left to top-right
+            //                (upper half of two-cell ramp)
+            //   LeftHigh   = 22.5° \ from mid-right to top-left
             enum class SlopeShape {
-                None, Right, Left, RightHalf, LeftHalf
+                None,
+                Right, Left,
+                RightHalf, LeftHalf,
+                RightHigh, LeftHigh
             };
             SlopeShape              slope = SlopeShape::None;
         };
@@ -750,6 +756,12 @@ private:
                     case TileShape::SlopeLeftHalf:
                         tileSlope = ColliderInfo::SlopeShape::LeftHalf;
                         break;
+                    case TileShape::SlopeRightHigh:
+                        tileSlope = ColliderInfo::SlopeShape::RightHigh;
+                        break;
+                    case TileShape::SlopeLeftHigh:
+                        tileSlope = ColliderInfo::SlopeShape::LeftHigh;
+                        break;
                     default:
                         break;
                     }
@@ -869,6 +881,10 @@ private:
                 leftH = 0.0f; rightH = 0.5f; break;
             case ColliderInfo::SlopeShape::LeftHalf:
                 leftH = 0.5f; rightH = 0.0f; break;
+            case ColliderInfo::SlopeShape::RightHigh:
+                leftH = 0.5f; rightH = 1.0f; break;
+            case ColliderInfo::SlopeShape::LeftHigh:
+                leftH = 1.0f; rightH = 0.5f; break;
             default:
                 leftH = 0.0f; rightH = 0.0f; break;
             }
@@ -915,9 +931,18 @@ private:
         // (the first argument). Caller flips the sign as needed
         // to match ComputeMTV's "move `a` away from `b`"
         // convention.
-        auto TriangleVertices = [&SlopeHeights](
+        // M7c25: PolyVertices replaces TriangleVertices. For
+        // half / 45-deg variants (leftH=0 or rightH=0) the
+        // filled region is a triangle (3 vertices); for High
+        // variants (leftH>0 and rightH>0) it's a trapezoid
+        // (4 vertices) -- the cell's bottom edge sits flush
+        // with the cell floor + the top edge follows the
+        // slope hypotenuse. CCW vertex order so the cross-
+        // product centroid math stays consistent across both.
+        auto PolyVertices = [&SlopeHeights](
                                 const ColliderInfo& slope,
-                                float v[3][2]) {
+                                float v[4][2],
+                                int& count) {
             float leftH, rightH;
             SlopeHeights(slope.slope, leftH, rightH);
             const float fullH = 2.0f * slope.halfY;
@@ -925,41 +950,59 @@ private:
             const float bl_y = slope.cy - slope.halfY;
             const float br_x = slope.cx + slope.halfX;
             const float br_y = slope.cy - slope.halfY;
-            v[0][0] = bl_x;
-            v[0][1] = bl_y;
-            v[1][0] = br_x;
-            v[1][1] = br_y;
-            // Third vertex is whichever side rose to the slope's
-            // upper endpoint -- it lies on the cell's left or
-            // right edge depending on the shape.
-            if (leftH > rightH) {
-                v[2][0] = bl_x;
-                v[2][1] = bl_y + leftH * fullH;
-            } else {
+            // Common bottom corners (CCW order).
+            v[0][0] = bl_x; v[0][1] = bl_y;
+            v[1][0] = br_x; v[1][1] = br_y;
+            if (leftH <= 0.0f) {
+                // Triangle: BL, BR, top-right.
                 v[2][0] = br_x;
                 v[2][1] = br_y + rightH * fullH;
+                count = 3;
+            } else if (rightH <= 0.0f) {
+                // Triangle: BL, BR, top-left.
+                v[2][0] = bl_x;
+                v[2][1] = bl_y + leftH * fullH;
+                count = 3;
+            } else {
+                // Trapezoid: BL, BR, TR_at_rightH, TL_at_leftH.
+                v[2][0] = br_x;
+                v[2][1] = br_y + rightH * fullH;
+                v[3][0] = bl_x;
+                v[3][1] = bl_y + leftH * fullH;
+                count = 4;
             }
         };
-        auto SatTriBox = [&ProjectBox, &TriangleVertices](
-                            const ColliderInfo& tri,
+        // SAT for any convex polygon (3 or 4 vertices) vs OBB.
+        // Generalises the M7c24 SatTriBox to handle both
+        // triangles (Half + 45-deg slopes) + trapezoids (High
+        // slopes) without per-shape branching elsewhere.
+        auto SatPolyBox = [&ProjectBox, &PolyVertices](
+                            const ColliderInfo& poly,
                             const ColliderInfo& box,
                             float& mtvX, float& mtvY) {
-            float v[3][2];
-            TriangleVertices(tri, v);
-            // 5 axes: box X, box Y, 3 edge normals.
-            float axes[5][2];
+            float v[4][2];
+            int n;
+            PolyVertices(poly, v, n);
+            // 2 box axes + n edge normals = up to 6 axes.
+            float axes[6][2];
             axes[0][0] =  box.cosR; axes[0][1] =  box.sinR;
             axes[1][0] = -box.sinR; axes[1][1] =  box.cosR;
-            for (int i = 0; i < 3; ++i) {
-                const float ex = v[(i + 1) % 3][0] - v[i][0];
-                const float ey = v[(i + 1) % 3][1] - v[i][1];
-                // Perpendicular -- pick the side pointing away
-                // from the opposite vertex so the normal is
-                // outward from the filled triangle.
+            // Centroid of the polygon (average of vertices).
+            float cx = 0.0f, cy = 0.0f;
+            for (int i = 0; i < n; ++i) {
+                cx += v[i][0]; cy += v[i][1];
+            }
+            cx /= float(n); cy /= float(n);
+            for (int i = 0; i < n; ++i) {
+                const int j = (i + 1) % n;
+                const float ex = v[j][0] - v[i][0];
+                const float ey = v[j][1] - v[i][1];
+                // Perpendicular pointing away from the centroid
+                // (= outward normal of the convex polygon).
                 float nx = -ey, ny = ex;
-                const float ox = v[(i + 2) % 3][0] - v[i][0];
-                const float oy = v[(i + 2) % 3][1] - v[i][1];
-                if (nx * ox + ny * oy > 0.0f) {
+                const float mx = (v[i][0] + v[j][0]) * 0.5f - cx;
+                const float my = (v[i][1] + v[j][1]) * 0.5f - cy;
+                if (nx * mx + ny * my < 0.0f) {
                     nx = -nx; ny = -ny;
                 }
                 const float len = std::sqrt(nx * nx + ny * ny);
@@ -968,41 +1011,41 @@ private:
                 axes[2 + i][0] = nx;
                 axes[2 + i][1] = ny;
             }
+            const int axisCount = 2 + n;
             float minOverlap = std::numeric_limits<float>::infinity();
             float bestNx = 0.0f, bestNy = 0.0f;
-            for (int i = 0; i < 5; ++i) {
+            for (int i = 0; i < axisCount; ++i) {
                 const float ax = axes[i][0];
                 const float ay = axes[i][1];
-                // Project triangle onto axis (min / max of the
-                // 3 vertex projections).
-                float triMin = v[0][0] * ax + v[0][1] * ay;
-                float triMax = triMin;
-                for (int k = 1; k < 3; ++k) {
+                float polyMin = v[0][0] * ax + v[0][1] * ay;
+                float polyMax = polyMin;
+                for (int k = 1; k < n; ++k) {
                     const float p = v[k][0] * ax + v[k][1] * ay;
-                    triMin = std::min(triMin, p);
-                    triMax = std::max(triMax, p);
+                    polyMin = std::min(polyMin, p);
+                    polyMax = std::max(polyMax, p);
                 }
                 float boxMin, boxMax;
                 ProjectBox(box, ax, ay, boxMin, boxMax);
-                const float overlap = std::min(triMax, boxMax) -
-                                      std::max(triMin, boxMin);
+                const float overlap = std::min(polyMax, boxMax) -
+                                      std::max(polyMin, boxMin);
                 if (overlap < 0.0f) return false;
                 if (overlap < minOverlap) {
                     minOverlap = overlap;
                     bestNx = ax; bestNy = ay;
                 }
             }
-            // Orient the MTV so it pushes the BOX away from the
-            // triangle's centroid.
-            const float triCx = (v[0][0] + v[1][0] + v[2][0]) / 3.0f;
-            const float triCy = (v[0][1] + v[1][1] + v[2][1]) / 3.0f;
-            const float d = (box.cx - triCx) * bestNx +
-                            (box.cy - triCy) * bestNy;
+            // Orient MTV pushing the BOX away from polygon's
+            // centroid (already computed above).
+            const float d = (box.cx - cx) * bestNx +
+                            (box.cy - cy) * bestNy;
             if (d < 0.0f) { bestNx = -bestNx; bestNy = -bestNy; }
             mtvX = bestNx * minOverlap;
             mtvY = bestNy * minOverlap;
             return true;
         };
+        // Back-compat alias so the existing wiring keeps
+        // building until I update the call sites below.
+        auto SatTriBox = SatPolyBox;
 
         // M7c22: slope-vs-circle MTV. Pushes the circle out
         // perpendicular to the slope hypotenuse + radial at
@@ -1010,10 +1053,100 @@ private:
         // from `b`; when `a` is the slope (static), Resolve's
         // share=0 logic drops the slope-side push + the circle
         // gets pushed by the opposite vector.
-        auto SlopeCircleMtv = [&SlopeHypotenuse](
+        // M7c25: closest-point-on-polygon helper, defined
+        // before SlopeCircleMtv so the lambda capture works
+        // without a forward declaration.
+        auto PolyCircleClosest = [&PolyVertices](
+                const ColliderInfo& slope,
+                const ColliderInfo& circ,
+                float& outCx, float& outCy,
+                bool& inside) {
+            float v[4][2];
+            int n;
+            PolyVertices(slope, v, n);
+            float ctrX = 0.0f, ctrY = 0.0f;
+            for (int i = 0; i < n; ++i) {
+                ctrX += v[i][0]; ctrY += v[i][1];
+            }
+            ctrX /= float(n); ctrY /= float(n);
+            inside = true;
+            for (int i = 0; i < n; ++i) {
+                const int j = (i + 1) % n;
+                const float ex = v[j][0] - v[i][0];
+                const float ey = v[j][1] - v[i][1];
+                const float c1 = ex * (circ.cy - v[i][1]) -
+                                 ey * (circ.cx - v[i][0]);
+                const float c2 = ex * (ctrY - v[i][1]) -
+                                 ey * (ctrX - v[i][0]);
+                if ((c1 < 0.0f) != (c2 < 0.0f)) {
+                    inside = false; break;
+                }
+            }
+            float bestDistSq = std::numeric_limits<float>::infinity();
+            for (int i = 0; i < n; ++i) {
+                const int j = (i + 1) % n;
+                const float ex = v[j][0] - v[i][0];
+                const float ey = v[j][1] - v[i][1];
+                const float lenSq = ex * ex + ey * ey;
+                if (lenSq < 1e-6f) continue;
+                float t = ((circ.cx - v[i][0]) * ex +
+                           (circ.cy - v[i][1]) * ey) / lenSq;
+                t = std::clamp(t, 0.0f, 1.0f);
+                const float pcx = v[i][0] + t * ex;
+                const float pcy = v[i][1] + t * ey;
+                const float ddx = circ.cx - pcx;
+                const float ddy = circ.cy - pcy;
+                const float dSq = ddx * ddx + ddy * ddy;
+                if (dSq < bestDistSq) {
+                    bestDistSq = dSq;
+                    outCx = pcx; outCy = pcy;
+                }
+            }
+        };
+        auto SlopeCircleMtv = [&SlopeHypotenuse, &PolyCircleClosest](
                                 const ColliderInfo& slope,
                                 const ColliderInfo& circ,
                                 float& outX, float& outY) {
+            // M7c25: for trapezoid (High) slopes use the
+            // closest-point-on-polygon approach -- the circle
+            // could touch any of the 4 edges. For triangle
+            // slopes the legacy segment-clamp path still
+            // applies + the math collapses to the same result.
+            if (slope.slope == ColliderInfo::SlopeShape::RightHigh ||
+                slope.slope == ColliderInfo::SlopeShape::LeftHigh) {
+                float pcx, pcy;
+                bool inside;
+                PolyCircleClosest(slope, circ, pcx, pcy, inside);
+                const float ddx = circ.cx - pcx;
+                const float ddy = circ.cy - pcy;
+                const float distSq = ddx * ddx + ddy * ddy;
+                const float dist = std::sqrt(distSq);
+                float pushX = 0.0f, pushY = 0.0f;
+                if (inside) {
+                    // Push outward along (pc -> centre) -- the
+                    // closest edge surface direction.
+                    if (dist > 1e-6f) {
+                        pushX = ddx / dist;
+                        pushY = ddy / dist;
+                    } else {
+                        pushX = 0.0f; pushY = 1.0f;
+                    }
+                    const float pen = circ.radius + dist;
+                    outX = pushX * pen;
+                    outY = pushY * pen;
+                } else {
+                    if (dist >= circ.radius) {
+                        outX = 0.0f; outY = 0.0f;
+                        return;
+                    }
+                    pushX = ddx / dist;
+                    pushY = ddy / dist;
+                    const float pen = circ.radius - dist;
+                    outX = pushX * pen;
+                    outY = pushY * pen;
+                }
+                return;
+            }
             float P0x, P0y, P1x, P1y, nx, ny;
             SlopeHypotenuse(slope, P0x, P0y, P1x, P1y, nx, ny);
             const float sx = P1x - P0x;
@@ -1202,20 +1335,13 @@ private:
         // returns true when the closest-point distance is less
         // than the circle radius. The outward normal points
         // toward the unfilled triangle.
-        auto SlopeCircleOverlap = [&SlopeHypotenuse](
+        auto SlopeCircleOverlap = [&PolyCircleClosest](
                 const ColliderInfo& slope,
                 const ColliderInfo& circ) {
-            float P0x, P0y, P1x, P1y, nx, ny;
-            SlopeHypotenuse(slope, P0x, P0y, P1x, P1y, nx, ny);
-            const float dx = P1x - P0x;
-            const float dy = P1y - P0y;
-            const float segLenSq = dx * dx + dy * dy;
-            if (segLenSq < 1e-6f) return false;
-            float t = ((circ.cx - P0x) * dx + (circ.cy - P0y) * dy)
-                       / segLenSq;
-            t = std::clamp(t, 0.0f, 1.0f);
-            const float pcx = P0x + t * dx;
-            const float pcy = P0y + t * dy;
+            float pcx, pcy;
+            bool inside;
+            PolyCircleClosest(slope, circ, pcx, pcy, inside);
+            if (inside) return true;
             const float ddx = circ.cx - pcx;
             const float ddy = circ.cy - pcy;
             return ddx * ddx + ddy * ddy <=
@@ -4952,33 +5078,46 @@ private:
                 fill = IM_COL32(220,  60,  60,  90);
                 edge = IM_COL32(255, 100, 100, 255);
             }
-            // Slope tiles draw as triangles that match the
-            // filled portion of the cell. Half-height variants
-            // shrink the triangle vertically. Trigger + Box +
-            // OneWay still draw as a full rect.
+            // Slope tiles draw as triangles or trapezoids that
+            // match the filled portion of the cell. High
+            // variants are 4-vertex trapezoids; Half + 45-deg
+            // variants are 3-vertex triangles. Trigger + Box +
+            // OneWay draw as a full rect.
             using ShapeT = SceneEditor::TileColliderShape;
             const auto shape = kv.second.shape;
             const float midY = (a.y + b.y) * 0.5f;
-            ImVec2 v0, v1, v2;
-            bool isSlope = !kv.second.isTrigger;
-            if (isSlope && shape == ShapeT::SlopeRight) {
-                v0 = ImVec2{a.x, b.y}; v1 = ImVec2{b.x, b.y};
-                v2 = ImVec2{b.x, a.y};
-            } else if (isSlope && shape == ShapeT::SlopeLeft) {
-                v0 = ImVec2{a.x, b.y}; v1 = ImVec2{b.x, b.y};
-                v2 = ImVec2{a.x, a.y};
-            } else if (isSlope && shape == ShapeT::SlopeRightHalf) {
-                v0 = ImVec2{a.x, b.y}; v1 = ImVec2{b.x, b.y};
-                v2 = ImVec2{b.x, midY};
-            } else if (isSlope && shape == ShapeT::SlopeLeftHalf) {
-                v0 = ImVec2{a.x, b.y}; v1 = ImVec2{b.x, b.y};
-                v2 = ImVec2{a.x, midY};
-            } else {
-                isSlope = false;
+            ImVec2 poly[4];
+            int polyCount = 0;
+            const bool slopeMode = !kv.second.isTrigger;
+            if (slopeMode && shape == ShapeT::SlopeRight) {
+                poly[0] = {a.x, b.y}; poly[1] = {b.x, b.y};
+                poly[2] = {b.x, a.y};
+                polyCount = 3;
+            } else if (slopeMode && shape == ShapeT::SlopeLeft) {
+                poly[0] = {a.x, b.y}; poly[1] = {b.x, b.y};
+                poly[2] = {a.x, a.y};
+                polyCount = 3;
+            } else if (slopeMode && shape == ShapeT::SlopeRightHalf) {
+                poly[0] = {a.x, b.y}; poly[1] = {b.x, b.y};
+                poly[2] = {b.x, midY};
+                polyCount = 3;
+            } else if (slopeMode && shape == ShapeT::SlopeLeftHalf) {
+                poly[0] = {a.x, b.y}; poly[1] = {b.x, b.y};
+                poly[2] = {a.x, midY};
+                polyCount = 3;
+            } else if (slopeMode && shape == ShapeT::SlopeRightHigh) {
+                poly[0] = {a.x, b.y};   poly[1] = {b.x, b.y};
+                poly[2] = {b.x, a.y};   poly[3] = {a.x, midY};
+                polyCount = 4;
+            } else if (slopeMode && shape == ShapeT::SlopeLeftHigh) {
+                poly[0] = {a.x, b.y};   poly[1] = {b.x, b.y};
+                poly[2] = {b.x, midY};  poly[3] = {a.x, a.y};
+                polyCount = 4;
             }
-            if (isSlope) {
-                dl->AddTriangleFilled(v0, v1, v2, fill);
-                dl->AddTriangle(v0, v1, v2, edge, 2.0f);
+            if (polyCount > 0) {
+                dl->AddConvexPolyFilled(poly, polyCount, fill);
+                dl->AddPolyline(poly, polyCount, edge,
+                                ImDrawFlags_Closed, 2.0f);
             } else {
                 dl->AddRectFilled(a, b, fill);
                 dl->AddRect(a, b, edge, 0.0f, 0, 2.0f);
@@ -5021,8 +5160,14 @@ private:
                 } else if (!it->second.isTrigger &&
                            it->second.shape == Shape::SlopeRightHalf) {
                     it->second.shape = Shape::SlopeLeftHalf;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeLeftHalf) {
+                    it->second.shape = Shape::SlopeRightHigh;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeRightHigh) {
+                    it->second.shape = Shape::SlopeLeftHigh;
                 } else if (!it->second.isTrigger) {
-                    // SlopeLeftHalf -> Trigger (Box trigger).
+                    // SlopeLeftHigh -> Trigger (Box trigger).
                     it->second.isTrigger = true;
                     it->second.shape = Shape::Box;
                 } else {

@@ -49,6 +49,8 @@ void TilesetAsset::FromJson(const Value& root) {
         else if (shapeStr == "SlopeLeft")       td.shape = TileColliderShape::SlopeLeft;
         else if (shapeStr == "SlopeRightHalf")  td.shape = TileColliderShape::SlopeRightHalf;
         else if (shapeStr == "SlopeLeftHalf")   td.shape = TileColliderShape::SlopeLeftHalf;
+        else if (shapeStr == "SlopeRightHigh")  td.shape = TileColliderShape::SlopeRightHigh;
+        else if (shapeStr == "SlopeLeftHigh")   td.shape = TileColliderShape::SlopeLeftHigh;
         else                                     td.shape = TileColliderShape::Box;
         tiles[idx] = td;
     }
@@ -73,6 +75,8 @@ Value TilesetAsset::ToJson() const {
             case TileColliderShape::SlopeLeft:      shapeStr = "SlopeLeft";      break;
             case TileColliderShape::SlopeRightHalf: shapeStr = "SlopeRightHalf"; break;
             case TileColliderShape::SlopeLeftHalf:  shapeStr = "SlopeLeftHalf";  break;
+            case TileColliderShape::SlopeRightHigh: shapeStr = "SlopeRightHigh"; break;
+            case TileColliderShape::SlopeLeftHigh:  shapeStr = "SlopeLeftHigh";  break;
             case TileColliderShape::Box:            default:                     break;
         }
         t.Add("shape", Value::MakeString(shapeStr));

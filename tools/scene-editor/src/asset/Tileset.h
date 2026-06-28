@@ -40,6 +40,14 @@ enum class TileColliderShape {
     //   SlopeLeftHalf:  anchor (1, 0), top at (0, 0.5).
     SlopeRightHalf,
     SlopeLeftHalf,
+    // M7c25: upper half of a 22.5-degree ramp. Pairs with the
+    // matching Half tile to make a two-cell ramp that rises a
+    // full cell height. Filled region is a trapezoid -- the
+    // lower half of the cell + the upper-half slope.
+    //   SlopeRightHigh: hypotenuse (0, 0.5) -> (1, 1).
+    //   SlopeLeftHigh:  hypotenuse (1, 0.5) -> (0, 1).
+    SlopeRightHigh,
+    SlopeLeftHigh,
 };
 
 struct TilesetTile {
