@@ -48,6 +48,15 @@ int             stb_vorbis_get_samples_short_interleaved(
                     stb_vorbis* f, int channels,
                     short* buffer, int num_shorts);
 int             stb_vorbis_seek_start(stb_vorbis* f);
+// M10c4 memory decode entry point. Same return / output shape as
+// stb_vorbis_decode_filename: -1 on failure, otherwise the per-
+// channel sample count + writes a malloc'd interleaved int16
+// buffer through `output`.
+int             stb_vorbis_decode_memory(const unsigned char* mem,
+                                          int len,
+                                          int* channels,
+                                          int* sample_rate,
+                                          short** output);
 } // extern "C"
 #endif
 #if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
@@ -427,6 +436,116 @@ bool LoadMp3(const std::string& path, SoundClip& out) {
 }
 #endif
 
+// M10c4 memory-based WAV parser. Same chunk walk as LoadWav
+// minus the FILE*, so an in-memory pak entry skips the disk
+// round-trip. Returns false on the same shape of errors
+// (truncated buffer, non-PCM compression).
+bool LoadWavFromMemory(const uint8_t* data, size_t size,
+                        SoundClip& out) {
+    if (!data || size < 12) return false;
+    if (std::memcmp(data,     "RIFF", 4) != 0 ||
+        std::memcmp(data + 8, "WAVE", 4) != 0) return false;
+    size_t pos = 12;
+    bool fmtRead = false, dataRead = false;
+    while (pos + 8 <= size && (!fmtRead || !dataRead)) {
+        const uint8_t* hdr = data + pos;
+        pos += 8;
+        uint32_t chunkSize = 0;
+        std::memcpy(&chunkSize, hdr + 4, 4);
+        if (pos + chunkSize > size) return false;
+        if (std::memcmp(hdr, "fmt ", 4) == 0) {
+            if (chunkSize < 16) return false;
+            const size_t copy =
+                std::min<size_t>(chunkSize, sizeof(WAVEFORMATEX));
+            std::memcpy(&out.format, data + pos, copy);
+            if (out.format.wFormatTag != WAVE_FORMAT_PCM &&
+                out.format.wFormatTag != WAVE_FORMAT_EXTENSIBLE) {
+                return false;
+            }
+            fmtRead = true;
+        } else if (std::memcmp(hdr, "data", 4) == 0) {
+            out.data.assign(data + pos, data + pos + chunkSize);
+            dataRead = true;
+        }
+        // word-align the next chunk header
+        if (chunkSize & 1) ++chunkSize;
+        pos += chunkSize;
+    }
+    return fmtRead && dataRead;
+}
+
+#if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
+// M10c4 memory-based OGG decoder. stb_vorbis_decode_memory
+// returns int16 PCM exactly like its filename cousin, so the
+// rest of the SoundClip plumbing is unchanged.
+bool LoadOggFromMemory(const uint8_t* data, size_t size,
+                        SoundClip& out) {
+    short* samples    = nullptr;
+    int    channels   = 0;
+    int    sampleRate = 0;
+    const int sampleCount = stb_vorbis_decode_memory(
+        data, int(size), &channels, &sampleRate, &samples);
+    if (sampleCount < 0 || !samples || channels <= 0 ||
+        sampleRate <= 0) {
+        if (samples) std::free(samples);
+        return false;
+    }
+    const size_t bytes = size_t(sampleCount) *
+                          size_t(channels) * 2;
+    out.data.assign(
+        reinterpret_cast<const uint8_t*>(samples),
+        reinterpret_cast<const uint8_t*>(samples) + bytes);
+    std::free(samples);
+    FillPcmFormat(out, channels, sampleRate);
+    return true;
+}
+#endif
+
+#if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
+// M10c4 memory-based MP3 decoder. mp3dec_load_buf decodes the
+// entire buffer up-front; the resulting PCM mirrors LoadMp3.
+bool LoadMp3FromMemory(const uint8_t* data, size_t size,
+                        SoundClip& out) {
+    mp3dec_t            dec;
+    mp3dec_file_info_t  info{};
+    mp3dec_init(&dec);
+    if (mp3dec_load_buf(&dec, data, size, &info, nullptr,
+                         nullptr) != 0 ||
+        !info.buffer || info.samples == 0 ||
+        info.channels <= 0 || info.hz <= 0) {
+        if (info.buffer) std::free(info.buffer);
+        return false;
+    }
+    const size_t bytes = info.samples * sizeof(mp3d_sample_t);
+    out.data.assign(
+        reinterpret_cast<const uint8_t*>(info.buffer),
+        reinterpret_cast<const uint8_t*>(info.buffer) + bytes);
+    std::free(info.buffer);
+    FillPcmFormat(out, info.channels, info.hz);
+    return true;
+}
+#endif
+
+// M10c4 mem dispatch -- mirror of LoadSound but on bytes. `ext`
+// can carry a leading dot or not; case is normalized. Returns
+// false on extensions we don't have a decoder for.
+bool LoadSoundFromMemory(const uint8_t* data, size_t size,
+                          const std::string& ext, SoundClip& out) {
+    if (!data || size == 0) return false;
+    std::string e = ext;
+    if (!e.empty() && e.front() == '.') e.erase(e.begin());
+    std::transform(e.begin(), e.end(), e.begin(),
+                    [](unsigned char c){ return std::tolower(c); });
+    if (e == "wav") return LoadWavFromMemory(data, size, out);
+#if defined(NARAGAME_HAS_STB_VORBIS) && NARAGAME_HAS_STB_VORBIS
+    if (e == "ogg") return LoadOggFromMemory(data, size, out);
+#endif
+#if defined(NARAGAME_HAS_MINIMP3) && NARAGAME_HAS_MINIMP3
+    if (e == "mp3") return LoadMp3FromMemory(data, size, out);
+#endif
+    return false;
+}
+
 // Dispatch the right loader by file extension. Falls back
 // to `false` when the requested format wasn't vendored.
 bool LoadSound(const std::string& path, SoundClip& out) {
@@ -452,6 +571,47 @@ bool LoadSound(const std::string& path, SoundClip& out) {
 }
 
 } // namespace
+
+bool Audio::PlayFromMemory(const std::string& cacheKey,
+                            const uint8_t* data, size_t size,
+                            const std::string& ext,
+                            float volume) {
+    if (cacheKey.empty() || !data || size == 0) return false;
+    if (!Initialize()) return false;
+    SoundClip* clip = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        auto it = g_cache.find(cacheKey);
+        if (it == g_cache.end()) {
+            SoundClip fresh;
+            if (!LoadSoundFromMemory(data, size, ext, fresh)) {
+                return false;
+            }
+            it = g_cache.emplace(cacheKey, std::move(fresh)).first;
+        }
+        clip = &it->second;
+    }
+    IXAudio2SourceVoice* voice = nullptr;
+    SubmixSend           sfxRoute(g_sfxSubmix);
+    HRESULT hr = g_engine->CreateSourceVoice(
+        &voice, &clip->format, 0,
+        XAUDIO2_DEFAULT_FREQ_RATIO,
+        &g_callback, sfxRoute.AsParam(), nullptr);
+    if (FAILED(hr) || !voice) return false;
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    voice->SetVolume(volume);
+    XAUDIO2_BUFFER buffer{};
+    buffer.AudioBytes = UINT32(clip->data.size());
+    buffer.pAudioData = clip->data.data();
+    buffer.Flags      = XAUDIO2_END_OF_STREAM;
+    buffer.pContext   = voice;
+    hr = voice->SubmitSourceBuffer(&buffer);
+    if (FAILED(hr)) { voice->DestroyVoice(); return false; }
+    hr = voice->Start(0);
+    if (FAILED(hr)) { voice->DestroyVoice(); return false; }
+    return true;
+}
 
 bool Audio::Play(const std::string& absolutePath, float volume) {
     if (absolutePath.empty()) return false;

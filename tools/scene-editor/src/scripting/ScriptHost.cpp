@@ -1025,6 +1025,12 @@ static int LuaAudioPlay(lua_State* L) {
         volume = float(luaL_checknumber(L, 2));
     }
     std::string resolved = arg;
+    // M10c4: tracks the Assets/-relative path so the pak vfs
+    // hook below can ReadFromPak before falling back to disk.
+    // Empty means the input was an absolute path the user
+    // typed in (rare; keeps the legacy disk-only behaviour
+    // for those cases).
+    std::string relForVfs;
     // M8c4 GUID detection: 36 chars + dashes at the
     // canonical positions (8, 13, 18, 23). Cheap, no false
     // positives in practice (real paths have slashes /
@@ -1051,12 +1057,14 @@ static int LuaAudioPlay(lua_State* L) {
         resolved = root;
         if (sep) resolved.push_back(sep);
         resolved.append(entry->relPath);
+        relForVfs = entry->relPath;
     } else {
         const bool isAbs =
             (resolved.size() >= 2 && resolved[1] == ':') ||
             (!resolved.empty() && (resolved[0] == '/' ||
                                      resolved[0] == '\\'));
         if (!isAbs && db) {
+            relForVfs = arg;
             const std::string& root = db->AssetsRoot();
             if (!root.empty()) {
                 const char sep =
@@ -1066,6 +1074,26 @@ static int LuaAudioPlay(lua_State* L) {
                 if (sep) joined.push_back(sep);
                 joined.append(arg);
                 resolved = std::move(joined);
+            }
+        }
+    }
+    // M10c4 VFS hook. When an in-memory pak is mounted +
+    // covers this asset, decode it straight from the pak so a
+    // pak-only standalone (no extracted Assets/) still plays
+    // the sound. Audio::PlayFromMemory caches by relForVfs, so
+    // the next play of the same clip skips re-decode just like
+    // the disk path. Streaming music (audio.play_music) stays
+    // disk-bound; only one-shot SFX is on the vfs path today.
+    if (IsPakMounted() && !relForVfs.empty()) {
+        std::vector<uint8_t> bytes;
+        if (ReadFromPak(relForVfs, bytes) && !bytes.empty()) {
+            std::string ext;
+            const size_t dot = relForVfs.find_last_of('.');
+            if (dot != std::string::npos) ext = relForVfs.substr(dot + 1);
+            if (Audio::PlayFromMemory(relForVfs, bytes.data(),
+                                       bytes.size(), ext, volume)) {
+                lua_pushboolean(L, 1);
+                return 1;
             }
         }
     }

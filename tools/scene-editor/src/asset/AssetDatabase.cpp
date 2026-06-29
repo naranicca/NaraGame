@@ -4,6 +4,7 @@
 #include "Animation.h"
 #include "AnimatorController.h"
 #include "Autotile.h"
+#include "Pak.h"
 #include "TextureImportSettings.h"
 #include "Tileset.h"
 
@@ -94,7 +95,21 @@ NaraGame::RHITexture* AssetDatabase::GetTexture(NaraGame::RHIDevice& device,
     const AssetEntry* entry = FindByGuid(guid);
     if (!entry || entry->typeName != "Texture") return nullptr;
     const std::string abs = m_assetsRoot + "/" + entry->relPath;
-    NaraGame::Image img = NaraGame::LoadImageFile(abs);
+    NaraGame::Image img;
+    // M10c4 VFS hook: when an assets.pak is mounted (standalone +
+    // standalone-from-pak boot path), try the in-memory pak first
+    // so a stripped-down game build can run without ever
+    // extracting Assets/ to disk. The pak's TOC key matches our
+    // entry->relPath exactly (Assets/-relative forward slashes),
+    // so no path mangling is needed. Disk decode stays the
+    // fallback for editor mode + for any asset that wasn't packed.
+    if (IsPakMounted()) {
+        std::vector<uint8_t> bytes;
+        if (ReadFromPak(entry->relPath, bytes) && !bytes.empty()) {
+            img = NaraGame::DecodePNG(bytes.data(), bytes.size());
+        }
+    }
+    if (!img.Valid()) img = NaraGame::LoadImageFile(abs);
     if (!img.Valid()) {
         NARAGAME_WARN("AssetDatabase: '%s' failed to decode as a texture",
                       entry->relPath.c_str());

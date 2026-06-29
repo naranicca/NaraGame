@@ -49,6 +49,19 @@ public:
                                 float freqRatio = 1.0f);
     // Stops all currently-playing SFX source voices.
     static void Stop();
+
+    // M10c4 in-memory SFX one-shot. Same playback chain as Play
+    // (Sfx submix, optional reverb tail) but the clip is decoded
+    // straight from the supplied bytes -- no disk hit, no fopen.
+    // `cacheKey` is used as the SoundClip cache lookup so the
+    // same vfs entry replayed in a row doesn't re-decode. `ext`
+    // selects the decoder ("wav" / "ogg" / "mp3"; case-insensitive,
+    // leading "." tolerated). Returns false on unsupported ext /
+    // malformed bytes / XAudio2 voice spawn failure.
+    static bool PlayFromMemory(const std::string& cacheKey,
+                                const uint8_t* data, size_t size,
+                                const std::string& ext,
+                                float volume = 1.0f);
     // Explicit teardown -- normally the static engine is
     // destroyed at program exit, but the editor can call
     // this to release the master voice between project
