@@ -144,6 +144,29 @@ public:
         return !m_pendingSceneLoad.empty();
     }
 
+    // M10c3 scene transition fade params. Set alongside a
+    // SetPendingSceneLoad whenever Lua's `scene.load(path, opts)`
+    // passes a transition table; consumed by EditorApp at the same
+    // moment it consumes the path. Color is RGB in [0,1].
+    void SetPendingTransition(float fadeOut, float fadeIn,
+                              float r, float g, float b) {
+        m_pendingFadeOut = fadeOut;
+        m_pendingFadeIn  = fadeIn;
+        m_pendingFadeR   = r;
+        m_pendingFadeG   = g;
+        m_pendingFadeB   = b;
+    }
+    void ConsumePendingTransition(float& fadeOut, float& fadeIn,
+                                  float& r, float& g, float& b) {
+        fadeOut = m_pendingFadeOut;
+        fadeIn  = m_pendingFadeIn;
+        r       = m_pendingFadeR;
+        g       = m_pendingFadeG;
+        b       = m_pendingFadeB;
+        m_pendingFadeOut = m_pendingFadeIn = 0.0f;
+        m_pendingFadeR = m_pendingFadeG = m_pendingFadeB = 0.0f;
+    }
+
     // EditorApp calls Tick once per editor frame (right before
     // TickScripts) so the host can keep running totals the Lua
     // `time` API exposes. dt is the same frame delta TickScripts
@@ -175,6 +198,15 @@ private:
     Scene* m_scene = nullptr;
     AssetDatabase* m_assetDb = nullptr;
     std::string    m_pendingSceneLoad;
+    // M10c3 paired transition params. Lua's scene.load(path,
+    // {fade_out=..., fade_in=..., color={r,g,b}}) writes these
+    // alongside m_pendingSceneLoad; EditorApp drains both in the
+    // same frame the path is consumed.
+    float          m_pendingFadeOut = 0.0f;
+    float          m_pendingFadeIn  = 0.0f;
+    float          m_pendingFadeR   = 0.0f;
+    float          m_pendingFadeG   = 0.0f;
+    float          m_pendingFadeB   = 0.0f;
     // Running totals the Lua `time` API surfaces. Tick() bumps
     // them every editor frame; nothing else mutates them.
     double    m_elapsed    = 0.0;

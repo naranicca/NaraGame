@@ -2459,8 +2459,76 @@ private:
     // host swaps cleanly the next instant -- without the
     // entity iterator under the script callback exploding.
     void ConsumePendingSceneLoad() {
+        // M10c3 first: advance an in-flight transition. The fade-
+        // out phase ticks down here + when it hits zero, the
+        // deferred scene load actually fires + the fade-in phase
+        // begins. ConsumePendingSceneLoad runs once per OnRender
+        // frame in both editor + standalone, so the timer is
+        // driven by the same dt the rest of the scene sees.
+        const float dt = ImGui::GetIO().DeltaTime;
+        if (m_transitionState == TransitionState::FadingOut) {
+            m_transitionElapsed += dt;
+            if (m_transitionElapsed >= m_transitionFadeOut) {
+                DoLoadSceneNow(m_transitionPendingPath);
+                m_transitionPendingPath.clear();
+                if (m_transitionFadeIn > 0.0f) {
+                    m_transitionState   = TransitionState::FadingIn;
+                    m_transitionElapsed = 0.0f;
+                } else {
+                    m_transitionState   = TransitionState::Idle;
+                    m_transitionElapsed = 0.0f;
+                }
+                // Swallow any new pending request that piled up
+                // mid-fade -- a script that calls scene.load twice
+                // during the same fade would otherwise stack two
+                // transitions. The freshly-loaded scene gets to run
+                // a frame before we accept the next.
+                return;
+            }
+            return;
+        }
+        if (m_transitionState == TransitionState::FadingIn) {
+            m_transitionElapsed += dt;
+            if (m_transitionElapsed >= m_transitionFadeIn) {
+                m_transitionState   = TransitionState::Idle;
+                m_transitionElapsed = 0.0f;
+            }
+            // Fall through so a *new* scene.load can queue up
+            // mid-fade-in. The fade-in keeps drawing on top until
+            // its timer ends.
+        }
+
         if (!m_scriptHost.HasPendingSceneLoad()) return;
+        float fadeOut = 0.0f, fadeIn = 0.0f, r = 0.0f, gC = 0.0f, b = 0.0f;
+        m_scriptHost.ConsumePendingTransition(fadeOut, fadeIn, r, gC, b);
         std::string path = m_scriptHost.ConsumePendingSceneLoad();
+        if (path.empty()) return;
+        if (fadeOut > 0.0f) {
+            // Defer the swap. Stash the path + fade-in params; the
+            // next frame's tick above will run the load when the
+            // fade-out timer expires.
+            m_transitionPendingPath = std::move(path);
+            m_transitionFadeOut     = fadeOut;
+            m_transitionFadeIn      = fadeIn;
+            m_transitionColorR      = r;
+            m_transitionColorG      = gC;
+            m_transitionColorB      = b;
+            m_transitionState       = TransitionState::FadingOut;
+            m_transitionElapsed     = 0.0f;
+            return;
+        }
+        DoLoadSceneNow(path);
+        if (fadeIn > 0.0f) {
+            m_transitionFadeIn  = fadeIn;
+            m_transitionColorR  = r;
+            m_transitionColorG  = gC;
+            m_transitionColorB  = b;
+            m_transitionState   = TransitionState::FadingIn;
+            m_transitionElapsed = 0.0f;
+        }
+    }
+
+    void DoLoadSceneNow(const std::string& path) {
         if (path.empty()) return;
         NotifyAllScriptsForDestroy();
         if (m_scene.Load(path)) {
@@ -2472,6 +2540,40 @@ private:
         } else {
             NARAGAME_ERROR("scene.load: failed '%s'", path.c_str());
         }
+    }
+
+    // M10c3 transition overlay alpha for the current frame. 0 when
+    // no transition is active, 1 at fade-out peak, then decays back
+    // to 0 over fadeIn. Used by DrawTransitionOverlay.
+    float CurrentTransitionAlpha() const {
+        switch (m_transitionState) {
+        case TransitionState::Idle: return 0.0f;
+        case TransitionState::FadingOut:
+            if (m_transitionFadeOut <= 0.0f) return 1.0f;
+            return std::min(1.0f,
+                m_transitionElapsed / m_transitionFadeOut);
+        case TransitionState::FadingIn:
+            if (m_transitionFadeIn <= 0.0f) return 0.0f;
+            return std::max(0.0f, 1.0f -
+                m_transitionElapsed / m_transitionFadeIn);
+        }
+        return 0.0f;
+    }
+
+    void DrawTransitionOverlay(ImDrawList* dl,
+                                const ImVec2& panelMin,
+                                const ImVec2& panelSize) {
+        const float a = CurrentTransitionAlpha();
+        if (a <= 0.0f) return;
+        const ImU32 col = IM_COL32(
+            int(m_transitionColorR * 255.0f + 0.5f),
+            int(m_transitionColorG * 255.0f + 0.5f),
+            int(m_transitionColorB * 255.0f + 0.5f),
+            int(a * 255.0f + 0.5f));
+        dl->AddRectFilled(panelMin,
+                          ImVec2(panelMin.x + panelSize.x,
+                                 panelMin.y + panelSize.y),
+                          col);
     }
 
     void TickParticles(float dt) {
@@ -9499,6 +9601,10 @@ private:
         // M10c2 splash overlay paints on top of every entity so a
         // running fade visually covers the scene underneath.
         DrawSplashOverlay(dl, panelMin, panelSize);
+        // M10c3 scene transition fade sits ON TOP of the splash so
+        // a fade-to-black during scene swap covers everything,
+        // including any in-flight splash from the outgoing scene.
+        DrawTransitionOverlay(dl, panelMin, panelSize);
 
         dl->PopClipRect();
         ImGui::End();
@@ -12094,6 +12200,22 @@ private:
     // "Rebind" + cleared on the next key press (which writes the
     // captured key into ScriptHost's action binding map).
     std::string         m_settingsRebindAction;
+
+    // M10c3 scene transition fade. ConsumePendingSceneLoad drives
+    // a tiny FadingOut -> swap -> FadingIn state machine when a
+    // Lua scene.load(path, {fade_out=, fade_in=, color=}) call
+    // sets non-zero fade times. Idle = nothing drawn / nothing
+    // pending; the transient color + timer fields are only
+    // meaningful while state != Idle.
+    enum class TransitionState { Idle, FadingOut, FadingIn };
+    TransitionState m_transitionState   = TransitionState::Idle;
+    float           m_transitionElapsed = 0.0f;
+    float           m_transitionFadeOut = 0.0f;
+    float           m_transitionFadeIn  = 0.0f;
+    float           m_transitionColorR  = 0.0f;
+    float           m_transitionColorG  = 0.0f;
+    float           m_transitionColorB  = 0.0f;
+    std::string     m_transitionPendingPath;
     // Sprite Editor state. m_spriteEditorOpen drives the window's
     // visibility; activating it via OpenSpriteEditor pre-focuses the
     // window so a stale floating instance doesn't get lost behind a

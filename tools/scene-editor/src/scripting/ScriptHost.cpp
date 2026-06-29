@@ -1835,6 +1835,39 @@ static int LuaSceneLoad(lua_State* L) {
         }
     }
     host->SetPendingSceneLoad(resolved);
+    // M10c3 optional transition table. Shape:
+    //   scene.load(path, {fade_out=0.5, fade_in=0.5,
+    //                      color={r=0,g=0,b=0}})
+    // Missing keys default to 0 / black. `fade_out` covers the
+    // outgoing scene before swap; `fade_in` reveals the new one
+    // after. A solid `color` rect is alpha-blended on top of the
+    // viewport while the timer runs.
+    if (lua_gettop(L) >= 2 && lua_istable(L, 2)) {
+        float fadeOut = 0.0f, fadeIn = 0.0f;
+        float r = 0.0f, g = 0.0f, b = 0.0f;
+        lua_getfield(L, 2, "fade_out");
+        if (lua_isnumber(L, -1)) fadeOut = float(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "fade_in");
+        if (lua_isnumber(L, -1)) fadeIn  = float(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "color");
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, "r");
+            if (lua_isnumber(L, -1)) r = float(lua_tonumber(L, -1));
+            lua_pop(L, 1);
+            lua_getfield(L, -1, "g");
+            if (lua_isnumber(L, -1)) g = float(lua_tonumber(L, -1));
+            lua_pop(L, 1);
+            lua_getfield(L, -1, "b");
+            if (lua_isnumber(L, -1)) b = float(lua_tonumber(L, -1));
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+        if (fadeOut < 0.0f) fadeOut = 0.0f;
+        if (fadeIn  < 0.0f) fadeIn  = 0.0f;
+        host->SetPendingTransition(fadeOut, fadeIn, r, g, b);
+    }
     lua_pushboolean(L, 1);
     return 1;
 }
