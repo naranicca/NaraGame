@@ -60,6 +60,7 @@ add_executable(scene-editor
     src/scene/Rigidbody2DComponent.cpp
     src/scene/Scene.cpp
     src/scene/ScriptComponent.cpp
+    src/scene/SplashScreenComponent.cpp
     src/scene/SpriteRendererComponent.cpp
     src/scene/TilemapComponent.cpp
     src/scene/TransformComponent.cpp

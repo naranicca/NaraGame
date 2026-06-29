@@ -12,6 +12,7 @@
 #include "PolygonColliderComponent.h"
 #include "Rigidbody2DComponent.h"
 #include "ScriptComponent.h"
+#include "SplashScreenComponent.h"
 #include "SpriteRendererComponent.h"
 #include "TilemapComponent.h"
 #include "TransformComponent.h"
@@ -77,6 +78,8 @@ void RegisterBuiltinComponents() {
                [] { return std::make_unique<ParticleSystemComponent>(); });
     r.Register(CameraComponent::StaticTypeName(),
                [] { return std::make_unique<CameraComponent>(); });
+    r.Register(SplashScreenComponent::StaticTypeName(),
+               [] { return std::make_unique<SplashScreenComponent>(); });
 }
 
 } // namespace SceneEditor

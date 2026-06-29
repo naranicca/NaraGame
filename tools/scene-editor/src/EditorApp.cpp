@@ -30,6 +30,7 @@
 #include "scene/Rigidbody2DComponent.h"
 #include "scene/Scene.h"
 #include "scene/ScriptComponent.h"
+#include "scene/SplashScreenComponent.h"
 #include "scene/SpriteRendererComponent.h"
 #include "scene/TilemapComponent.h"
 #include "scene/TransformComponent.h"
@@ -54,6 +55,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -311,6 +313,7 @@ public:
             TickAnimators(ImGui::GetIO().DeltaTime);
             TickAudioSources(ImGui::GetIO().DeltaTime);
             TickParticles(ImGui::GetIO().DeltaTime);
+            TickSplash(ImGui::GetIO().DeltaTime);
             SceneEditor::Audio::UpdateMusic();
             // M9c11 standalone camera drive. Re-resolve every
             // frame so a script that moves the camera entity
@@ -356,6 +359,7 @@ public:
         // resets the pool back to empty when Play flips off
         // so the next play starts the burst cleanly.
         TickParticles(ImGui::GetIO().DeltaTime);
+        TickSplash(ImGui::GetIO().DeltaTime);
         // M8c5: top up the music stream's buffer queue so a
         // streamed OGG / WAV keeps decoding past the
         // PlayMusic pre-fill (~280 ms of headroom at the
@@ -2704,6 +2708,47 @@ private:
                     p = ps->_pool[size_t(--ps->_liveCount)];
                 } else {
                     ++i;
+                }
+            }
+        }
+    }
+
+    // M10c2 splash screen overlay tick. Walks every enabled
+    // SplashScreenComponent, advances its `_elapsed` while Play is
+    // on (editor) or unconditionally (standalone), + fires the
+    // nextScene scene.load exactly once when the timeline ends.
+    // Reset semantics match TickParticles: a Play -> Pause cycle in
+    // editor zeroes _elapsed so the next Play replays cleanly.
+    void TickSplash(float dt) {
+        std::vector<SceneEditor::EntityId> ids;
+        ids.reserve(16);
+        CollectAllEntities(m_scene.Roots(), ids);
+        // Editor: paused -> rewind. Standalone has no pause concept.
+        if (!m_animPlaying && !m_standalone) {
+            for (SceneEditor::EntityId id : ids) {
+                SceneEditor::Entity* e = m_scene.Get(id);
+                if (!e) continue;
+                if (auto* sp = e->GetComponent<
+                        SceneEditor::SplashScreenComponent>()) {
+                    sp->_elapsed    = 0.0f;
+                    sp->_completed  = false;
+                    sp->_everPlayed = false;
+                }
+            }
+            return;
+        }
+        for (SceneEditor::EntityId id : ids) {
+            SceneEditor::Entity* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* sp = e->GetComponent<
+                SceneEditor::SplashScreenComponent>();
+            if (!sp) continue;
+            sp->_everPlayed = true;
+            sp->_elapsed += dt;
+            if (!sp->_completed && sp->_elapsed >= sp->TotalDuration()) {
+                sp->_completed = true;
+                if (!sp->nextScene.empty()) {
+                    m_scriptHost.SetPendingSceneLoad(sp->nextScene);
                 }
             }
         }
@@ -7544,9 +7589,76 @@ private:
             DrawParticleSystemEditor(entity, *ps);
         } else if (auto* cm = dynamic_cast<SceneEditor::CameraComponent*>(comp)) {
             DrawCameraEditor(entity, *cm);
+        } else if (auto* sp = dynamic_cast<SceneEditor::SplashScreenComponent*>(comp)) {
+            DrawSplashScreenEditor(entity, *sp);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
         }
+    }
+
+    // M10c2 splash screen inspector. Same texture-picker pattern as
+    // SpriteRenderer + simple float fields for the timeline. The
+    // `nextScene` field is a plain text input (scene paths follow
+    // the same convention as Lua's scene.load) so the inspector
+    // doesn't need a scene picker dialog; a typo just errors out
+    // on the asset-not-found at load time.
+    void DrawSplashScreenEditor(SceneEditor::Entity& /*entity*/,
+                                 SceneEditor::SplashScreenComponent& sp) {
+        // Texture drop-zone -- same idiom as the SpriteRenderer
+        // inspector. Shows the relative path or a placeholder
+        // hint + accepts an ASSET_GUID drag-drop payload.
+        std::string label = "(none)";
+        if (sp.texture.IsValid()) {
+            if (const auto* entry = m_assetDb.FindByGuid(sp.texture)) {
+                label = entry->relPath;
+            } else {
+                label = "(missing asset)";
+            }
+        }
+        ImGui::TextUnformatted("Texture");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", label.c_str());
+        ImGui::Button("Drop texture here##splash_tex", ImVec2(-FLT_MIN, 0));
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p =
+                    ImGui::AcceptDragDropPayload("ASSET_GUID")) {
+                if (p->DataSize == sizeof(SceneEditor::AssetGuid)) {
+                    UndoSnapshot();
+                    std::memcpy(&sp.texture, p->Data, sizeof(sp.texture));
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+        if (sp.texture.IsValid()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear##splash_tex")) {
+                UndoSnapshot();
+                sp.texture = SceneEditor::AssetGuid{};
+            }
+        }
+
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "%s", sp.nextScene.c_str());
+        if (ImGui::InputText("Next scene", buf, sizeof(buf))) {
+            UndoSnapshot();
+            sp.nextScene = buf;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Path or GUID handed to scene.load when the\n"
+                "splash timeline completes. Empty = stay here.");
+        }
+        if (ImGui::DragFloat("Fade in",  &sp.fadeIn,  0.01f,
+                              0.0f, 30.0f, "%.2f s"))  { UndoSnapshot(); }
+        if (ImGui::DragFloat("Hold",     &sp.hold,    0.01f,
+                              0.0f, 30.0f, "%.2f s"))  { UndoSnapshot(); }
+        if (ImGui::DragFloat("Fade out", &sp.fadeOut, 0.01f,
+                              0.0f, 30.0f, "%.2f s"))  { UndoSnapshot(); }
+        if (ImGui::DragInt   ("Priority", &sp.priority,
+                              1.0f, -1024, 1024))      { UndoSnapshot(); }
+        ImGui::ColorEdit4("Background", &sp.background.r);
+        ImGui::ColorEdit4("Tint",       &sp.tint.r);
+        ImGui::TextDisabled("Total: %.2f s", sp.TotalDuration());
     }
 
     // M9c11 Camera inspector. Two fields drive everything:
@@ -9384,9 +9496,89 @@ private:
         if (!m_standalone) DrawGrid(dl, panelMin, panelSize);
         DrawEntities(dl, panelMin, panelSize);
         if (!m_standalone) DrawGizmo(dl, panelMin, panelSize);
+        // M10c2 splash overlay paints on top of every entity so a
+        // running fade visually covers the scene underneath.
+        DrawSplashOverlay(dl, panelMin, panelSize);
 
         dl->PopClipRect();
         ImGui::End();
+    }
+
+    // M10c2 splash overlay. Picks the active SplashScreenComponent
+    // (highest priority among enabled), computes its current alpha
+    // from the timeline, + paints a tinted background fill + the
+    // splash texture stretched to the viewport panel. If no splash
+    // exists or the active one is fully transparent, this is a
+    // free no-op (no draw commands emitted).
+    void DrawSplashOverlay(ImDrawList* dl,
+                            const ImVec2& panelMin,
+                            const ImVec2& panelSize) {
+        std::vector<SceneEditor::EntityId> ids;
+        ids.reserve(8);
+        CollectAllEntities(m_scene.Roots(), ids);
+        SceneEditor::SplashScreenComponent* best = nullptr;
+        int bestPriority = INT_MIN;
+        for (SceneEditor::EntityId id : ids) {
+            const auto* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* sp = const_cast<SceneEditor::Entity*>(e)->GetComponent<
+                SceneEditor::SplashScreenComponent>();
+            if (!sp) continue;
+            if (sp->priority > bestPriority) {
+                bestPriority = sp->priority;
+                best         = sp;
+            }
+        }
+        if (!best) return;
+        const float alpha = best->CurrentAlpha();
+        if (alpha <= 0.0f) return;
+        const ImVec2 vMax{panelMin.x + panelSize.x,
+                          panelMin.y + panelSize.y};
+        // Background fill -- color * timeline alpha so a fade-to-
+        // black between scenes still tints the underlying viewport
+        // even when the texture is unset.
+        const ImU32 bg = IM_COL32(
+            int(best->background.r * 255.0f + 0.5f),
+            int(best->background.g * 255.0f + 0.5f),
+            int(best->background.b * 255.0f + 0.5f),
+            int(best->background.a * alpha * 255.0f + 0.5f));
+        if ((bg >> 24) != 0) {
+            dl->AddRectFilled(panelMin, vMax, bg);
+        }
+        if (!best->texture.IsValid()) return;
+        const auto* tex = m_assetDb.GetTexture(GetDevice(), best->texture);
+        if (!tex) return;
+        const float texW = float(tex->Width());
+        const float texH = float(tex->Height());
+        if (texW <= 0.0f || texH <= 0.0f) return;
+        // Aspect-correct fit: letterbox / pillarbox the texture into
+        // the viewport so a 16:9 splash on a 21:9 window doesn't
+        // distort, it just leaves the panel's background showing on
+        // the sides. Computed from the inner panel rect.
+        const float panelAspect = panelSize.x / panelSize.y;
+        const float texAspect   = texW / texH;
+        float drawW = panelSize.x;
+        float drawH = panelSize.y;
+        if (texAspect > panelAspect) {
+            // texture wider than panel -> fit to width, shrink height
+            drawH = panelSize.x / texAspect;
+        } else {
+            drawW = panelSize.y * texAspect;
+        }
+        const ImVec2 drawMin{
+            panelMin.x + (panelSize.x - drawW) * 0.5f,
+            panelMin.y + (panelSize.y - drawH) * 0.5f};
+        const ImVec2 drawMax{drawMin.x + drawW, drawMin.y + drawH};
+        const ImU32 tint = IM_COL32(
+            int(best->tint.r * 255.0f + 0.5f),
+            int(best->tint.g * 255.0f + 0.5f),
+            int(best->tint.b * 255.0f + 0.5f),
+            int(best->tint.a * alpha * 255.0f + 0.5f));
+        const ImTextureID texId =
+            static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                tex->GetNativeView()));
+        dl->AddImage(texId, drawMin, drawMax,
+                     ImVec2(0, 0), ImVec2(1, 1), tint);
     }
 
     // Create a new entity with a SpriteRenderer pointing at `guid`,
