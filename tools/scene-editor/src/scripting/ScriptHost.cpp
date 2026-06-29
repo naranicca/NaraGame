@@ -184,6 +184,80 @@ ActionBindingsConst() {
     return ActionBindings();
 }
 
+// M10c5 dialog.* table. A polling-based dialog box surface
+// rendered by EditorApp::DrawDialogPanel in both editor and
+// standalone modes. Lua's typical pattern:
+//
+//   dialog.show("You found a key!")
+//   -- single-button OK; closes when the player clicks it
+//
+//   dialog.choices("Save and quit?", {"Save", "Discard", "Cancel"})
+//   -- multi-button modal; sets last_choice to the picked index
+//      (1-based) when the player clicks
+//
+//   -- Lua then polls each frame in OnUpdate:
+//   if not dialog.is_visible() then
+//     local pick = dialog.last_choice()
+//     if pick == 1 then ... end
+//   end
+//
+// The state lives on the host (one dialog at a time; a second
+// show() before the first is dismissed replaces it).
+static int LuaDialogShow(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host) return 0;
+    const char* text = luaL_checkstring(L, 1);
+    std::vector<std::string> choices;
+    // The OK fallback button is implicit when no choices are
+    // passed -- DrawDialogPanel renders an "OK" button (index 0)
+    // so a plain dialog.show("hi") still dismisses cleanly.
+    host->ShowDialog(text ? std::string(text) : std::string{},
+                      std::move(choices));
+    return 0;
+}
+static int LuaDialogChoices(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host) return 0;
+    const char* text = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    std::vector<std::string> choices;
+    const lua_Integer n = luaL_len(L, 2);
+    choices.reserve(size_t(n > 0 ? n : 0));
+    for (lua_Integer i = 1; i <= n; ++i) {
+        lua_geti(L, 2, i);
+        if (lua_isstring(L, -1)) {
+            choices.emplace_back(lua_tostring(L, -1));
+        } else {
+            choices.emplace_back();  // keep indexing aligned
+        }
+        lua_pop(L, 1);
+    }
+    host->ShowDialog(text ? std::string(text) : std::string{},
+                      std::move(choices));
+    return 0;
+}
+static int LuaDialogHide(lua_State* L) {
+    if (ScriptHost* host = HostFromUpvalue(L)) host->HideDialog();
+    return 0;
+}
+static int LuaDialogIsVisible(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    lua_pushboolean(L, host && host->IsDialogVisible());
+    return 1;
+}
+// dialog.last_choice() -> int. Returns the 1-based index of the
+// most recently picked option, or 0 if the dialog hasn't been
+// dismissed via a choice click yet (or it was hidden via
+// dialog.hide()). Using 0 + 1-based keeps the Lua side in sync
+// with table indexing (choices[i]).
+static int LuaDialogLastChoice(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host) { lua_pushinteger(L, 0); return 1; }
+    const int v = host->LastDialogChoice();
+    lua_pushinteger(L, v < 0 ? 0 : v + 1);
+    return 1;
+}
+
 // M10c1 settings.* table. A pure visibility flag that flips
 // ScriptHost::m_settingsVisible; EditorApp polls IsSettingsVisible()
 // each frame + renders the overlay (audio sliders + key rebind) on
@@ -2978,6 +3052,23 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kSettingsApi, 1);
     lua_setglobal(L, "settings");
+    // M10c5 dialog overlay. EditorApp::DrawDialogPanel polls
+    // IsDialogVisible() + reads text + choices each frame; the
+    // panel writes the picked button index back into the host
+    // via SetDialogResult on click, which Lua reads through
+    // dialog.last_choice(). Same upvalue idiom as settings.
+    static const luaL_Reg kDialogApi[] = {
+        {"show",        LuaDialogShow},
+        {"choices",     LuaDialogChoices},
+        {"hide",        LuaDialogHide},
+        {"is_visible",  LuaDialogIsVisible},
+        {"last_choice", LuaDialogLastChoice},
+        {nullptr,       nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kDialogApi, 1);
+    lua_setglobal(L, "dialog");
     static const luaL_Reg kSceneApi[] = {
         {"create_entity",     LuaSceneCreateEntity},
         {"destroy_entity",    LuaSceneDestroyEntity},

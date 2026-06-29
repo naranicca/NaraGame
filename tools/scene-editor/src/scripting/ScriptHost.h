@@ -221,6 +221,19 @@ private:
     // whenever this is true; Lua's `settings.*` table flips it.
     bool m_settingsVisible = false;
 
+    // M10c5 dialog box state. Lua's `dialog.*` API flips `visible`
+    // + writes `text` / `choices`. EditorApp draws an ImGui modal
+    // window in both editor + standalone modes whenever visible;
+    // clicking a choice writes its index to `lastChoice` + clears
+    // visibility. Buttons are zero-indexed in Lua too: 1 == first
+    // button (1-based to match Lua array conventions on the
+    // script side; the C++ side keeps 0-based internally + adds
+    // 1 only when pushing the result).
+    bool                     m_dialogVisible    = false;
+    std::string              m_dialogText;
+    std::vector<std::string> m_dialogChoices;
+    int                      m_dialogLastChoice = -1;
+
 public:
     // M10c1 settings panel visibility -- shared flag between Lua's
     // `settings.show/hide/toggle/is_visible` + EditorApp's overlay
@@ -236,6 +249,30 @@ public:
     void SetActionBinding(const std::string& action, const std::string& key);
     std::string ActionBinding(const std::string& action) const;
     std::vector<std::pair<std::string, std::string>> AllActionBindings() const;
+
+    // M10c5 dialog box state -- shared with EditorApp's overlay
+    // renderer. ShowDialog kicks the panel on; the renderer reads
+    // text + choices each frame; on click it writes the picked
+    // index via SetDialogResult + flips visibility off. Lua's
+    // `dialog.last_choice` polls m_dialogLastChoice.
+    void ShowDialog(std::string text,
+                    std::vector<std::string> choices) {
+        m_dialogText        = std::move(text);
+        m_dialogChoices     = std::move(choices);
+        m_dialogVisible     = true;
+        m_dialogLastChoice  = -1;
+    }
+    void HideDialog() { m_dialogVisible = false; }
+    bool IsDialogVisible() const { return m_dialogVisible; }
+    const std::string& DialogText() const { return m_dialogText; }
+    const std::vector<std::string>& DialogChoices() const {
+        return m_dialogChoices;
+    }
+    int  LastDialogChoice() const   { return m_dialogLastChoice; }
+    void SetDialogResult(int idx) {
+        m_dialogLastChoice = idx;
+        m_dialogVisible    = false;
+    }
 };
 
 } // namespace SceneEditor

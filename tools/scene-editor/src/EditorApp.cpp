@@ -334,6 +334,7 @@ public:
             }
             DrawViewportPanel();
             DrawSettingsPanel();
+            DrawDialogPanel();
             ImGui::Render();
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             return;
@@ -376,6 +377,7 @@ public:
         DrawCollisionMatrixModal();
         DrawAudioMixerModal();
         DrawSettingsPanel();
+        DrawDialogPanel();
         DrawSpriteEditorWindow();
         DrawTilesetEditorWindow();
         DrawAutotileEditorWindow();
@@ -7359,6 +7361,87 @@ private:
         ImGui::Separator();
         if (ImGui::Button("Close", ImVec2(120, 0))) {
             m_scriptHost.SetSettingsVisible(false);
+        }
+        ImGui::End();
+    }
+
+    // M10c5 in-game dialog box. Same dual-mode pattern as the
+    // settings overlay: ScriptHost owns the (visible / text /
+    // choices / last_choice) state; this panel renders an
+    // ImGui::Begin window when visible and writes the picked
+    // index back via SetDialogResult on click. Lua's
+    // `dialog.show("hi")` shows a single OK button (index 0);
+    // `dialog.choices(prompt, {"a","b","c"})` shows three
+    // buttons. Buttons render in a horizontal row to keep
+    // typical "Yes / No / Cancel" dialogs visually compact;
+    // long lists wrap automatically when they overflow.
+    void DrawDialogPanel() {
+        if (!m_scriptHost.IsDialogVisible()) return;
+        ImGuiIO& io = ImGui::GetIO();
+        const float w = std::min(560.0f, io.DisplaySize.x * 0.7f);
+        const float h = std::min(220.0f, io.DisplaySize.y * 0.5f);
+        ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
+        // Anchor near the bottom-centre in standalone (game-feel
+        // dialog-box position) + dead-centre in editor mode
+        // (clearer that it's a transient prompt).
+        const float anchorY = m_standalone
+            ? (io.DisplaySize.y - h - io.DisplaySize.y * 0.10f)
+            : (io.DisplaySize.y - h) * 0.5f;
+        ImGui::SetNextWindowPos(
+            ImVec2((io.DisplaySize.x - w) * 0.5f,
+                   std::max(0.0f, anchorY)),
+            ImGuiCond_Always);
+        const ImGuiWindowFlags flags =
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoNavFocus |
+            ImGuiWindowFlags_NoScrollbar;
+        ImGui::Begin("##m10c5_dialog", nullptr, flags);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(m_scriptHost.DialogText().c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        const auto& choices = m_scriptHost.DialogChoices();
+        if (choices.empty()) {
+            // Single OK button -- centred. Index 0 in C++,
+            // becomes 1 in Lua's last_choice() (1-based).
+            const float btnW = 100.0f;
+            ImGui::SetCursorPosX(
+                (ImGui::GetContentRegionAvail().x - btnW) * 0.5f);
+            if (ImGui::Button("OK", ImVec2(btnW, 0))) {
+                m_scriptHost.SetDialogResult(0);
+            }
+        } else {
+            const float pad   = ImGui::GetStyle().ItemSpacing.x;
+            const float avail = ImGui::GetContentRegionAvail().x;
+            float lineW = 0.0f;
+            for (size_t i = 0; i < choices.size(); ++i) {
+                const std::string label = choices[i].empty()
+                    ? std::string("(unnamed)") : choices[i];
+                const float textW =
+                    ImGui::CalcTextSize(label.c_str()).x +
+                    ImGui::GetStyle().FramePadding.x * 2.0f;
+                const float btnW = std::max(80.0f, textW + 16.0f);
+                if (i > 0) {
+                    if (lineW + pad + btnW > avail) {
+                        // Wrap to next row
+                        lineW = 0.0f;
+                    } else {
+                        ImGui::SameLine();
+                    }
+                }
+                ImGui::PushID(int(i));
+                if (ImGui::Button(label.c_str(), ImVec2(btnW, 0))) {
+                    m_scriptHost.SetDialogResult(int(i));
+                }
+                ImGui::PopID();
+                lineW = (lineW > 0.0f ? lineW + pad : 0.0f) + btnW;
+            }
         }
         ImGui::End();
     }
