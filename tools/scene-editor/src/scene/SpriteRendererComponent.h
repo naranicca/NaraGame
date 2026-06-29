@@ -10,10 +10,11 @@
 
 namespace SceneEditor {
 
-// Sprite draw shape. Only Simple is wired into the viewport renderer
-// for M2c1; Sliced (9-slice) and Tiled arrive with the sprite editor in
-// M3 but the enum + sliced/tiled fields are persisted now so existing
-// scenes don't need a schema migration when the renderer catches up.
+// Sprite draw shape. M7c16 ships all three: Simple = single quad,
+// Sliced = 9-zone stretch (corners + edges + centre), Tiled = 9-zone
+// repeat. Each mode honours the Transform's rotation as a single
+// rigid quad. Sliced + Tiled read border widths from the texture's
+// import settings (or per-sub-sprite when subSprite is set).
 enum class SpriteDrawMode { Simple = 0, Sliced = 1, Tiled = 2 };
 
 // Renders an asset-backed 2D sprite at the entity's transform. References

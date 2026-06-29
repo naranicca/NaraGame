@@ -10,11 +10,11 @@
 
 namespace SceneEditor {
 
-// Subset of the spec's texture / sprite import settings that the editor
-// actually consumes today. Sprite-mode slicing (Multiple / Sliced /
-// Tiled) and per-sub-sprite metadata land in M3 with the Sprite
-// Editor; what's here is just the bits the SpriteRenderer needs to
-// compute its world-space quad correctly.
+// Texture / sprite import settings. M3 lands the Sprite Editor +
+// Multiple slicing (spriteMode = Multiple + per-sub-sprite borders +
+// pivots in spriteSheet.sprites). M7c16 wires Sliced + Tiled draw
+// modes through DrawSlicedSpriteEntity / DrawTiledSpriteEntity so a
+// single texture composes 9-zone UI boxes correctly.
 struct TextureImportSettings {
     // World units per texture pixel: world width = textureWidth / ppu.
     // Lower means the sprite covers more world space (chunkier).
