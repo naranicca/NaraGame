@@ -124,9 +124,29 @@ public:
     // Lifecycle flags. `playOnStart` mirrors the M8c7 audio
     // source pattern: rising-edge auto-play when the editor
     // enters play mode. `loop = false` lets the emitter run
-    // for one batch (= maxParticles emits) and then stop.
+    // for one batch (= maxParticles emits or one burst cycle)
+    // and then stop; `loop = true` wraps the burst cycle
+    // every `duration` seconds.
     bool playOnStart = true;
     bool loop        = true;
+
+    // M9c9 timed burst events. Each entry fires `count`
+    // particles when the emitter's internal elapsed time
+    // first crosses `time` (seconds since the cycle began).
+    // Bursts compose on top of the per-second
+    // `emissionRate` -- the continuous stream + the burst
+    // hits both feed into the same live pool, capped at
+    // `maxParticles`. The list is fired in user-given order;
+    // sort by time in the inspector for predictable behaviour.
+    struct Burst {
+        float time  = 0.0f;
+        int   count = 10;
+    };
+    // Cycle length in seconds. When `loop = true` the
+    // emitter resets its elapsed timer + the next-burst
+    // cursor every `duration` seconds, so bursts re-fire.
+    float              duration = 3.0f;
+    std::vector<Burst> bursts;
 
     // -----------------------------------------------------
     // Runtime state -- not serialized. Re-initialised by
@@ -156,6 +176,12 @@ public:
     float                 _emitAccum    = 0.0f;
     int                   _emittedTotal = 0; // for non-loop early-stop
     bool                  _started      = false;
+    // M9c9 burst-cycle state. _elapsed is the time inside the
+    // current cycle (0 .. duration); _burstNextIndex points
+    // at the next burst in `bursts` that hasn't fired yet
+    // this cycle. Loop wrap resets both.
+    float                 _elapsed         = 0.0f;
+    int                   _burstNextIndex  = 0;
     // 32-bit xorshift PRNG state -- seeded per-instance on first
     // emit so two particle systems in the same scene don't
     // emit identical sequences.

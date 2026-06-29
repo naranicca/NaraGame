@@ -2437,10 +2437,12 @@ private:
                 auto* ps = e->GetComponent<
                     SceneEditor::ParticleSystemComponent>();
                 if (!ps) continue;
-                ps->_started      = false;
-                ps->_liveCount    = 0;
-                ps->_emitAccum    = 0.0f;
-                ps->_emittedTotal = 0;
+                ps->_started         = false;
+                ps->_liveCount       = 0;
+                ps->_emitAccum       = 0.0f;
+                ps->_emittedTotal    = 0;
+                ps->_elapsed         = 0.0f;
+                ps->_burstNextIndex  = 0;
             }
             return;
         }
@@ -2480,10 +2482,89 @@ private:
                 ps->_started = true;
                 if (!ps->playOnStart) continue;
                 ps->_rng = std::uint32_t(id) * 2654435761u + 1u;
+                ps->_elapsed        = 0.0f;
+                ps->_burstNextIndex = 0;
             } else if (!ps->playOnStart && ps->_liveCount == 0 &&
                        ps->_emittedTotal == 0) {
                 continue;
             }
+            // M9c9 single-particle emit helper. Shared between
+            // the continuous emissionRate path + the burst-
+            // event path so both routes sample from the same
+            // ranges + cap against the same _liveCount /
+            // maxParticles guard. Returns true when a slot was
+            // actually used.
+            auto emitOne = [&]() {
+                if (ps->_liveCount >= ps->maxParticles) return false;
+                auto& p = ps->_pool[size_t(ps->_liveCount++)];
+                ++ps->_emittedTotal;
+                p.pos = { tr->position.x, tr->position.y };
+                const float ang = frand(ps->_rng,
+                    ps->dirAngleMinDeg,
+                    ps->dirAngleMaxDeg) *
+                    (3.14159265358979323846f / 180.0f);
+                const float spd = frand(ps->_rng,
+                    ps->startSpeedMin, ps->startSpeedMax);
+                p.vel = { std::cos(ang) * spd,
+                          std::sin(ang) * spd };
+                p.age      = 0.0f;
+                p.lifetime = frand(ps->_rng,
+                    ps->lifetimeMin,
+                    std::max(ps->lifetimeMin,
+                              ps->lifetimeMax));
+                p.size     = frand(ps->_rng,
+                    ps->startSizeMin, ps->startSizeMax);
+                if (ps->endSizeMin < 0.0f ||
+                    ps->endSizeMax < 0.0f) {
+                    p.endSize = p.size;
+                } else {
+                    p.endSize = frand(ps->_rng,
+                        ps->endSizeMin,
+                        std::max(ps->endSizeMin,
+                                  ps->endSizeMax));
+                }
+                constexpr float kDeg2Rad =
+                    3.14159265358979323846f / 180.0f;
+                p.rotation = frand(ps->_rng,
+                    ps->startRotationMinDeg,
+                    ps->startRotationMaxDeg) * kDeg2Rad;
+                p.angularVel = frand(ps->_rng,
+                    ps->angularSpeedMinDeg,
+                    ps->angularSpeedMaxDeg) * kDeg2Rad;
+                return true;
+            };
+
+            // M9c9 advance the cycle clock + fire bursts whose
+            // time we've crossed. Two-stage loop: fire what
+            // fits before the cycle end, wrap when loop=true
+            // + duration elapsed, then re-check at the wrapped
+            // elapsed so a 0-time burst right after a wrap still
+            // lands. duration <= 0 disables the cycle so the
+            // bursts list reduces to "fire once at startup".
+            ps->_elapsed += dt;
+            while (true) {
+                while (ps->_burstNextIndex <
+                            int(ps->bursts.size()) &&
+                       ps->_elapsed >=
+                            ps->bursts[size_t(
+                                ps->_burstNextIndex)].time) {
+                    const auto& b = ps->bursts[size_t(
+                        ps->_burstNextIndex)];
+                    const int n = (b.count < 0) ? 0 : b.count;
+                    for (int k = 0; k < n; ++k) {
+                        if (!emitOne()) break;
+                    }
+                    ++ps->_burstNextIndex;
+                }
+                if (ps->loop && ps->duration > 0.0f &&
+                    ps->_elapsed >= ps->duration) {
+                    ps->_elapsed -= ps->duration;
+                    ps->_burstNextIndex = 0;
+                    continue;
+                }
+                break;
+            }
+
             // Emission step. Skip when looping has finished
             // a single non-loop batch.
             const bool emissionOpen =
@@ -2492,57 +2573,10 @@ private:
             if (emissionOpen && ps->emissionRate > 0.0f) {
                 ps->_emitAccum += ps->emissionRate * dt;
                 while (ps->_emitAccum >= 1.0f &&
-                       ps->_liveCount < ps->maxParticles &&
                        (ps->loop ||
                         ps->_emittedTotal < ps->maxParticles)) {
                     ps->_emitAccum -= 1.0f;
-                    auto& p = ps->_pool[size_t(ps->_liveCount++)];
-                    ++ps->_emittedTotal;
-                    p.pos = { tr->position.x, tr->position.y };
-                    const float ang = frand(ps->_rng,
-                        ps->dirAngleMinDeg,
-                        ps->dirAngleMaxDeg) *
-                        (3.14159265358979323846f / 180.0f);
-                    const float spd = frand(ps->_rng,
-                        ps->startSpeedMin, ps->startSpeedMax);
-                    p.vel = { std::cos(ang) * spd,
-                              std::sin(ang) * spd };
-                    p.age      = 0.0f;
-                    p.lifetime = frand(ps->_rng,
-                        ps->lifetimeMin,
-                        std::max(ps->lifetimeMin,
-                                  ps->lifetimeMax));
-                    p.size     = frand(ps->_rng,
-                        ps->startSizeMin, ps->startSizeMax);
-                    // M9c8 sample end size. The -1 sentinel
-                    // means "no lerp" -- keep size constant
-                    // at the start value across the whole
-                    // lifetime. Otherwise grab a per-particle
-                    // end size from [endSizeMin, endSizeMax]
-                    // so the lerp's destination is stable
-                    // even when the inspector slider moves.
-                    if (ps->endSizeMin < 0.0f ||
-                        ps->endSizeMax < 0.0f) {
-                        p.endSize = p.size;
-                    } else {
-                        p.endSize = frand(ps->_rng,
-                            ps->endSizeMin,
-                            std::max(ps->endSizeMin,
-                                      ps->endSizeMax));
-                    }
-                    // M9c7 sample initial rotation + angular
-                    // speed in radians. Stored even when
-                    // velocityAlign is on so toggling the
-                    // flag mid-run doesn't snap every live
-                    // particle to a random angle.
-                    constexpr float kDeg2Rad =
-                        3.14159265358979323846f / 180.0f;
-                    p.rotation = frand(ps->_rng,
-                        ps->startRotationMinDeg,
-                        ps->startRotationMaxDeg) * kDeg2Rad;
-                    p.angularVel = frand(ps->_rng,
-                        ps->angularSpeedMinDeg,
-                        ps->angularSpeedMaxDeg) * kDeg2Rad;
+                    if (!emitOne()) break;
                 }
             }
             // Integrate + cull. Iterate while shrinking
@@ -7398,6 +7432,66 @@ private:
         }
         ImGui::SameLine();
         if (ImGui::Checkbox("Loop", &ps.loop)) UndoSnapshot();
+
+        // M9c9 burst events. duration sets the cycle length;
+        // when Loop is on the emitter wraps at duration + re-
+        // fires the bursts. Order in the list is the order
+        // they fire -- sort by time for predictable results.
+        if (ImGui::DragFloat("Duration (s)", &ps.duration,
+                              0.05f, 0.0f, 0.0f, "%.2f")) {
+            UndoSnapshot();
+            if (ps.duration < 0.0f) ps.duration = 0.0f;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Cycle length in seconds. When Loop is on,\n"
+                "the emitter resets its clock + the next-\n"
+                "burst cursor every `duration` so bursts\n"
+                "re-fire. 0 disables the cycle (bursts fire\n"
+                "once at start).");
+        }
+        ImGui::Text("Bursts: %d", int(ps.bursts.size()));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Add##burst")) {
+            UndoSnapshot();
+            ps.bursts.push_back(
+                SceneEditor::ParticleSystemComponent::Burst{});
+        }
+        if (!ps.bursts.empty()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Sort##burst")) {
+                UndoSnapshot();
+                std::sort(ps.bursts.begin(), ps.bursts.end(),
+                    [](const auto& a, const auto& b) {
+                        return a.time < b.time;
+                    });
+            }
+        }
+        int removeBurst = -1;
+        for (int i = 0; i < int(ps.bursts.size()); ++i) {
+            ImGui::PushID(10000 + i);
+            auto& b = ps.bursts[size_t(i)];
+            ImGui::SetNextItemWidth(80.0f);
+            if (ImGui::DragFloat("##bt", &b.time, 0.02f,
+                                  0.0f, 0.0f, "t=%.2f")) {
+                UndoSnapshot();
+                if (b.time < 0.0f) b.time = 0.0f;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.0f);
+            if (ImGui::DragInt("##bc", &b.count, 0.5f,
+                                0, 4096, "n=%d")) {
+                UndoSnapshot();
+                if (b.count < 0) b.count = 0;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) removeBurst = i;
+            ImGui::PopID();
+        }
+        if (removeBurst >= 0) {
+            UndoSnapshot();
+            ps.bursts.erase(ps.bursts.begin() + removeBurst);
+        }
     }
 
     // Rigidbody2D inspector. velocity + gravity DragFloat2s,

@@ -78,6 +78,15 @@ void ParticleSystemComponent::Serialize(Value& out) const {
     out.Add("animLoop",       Value::MakeBool(animLoop));
     out.Add("playOnStart",    Value::MakeBool(playOnStart));
     out.Add("loop",           Value::MakeBool(loop));
+    out.Add("duration",       Value::MakeNumber(duration));
+    Value burstArr = Value::MakeArray();
+    for (const Burst& b : bursts) {
+        Value entry = Value::MakeObject();
+        entry.Add("time",  Value::MakeNumber(b.time));
+        entry.Add("count", Value::MakeNumber(b.count));
+        burstArr.Push(std::move(entry));
+    }
+    out.Add("bursts",         std::move(burstArr));
 }
 
 void ParticleSystemComponent::Deserialize(const Value& obj) {
@@ -121,16 +130,30 @@ void ParticleSystemComponent::Deserialize(const Value& obj) {
     animLoop       = obj.GetBool("animLoop", true);
     playOnStart    = obj.GetBool("playOnStart", true);
     loop           = obj.GetBool("loop",         true);
+    duration       = float(obj.GetNumber("duration", 3.0));
+    bursts.clear();
+    if (const Value* arr = obj.Find("bursts");
+        arr && arr->IsArray()) {
+        for (const Value& b : arr->arrayValue) {
+            if (!b.IsObject()) continue;
+            Burst entry;
+            entry.time  = float(b.GetNumber("time",  0.0));
+            entry.count = b.GetInt("count", 10);
+            bursts.push_back(entry);
+        }
+    }
     // Reset runtime state so a scene reload starts the
     // emitter cleanly. The pool itself is sized on first
     // Tick to avoid forcing every deserialize to commit
     // to the current maxParticles value.
     _pool.clear();
-    _liveCount    = 0;
-    _emitAccum    = 0.0f;
-    _emittedTotal = 0;
-    _started      = false;
-    _rng          = 0;
+    _liveCount       = 0;
+    _emitAccum       = 0.0f;
+    _emittedTotal    = 0;
+    _started         = false;
+    _rng             = 0;
+    _elapsed         = 0.0f;
+    _burstNextIndex  = 0;
 }
 
 } // namespace SceneEditor

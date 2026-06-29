@@ -1288,9 +1288,11 @@ static int LuaParticleClear(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     ParticleSystemComponent* ps = FindParticleSystem(host, name);
     if (!ps) { lua_pushboolean(L, 0); return 1; }
-    ps->_liveCount    = 0;
-    ps->_emitAccum    = 0.0f;
-    ps->_emittedTotal = 0;
+    ps->_liveCount       = 0;
+    ps->_emitAccum       = 0.0f;
+    ps->_emittedTotal    = 0;
+    ps->_elapsed         = 0.0f;
+    ps->_burstNextIndex  = 0;
     lua_pushboolean(L, 1);
     return 1;
 }
