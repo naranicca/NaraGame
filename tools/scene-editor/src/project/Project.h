@@ -98,6 +98,14 @@ public:
     // `audioMixer` so re-opening a project restores the same
     // ambience.
     float AudioReverbWet()    const { return m_audioReverbWet; }
+
+    // M9c12 startup scene. Path (relative to Assets/) of the
+    // scene a Build Game run boots into. Empty = no default;
+    // a standalone exe launched without --scene against a
+    // project whose mainScene is empty stays on the empty
+    // scene the editor's default constructor produces.
+    const std::string& MainScenePath() const { return m_mainScenePath; }
+    void SetMainScenePath(std::string p)     { m_mainScenePath = std::move(p); }
     void  SetAudioMasterVolume(float v);
     void  SetAudioSfxVolume(float v);
     void  SetAudioMusicVolume(float v);
@@ -123,6 +131,7 @@ private:
     float m_audioSfxVolume    = 1.0f;
     float m_audioMusicVolume  = 1.0f;
     float m_audioReverbWet    = 0.0f;
+    std::string m_mainScenePath;
 };
 
 } // namespace SceneEditor

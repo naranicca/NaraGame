@@ -3258,6 +3258,110 @@ private:
         }
     }
 
+    // M9c12 mark the current scene as the project's startup
+    // scene. Stored relative to Assets/ so a Build Game copy
+    // (which preserves the relative tree) lands on the same
+    // file.
+    void DoSetMainScene() {
+        if (!m_project.IsOpen() || m_currentScenePath.empty()) return;
+        const std::string rel = RelToAssets(m_currentScenePath);
+        m_project.SetMainScenePath(rel);
+        m_project.Save();
+        NARAGAME_INFO("scene-editor: main scene set to %s",
+                      rel.c_str());
+    }
+
+    // M9c12 build a shippable game folder.
+    //
+    // Layout (after a successful build):
+    //   <dest>/game.exe          -- copy of scene-editor.exe
+    //   <dest>/Assets/...        -- recursive copy
+    //   <dest>/ProjectSettings/  -- recursive copy
+    //
+    // Run `game.exe` directly: with no args it falls into the
+    // standalone runtime path (CreateApplication auto-detects
+    // a project.json in its working directory + loads the
+    // project's mainScene). The asset DB, audio mixer + every
+    // scene/script/audio/texture path keeps working unmodified
+    // because the relative tree below Assets/ + the
+    // project.json filename are preserved.
+    void DoBuildGame() {
+        if (!m_project.IsOpen()) return;
+        const std::string dest =
+            PickFolderDialog(m_hwnd, L"Choose build destination");
+        if (dest.empty()) return;
+
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        // Refuse to dump into a non-empty folder so a stray
+        // pick doesn't carpet-bomb the user's desktop.
+        if (fs::exists(dest, ec) && fs::is_directory(dest, ec)) {
+            if (fs::directory_iterator(dest, ec) !=
+                fs::directory_iterator()) {
+                NARAGAME_ERROR(
+                    "Build Game: '%s' is not empty -- "
+                    "refusing to overwrite.", dest.c_str());
+                return;
+            }
+        } else {
+            fs::create_directories(dest, ec);
+        }
+
+        // Locate this exe so we can drop a renamed copy of it
+        // in the destination as `game.exe`. GetModuleFileNameW
+        // is the canonical way + handles long paths better than
+        // argv[0].
+        wchar_t exePathW[MAX_PATH] = { 0 };
+        if (!GetModuleFileNameW(nullptr, exePathW, MAX_PATH)) {
+            NARAGAME_ERROR("Build Game: GetModuleFileName failed.");
+            return;
+        }
+        const fs::path srcExe(exePathW);
+        const fs::path destExe = fs::path(dest) / L"game.exe";
+        fs::copy_file(srcExe, destExe,
+                      fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            NARAGAME_ERROR("Build Game: cannot copy exe to '%s' (%s)",
+                           destExe.string().c_str(),
+                           ec.message().c_str());
+            return;
+        }
+
+        // Recursive copy of Assets/ + ProjectSettings/. .meta
+        // files come along automatically since they live
+        // alongside their asset.
+        const auto copyOpts =
+            fs::copy_options::recursive |
+            fs::copy_options::overwrite_existing;
+        fs::copy(m_project.AssetsDir(),
+                  (fs::path(dest) / L"Assets").string(),
+                  copyOpts, ec);
+        if (ec) {
+            NARAGAME_ERROR(
+                "Build Game: failed to copy Assets (%s)",
+                ec.message().c_str());
+            return;
+        }
+        fs::copy(m_project.SettingsDir(),
+                  (fs::path(dest) / L"ProjectSettings").string(),
+                  copyOpts, ec);
+        if (ec) {
+            NARAGAME_ERROR(
+                "Build Game: failed to copy ProjectSettings (%s)",
+                ec.message().c_str());
+            return;
+        }
+
+        NARAGAME_INFO("Build Game: '%s' built to %s "
+                      "(main scene = '%s')",
+                      m_project.Name().c_str(),
+                      dest.c_str(),
+                      m_project.MainScenePath().empty()
+                        ? "<unset -- empty scene>"
+                        : m_project.MainScenePath().c_str());
+    }
+
     // Strip the project's Assets/ prefix off `abs` so we can hand a
     // relative path to AssetDatabase::FindByPath.
     std::string RelToAssets(const std::string& abs) const {
@@ -3317,6 +3421,16 @@ private:
             if (ImGui::MenuItem("New Animator Controller...",
                                 nullptr, false, projOpen))
                 DoNewController();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Set Current Scene as Main",
+                                nullptr, false,
+                                projOpen && !m_currentScenePath.empty())) {
+                DoSetMainScene();
+            }
+            if (ImGui::MenuItem("Build Game...", nullptr, false,
+                                projOpen)) {
+                DoBuildGame();
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) Close();
             ImGui::EndMenu();
@@ -11792,6 +11906,35 @@ Application* NaraGame::CreateApplication(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--project") project = argv[++i];
         else if (a == "--scene") scene = argv[++i];
+    }
+    // M9c12 auto-standalone. When the user double-clicks a
+    // built game.exe with no args, look for the project tree
+    // sitting alongside it (./ProjectSettings/project.json)
+    // and fall straight into the standalone runtime path. The
+    // editor's own scene-editor.exe usually launches with no
+    // args too, so we only enable this when the project file
+    // is actually present in the cwd.
+    if (project.empty() && !standalone) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        if (fs::exists("ProjectSettings/project.json", ec)) {
+            project    = ".";
+            standalone = true;
+            if (scene.empty()) {
+                // Read mainScene out of project.json so the
+                // exe knows which scene to boot into without
+                // needing a --scene argument. A tiny inline
+                // read is cheaper than spinning up Project::Open
+                // twice (here + inside OnStart).
+                SceneEditor::Project probe;
+                if (probe.Open(".")) {
+                    const std::string& main = probe.MainScenePath();
+                    if (!main.empty()) {
+                        scene = "Assets/" + main;
+                    }
+                }
+            }
+        }
     }
     return new EditorApp(std::move(project), std::move(scene), standalone);
 }

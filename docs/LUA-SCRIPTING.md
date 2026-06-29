@@ -781,6 +781,8 @@ so a runaway delta won't blow the source voice.
 | **Window > Sorting Layers...** | Edit the SpriteRenderer draw order layers (rename / add / reorder). |
 | **Window > Collision Matrix...** | Edit collision layers + the NxN collide/skip matrix. |
 | **Window > Audio Mixer...** | Master / SFX / Music bus sliders + Reverb (Wet) send. Live-applied to the engine + persisted into `ProjectSettings/project.json` under `audioMixer` (M8c12 / M8c13). |
+| **File > Set Current Scene as Main** | Writes the open scene's `Assets/`-relative path into `project.json.mainScene` (M9c12). The packaged game.exe boots into this scene when launched with no `--scene` argument. |
+| **File > Build Game...** | Pick a destination folder; the editor copies `scene-editor.exe` to `<dest>/game.exe`, `Assets/` to `<dest>/Assets/`, and `ProjectSettings/` to `<dest>/ProjectSettings/` (M9c12). The destination must be empty -- the editor refuses to overwrite an arbitrary folder. Launch the dropped `game.exe` directly: with no arguments it auto-detects the project tree alongside it and falls into standalone mode loading `mainScene`. |
 | **Viewport collider gizmos** | Every Box / Circle collider renders an outline; the M7c2 gizmo colour shifts from green to amber while the pair is overlapping. M7c13 traces the rotated rect for Box colliders so the gizmo matches the SAT footprint. |
 | **Tileset editor** | Project pane > double-click a `.ntileset` row. Click a cell to cycle through the 10 collider shapes (blank / Box / OneWay / 6 slope variants / Trigger). Overlay paints solid red, OneWay orange, trigger blue, slope filled triangles + trapezoids. |
 

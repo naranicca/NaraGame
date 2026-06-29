@@ -223,6 +223,7 @@ void Project::Close() {
     m_audioSfxVolume    = 1.0f;
     m_audioMusicVolume  = 1.0f;
     m_audioReverbWet    = 0.0f;
+    m_mainScenePath.clear();
 }
 
 bool Project::EnsureFolderTree() const {
@@ -277,6 +278,9 @@ bool Project::WriteProjectJson() const {
     mixer.Add("music",     Value::MakeNumber(double(m_audioMusicVolume)));
     mixer.Add("reverbWet", Value::MakeNumber(double(m_audioReverbWet)));
     root.Add("audioMixer", std::move(mixer));
+    if (!m_mainScenePath.empty()) {
+        root.Add("mainScene", Value::MakeString(m_mainScenePath));
+    }
     const std::string out = NaraGame::MiniJson::Write(root);
     if (!WriteFileText(ProjectJsonPath(), out)) {
         NARAGAME_ERROR("Project: cannot write '%s'", ProjectJsonPath().c_str());
@@ -338,6 +342,7 @@ bool Project::ReadProjectJson() {
         m_audioMusicVolume  = 1.0f;
         m_audioReverbWet    = 0.0f;
     }
+    m_mainScenePath = root.GetString("mainScene", "");
     m_collisionMatrixOff.clear();
     const NaraGame::MiniJson::Value* cmatrix = root.Find("collisionMatrixOff");
     if (cmatrix && cmatrix->IsArray()) {
