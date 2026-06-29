@@ -186,6 +186,32 @@ one of the named keys: `Space`, `Enter`/`Return`, `Escape`/`Esc`,
 | `input.is_mouse_pressed(button)` | bool |
 | `input.is_mouse_released(button)`| bool |
 | `input.mouse_wheel()`            | num  |
+| `input.bind(action, key)`        | -- (rebinds the action to the named key; replaces any prior binding) |
+| `input.unbind(action)`           | bool (true when the action existed) |
+| `input.binding(action)`          | str (current key, or `""` when unbound) |
+| `input.is_action_down(action)`   | bool |
+| `input.is_action_pressed(action, repeat?)` | bool |
+| `input.is_action_released(action)` | bool |
+
+M9c18 action bindings: pair a script-side name (`"jump"`, `"fire"`, `"pause"`) with a key string. `input.is_action_*` then dispatches through the binding so a user-facing rebind UI can swap controls without touching gameplay code. Persist a binding set with `savegame.save` -- walk `input.binding(name)` for each action you care about, stash the strings in `state.input_bindings`, and replay them with `input.bind` on the next boot.
+
+### Splash screens
+
+No dedicated component; use the M9c15 scene swap. Author a `Scenes/Splash.nscene` whose root entity carries a SpriteRenderer (full-screen logo) plus a Script:
+
+```lua
+function Splash_Update(entity, dt)
+    if time.elapsed() > 2.0 then
+        scene.load("Scenes/MainMenu.nscene")
+    end
+end
+```
+
+Set `mainScene = "Scenes/Splash.nscene"` (File > Set Current Scene as Main) and a packed `game.exe` boots into the splash automatically + transitions to the menu after two seconds.
+
+### Settings panels
+
+Same pattern -- a `Scenes/Settings.nscene` with sprite + script entities, an `input.bind`-driven rebind row per action, and `state.audio_master` / `audio.set_bus_volume` for volume sliders. Persist with `savegame.save("settings")` so the panel reapplies on the next boot.
 
 ### `time.*`
 

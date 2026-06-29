@@ -161,6 +161,82 @@ static ImGuiKey LookupImGuiKey(const char* name) {
 // polled input state, so scripts see exactly what the editor's
 // own panels see this frame -- no separate polling layer to keep
 // in sync.
+// M9c18 action -> key bindings. Lives in a per-process map
+// rather than the ScriptHost upvalue chain because the input
+// table is registered with zero closure upvalues (its handlers
+// pull straight from ImGui's thread-local context). The
+// bindings survive a scene swap; they reset only on Unbind,
+// SetEmpty, or Lua state teardown. Persistence is up to the
+// caller -- a typical settings UI walks these into the
+// savegame state table + reloads on boot.
+static std::unordered_map<std::string, std::string>&
+ActionBindings() {
+    static std::unordered_map<std::string, std::string> map;
+    return map;
+}
+
+// input.bind(action, key) -> nil. Stores the action -> key
+// mapping; replaces any previous binding for `action`.
+// Subsequent input.is_action_* calls dispatch through here.
+static int LuaInputBind(lua_State* L) {
+    const char* act = luaL_checkstring(L, 1);
+    const char* key = luaL_checkstring(L, 2);
+    if (act && *act && key && *key) {
+        ActionBindings()[act] = key;
+    }
+    return 0;
+}
+
+// input.unbind(action) -> bool. Removes the mapping. Returns
+// true when the action existed; false when nothing changed.
+static int LuaInputUnbind(lua_State* L) {
+    const char* act = luaL_checkstring(L, 1);
+    if (!act || !*act) { lua_pushboolean(L, 0); return 1; }
+    lua_pushboolean(L,
+        ActionBindings().erase(act) ? 1 : 0);
+    return 1;
+}
+
+// input.binding(action) -> str. Reverse lookup so the settings
+// UI can render "Jump = Space". Returns "" when the action
+// isn't bound.
+static int LuaInputBinding(lua_State* L) {
+    const char* act = luaL_checkstring(L, 1);
+    auto& map = ActionBindings();
+    auto it = map.find(act ? act : "");
+    lua_pushstring(L, it == map.end() ? "" : it->second.c_str());
+    return 1;
+}
+
+static ImGuiKey ActionKey(lua_State* L, int argIdx) {
+    const char* act = luaL_checkstring(L, argIdx);
+    auto& map = ActionBindings();
+    auto it = map.find(act ? act : "");
+    if (it == map.end()) return ImGuiKey_None;
+    return LookupImGuiKey(it->second.c_str());
+}
+
+static int LuaInputIsActionDown(lua_State* L) {
+    const ImGuiKey k = ActionKey(L, 1);
+    lua_pushboolean(L,
+        k != ImGuiKey_None && ImGui::IsKeyDown(k));
+    return 1;
+}
+static int LuaInputIsActionPressed(lua_State* L) {
+    const ImGuiKey k = ActionKey(L, 1);
+    bool repeat = false;
+    if (lua_gettop(L) >= 2) repeat = lua_toboolean(L, 2) != 0;
+    lua_pushboolean(L,
+        k != ImGuiKey_None && ImGui::IsKeyPressed(k, repeat));
+    return 1;
+}
+static int LuaInputIsActionReleased(lua_State* L) {
+    const ImGuiKey k = ActionKey(L, 1);
+    lua_pushboolean(L,
+        k != ImGuiKey_None && ImGui::IsKeyReleased(k));
+    return 1;
+}
+
 static int LuaInputIsKeyDown(lua_State* L) {
     ImGuiKey k = LookupImGuiKey(luaL_checkstring(L, 1));
     lua_pushboolean(L,
@@ -2689,6 +2765,12 @@ ScriptHost::ScriptHost() {
         {"is_mouse_pressed",  LuaInputIsMousePressed},
         {"is_mouse_released", LuaInputIsMouseReleased},
         {"mouse_wheel",       LuaInputMouseWheel},
+        {"bind",              LuaInputBind},
+        {"unbind",            LuaInputUnbind},
+        {"binding",           LuaInputBinding},
+        {"is_action_down",    LuaInputIsActionDown},
+        {"is_action_pressed", LuaInputIsActionPressed},
+        {"is_action_released",LuaInputIsActionReleased},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
