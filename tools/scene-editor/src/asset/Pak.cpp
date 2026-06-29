@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <fstream>
 
+#include <unordered_map>
+
 #if defined(NARAGAME_HAS_MINIZ) && NARAGAME_HAS_MINIZ
 #include "miniz.h"
 #endif
@@ -15,6 +17,21 @@
 namespace SceneEditor {
 
 namespace fs = std::filesystem;
+
+namespace {
+
+// M9c17 mount state. One pak at a time -- swapping projects in
+// the editor is rare + a packed game has exactly one bundle.
+struct MountEntry {
+    uint32_t offset;
+    uint32_t size;
+    uint32_t compressedSize;
+    uint8_t  flags;
+};
+std::vector<uint8_t>                          g_mountBlob;
+std::unordered_map<std::string, MountEntry>   g_mountMap;
+
+} // namespace
 
 namespace {
 
@@ -403,6 +420,170 @@ bool ExtractPak(const std::string& pakPath,
         std::fclose(of);
     }
     return true;
+}
+
+// ---------------------------------------------------------
+// M9c17 in-memory mount.
+// ---------------------------------------------------------
+
+bool MountPak(const std::string& pakPath) {
+    UnmountPak();
+
+    FILE* f = nullptr;
+#if defined(_MSC_VER)
+    fopen_s(&f, pakPath.c_str(), "rb");
+#else
+    f = std::fopen(pakPath.c_str(), "rb");
+#endif
+    if (!f) {
+        NARAGAME_ERROR("MountPak: cannot open '%s'",
+                       pakPath.c_str());
+        return false;
+    }
+    struct Closer {
+        FILE* f;
+        ~Closer() { if (f) std::fclose(f); }
+    } closer{f};
+
+    // Determine the file size up front so the entire blob
+    // ( header + TOC + data ) lands in g_mountBlob in one
+    // read. A multi-MB pak's RAM footprint is acceptable;
+    // streaming reads on demand would force a per-asset seek
+    // which is what we just avoided by mounting.
+    std::fseek(f, 0, SEEK_END);
+    const long fsize = std::ftell(f);
+    if (fsize < 16) {
+        NARAGAME_ERROR("MountPak: '%s' too small to be NPAK",
+                       pakPath.c_str());
+        return false;
+    }
+    std::fseek(f, 0, SEEK_SET);
+    g_mountBlob.resize(size_t(fsize));
+    if (std::fread(&g_mountBlob[0], 1, size_t(fsize), f) !=
+        size_t(fsize)) {
+        NARAGAME_ERROR("MountPak: short read '%s'",
+                       pakPath.c_str());
+        g_mountBlob.clear();
+        return false;
+    }
+
+    const uint8_t* p = &g_mountBlob[0];
+    if (p[0] != 'N' || p[1] != 'P' || p[2] != 'A' || p[3] != 'K') {
+        NARAGAME_ERROR("MountPak: '%s' is not NPAK",
+                       pakPath.c_str());
+        g_mountBlob.clear();
+        return false;
+    }
+    auto rd32 = [&](size_t off) -> uint32_t {
+        return uint32_t(p[off]) |
+               (uint32_t(p[off + 1]) <<  8) |
+               (uint32_t(p[off + 2]) << 16) |
+               (uint32_t(p[off + 3]) << 24);
+    };
+    auto rd16 = [&](size_t off) -> uint16_t {
+        return uint16_t(p[off]) |
+               (uint16_t(p[off + 1]) << 8);
+    };
+    const uint32_t version    = rd32(4);
+    const uint32_t numEntries = rd32(8);
+    const uint32_t dataOffset = rd32(12);
+    if (version != kVersion) {
+        NARAGAME_ERROR(
+            "MountPak: pak version %u not supported (build "
+            "expects %u)",
+            version, kVersion);
+        g_mountBlob.clear();
+        return false;
+    }
+    g_mountMap.reserve(numEntries);
+    size_t pos = 16;
+    for (uint32_t i = 0; i < numEntries; ++i) {
+        if (pos + 2 > g_mountBlob.size()) {
+            NARAGAME_ERROR("MountPak: TOC truncated entry %u", i);
+            g_mountBlob.clear();
+            g_mountMap.clear();
+            return false;
+        }
+        const uint16_t plen = rd16(pos); pos += 2;
+        if (pos + plen + 13 > g_mountBlob.size()) {
+            NARAGAME_ERROR("MountPak: TOC truncated entry %u", i);
+            g_mountBlob.clear();
+            g_mountMap.clear();
+            return false;
+        }
+        std::string key(reinterpret_cast<const char*>(p + pos),
+                         plen);
+        pos += plen;
+        MountEntry e;
+        e.size           = rd32(pos); pos += 4;
+        e.compressedSize = rd32(pos); pos += 4;
+        e.offset         = rd32(pos); pos += 4;
+        e.flags          = p[pos];    pos += 1;
+        // Translate the per-section offset to a blob offset so
+        // Read can index g_mountBlob directly.
+        e.offset += dataOffset;
+        g_mountMap.emplace(std::move(key), e);
+    }
+    return true;
+}
+
+void UnmountPak() {
+    g_mountBlob.clear();
+    g_mountBlob.shrink_to_fit();
+    g_mountMap.clear();
+}
+
+bool IsPakMounted() {
+    return !g_mountBlob.empty();
+}
+
+bool ReadFromPak(const std::string& relPath,
+                  std::vector<uint8_t>& out) {
+    if (g_mountBlob.empty()) return false;
+    // Normalise back-slashes so callers passing OS-native
+    // paths still hit the TOC's forward-slash keys.
+    std::string key = relPath;
+    for (char& c : key) if (c == '\\') c = '/';
+    auto it = g_mountMap.find(key);
+    if (it == g_mountMap.end()) return false;
+    const MountEntry& e = it->second;
+    if (e.offset + e.compressedSize > g_mountBlob.size()) {
+        NARAGAME_ERROR("ReadFromPak: '%s' offset out of range",
+                       relPath.c_str());
+        return false;
+    }
+    const uint8_t* src = &g_mountBlob[e.offset];
+    if (e.flags == kFlagStored) {
+        out.assign(src, src + e.size);
+        return true;
+    }
+    if (e.flags == kFlagDeflated) {
+#if defined(NARAGAME_HAS_MINIZ) && NARAGAME_HAS_MINIZ
+        out.resize(e.size);
+        mz_ulong destLen = e.size;
+        const int rc = mz_uncompress(
+            out.empty() ? nullptr : &out[0], &destLen,
+            src, e.compressedSize);
+        if (rc != MZ_OK || destLen != e.size) {
+            NARAGAME_ERROR(
+                "ReadFromPak: inflate failed for '%s'",
+                relPath.c_str());
+            out.clear();
+            return false;
+        }
+        return true;
+#else
+        NARAGAME_ERROR(
+            "ReadFromPak: '%s' is deflated but this build "
+            "lacks miniz support.",
+            relPath.c_str());
+        return false;
+#endif
+    }
+    NARAGAME_ERROR(
+        "ReadFromPak: unknown flags 0x%02X on '%s'",
+        unsigned(e.flags), relPath.c_str());
+    return false;
 }
 
 } // namespace SceneEditor

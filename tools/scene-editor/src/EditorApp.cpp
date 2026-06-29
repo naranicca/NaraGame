@@ -12032,7 +12032,18 @@ Application* NaraGame::CreateApplication(int argc, char** argv) {
             fs::is_directory("Assets", ec) &&
             fs::directory_iterator("Assets", ec) !=
                 fs::directory_iterator();
+        if (havePak) {
+            // M9c17 mount in-memory regardless; vfs lookups
+            // (Scene::Load, Lua script load) hit RAM first +
+            // never need a disk Assets/ for those particular
+            // call sites.
+            SceneEditor::MountPak("assets.pak");
+        }
         if (havePak && !haveAssetsDir) {
+            // Extract path stays the fallback for loaders that
+            // haven't been hooked yet (textures, audio): they
+            // still read off disk so the extracted Assets/ has
+            // to exist.
             if (!SceneEditor::ExtractPak("assets.pak", "Assets")) {
                 NARAGAME_ERROR(
                     "auto-standalone: assets.pak failed to "

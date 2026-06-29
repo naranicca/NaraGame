@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -35,5 +36,28 @@ bool WritePak(const std::string& outPath,
 
 bool ExtractPak(const std::string& pakPath,
                  const std::string& destDir);
+
+// M9c17 in-memory mount. A second runtime path next to the
+// extract-to-disk flow: Mount() reads the pak into RAM +
+// builds a path -> (offset, size, flags) lookup; Read()
+// returns a copy of the decoded bytes for one entry.
+// Callers that already have an Assets/ tree on disk (the
+// editor, extracted standalone) hit the file system; those
+// that don't (in-memory standalone builds) can fall back to
+// Read() before erroring out.
+//
+// Mount + IsMounted + Unmount are not thread-safe -- the
+// runtime only touches them on the main thread (startup +
+// shutdown), so a mutex would be wasted overhead.
+bool MountPak(const std::string& pakPath);
+void UnmountPak();
+bool IsPakMounted();
+// Returns true when the path is present in the currently
+// mounted pak + writes the decoded bytes into `out`. False
+// when nothing is mounted, the path isn't in the TOC, or
+// decompression fails. `relPath` is the same forward-slash
+// Assets/-relative key the pak's TOC stores.
+bool ReadFromPak(const std::string& relPath,
+                  std::vector<uint8_t>& out);
 
 } // namespace SceneEditor

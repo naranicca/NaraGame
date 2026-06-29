@@ -16,6 +16,7 @@
 #include "../scene/SpriteRendererComponent.h"
 #include "../scene/TilemapComponent.h"
 #include "../scene/TransformComponent.h"
+#include "../asset/Pak.h"
 #include "../asset/Tileset.h"
 #include "../asset/TextureImportSettings.h"
 
@@ -3079,6 +3080,38 @@ bool ScriptHost::LoadFile(const std::string& absolutePath,
                           const std::string& displayName) {
     if (!m_lua) return false;
     lua_State* L = static_cast<lua_State*>(m_lua);
+    // M9c17 vfs hook: if a pak is mounted + this script lives
+    // inside it (key = displayName), load straight from RAM.
+    // The disk fopen fallback handles the editor + extracted
+    // standalone paths where the script also exists on disk.
+    if (SceneEditor::IsPakMounted()) {
+        std::vector<uint8_t> mem;
+        if (SceneEditor::ReadFromPak(displayName, mem)) {
+            if (luaL_loadbuffer(L,
+                    mem.empty()
+                        ? ""
+                        : reinterpret_cast<const char*>(&mem[0]),
+                    mem.size(),
+                    displayName.c_str()) != LUA_OK) {
+                const char* err = lua_tostring(L, -1);
+                AppendLine("[lua-error] " + displayName +
+                           " load(pak): " +
+                           (err ? err : "<no message>"));
+                lua_pop(L, 1);
+                return false;
+            }
+            if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+                const char* err = lua_tostring(L, -1);
+                AppendLine("[lua-error] " + displayName +
+                           " run(pak): " +
+                           (err ? err : "<no message>"));
+                lua_pop(L, 1);
+                return false;
+            }
+            AppendLine("[lua-pak] loaded " + displayName);
+            return true;
+        }
+    }
     if (luaL_loadfile(L, absolutePath.c_str()) != LUA_OK) {
         const char* err = lua_tostring(L, -1);
         AppendLine("[lua-error] " + displayName + " load: " +
