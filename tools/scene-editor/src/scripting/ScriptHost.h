@@ -126,6 +126,23 @@ public:
     void           BindAssetDatabase(AssetDatabase* db) { m_assetDb = db; }
     AssetDatabase* BoundAssetDatabase() const           { return m_assetDb; }
 
+    // M9c15 deferred scene swap. Lua's `scene.load` stashes
+    // its argument here instead of mutating Scene synchronously
+    // -- swapping mid-tick would invalidate the entity loop
+    // every script callback is iterating. EditorApp drains the
+    // slot at the end of OnRender by calling ConsumePending*.
+    void               SetPendingSceneLoad(std::string path) {
+        m_pendingSceneLoad = std::move(path);
+    }
+    std::string ConsumePendingSceneLoad() {
+        std::string p = std::move(m_pendingSceneLoad);
+        m_pendingSceneLoad.clear();
+        return p;
+    }
+    bool HasPendingSceneLoad() const {
+        return !m_pendingSceneLoad.empty();
+    }
+
     // EditorApp calls Tick once per editor frame (right before
     // TickScripts) so the host can keep running totals the Lua
     // `time` API exposes. dt is the same frame delta TickScripts
@@ -156,6 +173,7 @@ private:
     // look up entities by name.
     Scene* m_scene = nullptr;
     AssetDatabase* m_assetDb = nullptr;
+    std::string    m_pendingSceneLoad;
     // Running totals the Lua `time` API surfaces. Tick() bumps
     // them every editor frame; nothing else mutates them.
     double    m_elapsed    = 0.0;

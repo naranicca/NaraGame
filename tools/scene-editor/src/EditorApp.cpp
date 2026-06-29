@@ -306,6 +306,7 @@ public:
         // since none of them belong in a shipped game build.
         if (m_standalone) {
             TickScripts (ImGui::GetIO().DeltaTime);
+            ConsumePendingSceneLoad();
             TickPhysics (ImGui::GetIO().DeltaTime);
             TickAnimators(ImGui::GetIO().DeltaTime);
             TickAudioSources(ImGui::GetIO().DeltaTime);
@@ -348,6 +349,7 @@ public:
         // edge of Play (m_animPlaying false -> true) for any
         // enabled source flagged playOnStart.
         TickAudioSources(ImGui::GetIO().DeltaTime);
+        ConsumePendingSceneLoad();
         // M9c2 particle systems. Same Play-mode gate as
         // animators -- emits + integrates while Play is on,
         // resets the pool back to empty when Play flips off
@@ -2445,6 +2447,27 @@ private:
     // dead particles in one swap-to-end pass. Cost is O(live)
     // per system; the fixed pool means no allocation past
     // the first frame.
+    // M9c15 drain the script host's pending scene-load slot.
+    // Called once per frame after TickScripts so a Lua callback
+    // can request `scene.load("Scenes/Next.nscene")` and the
+    // host swaps cleanly the next instant -- without the
+    // entity iterator under the script callback exploding.
+    void ConsumePendingSceneLoad() {
+        if (!m_scriptHost.HasPendingSceneLoad()) return;
+        std::string path = m_scriptHost.ConsumePendingSceneLoad();
+        if (path.empty()) return;
+        NotifyAllScriptsForDestroy();
+        if (m_scene.Load(path)) {
+            m_currentScenePath = path;
+            m_selection = SceneEditor::kInvalidEntityId;
+            UndoClear();
+            UpdateWindowTitle();
+            NARAGAME_INFO("scene.load: %s", path.c_str());
+        } else {
+            NARAGAME_ERROR("scene.load: failed '%s'", path.c_str());
+        }
+    }
+
     void TickParticles(float dt) {
         std::vector<SceneEditor::EntityId> ids;
         ids.reserve(64);

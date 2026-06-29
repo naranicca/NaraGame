@@ -1445,6 +1445,45 @@ static int LuaCameraGetActive(lua_State* L) {
     return 1;
 }
 
+// M9c15 scene.load(path_or_guid) -> bool. Queues a scene
+// swap; the host actually executes it at the end of the
+// current frame so the script callback iterating live
+// entities doesn't see them disappear mid-loop. Accepts the
+// same path resolution audio.* does: 36-char dashed GUID
+// looked up against an Audio... wait, no -- scenes get a
+// simpler rule. A relative path joins to AssetDatabase's
+// AssetsRoot(); a path that already starts with "Assets/" or
+// is absolute is used verbatim.
+static int LuaSceneLoad(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host) { lua_pushboolean(L, 0); return 1; }
+    const char* arg = luaL_checkstring(L, 1);
+    if (!arg || !*arg) { lua_pushboolean(L, 0); return 1; }
+    std::string resolved = arg;
+    const bool isAbs =
+        (resolved.size() >= 2 && resolved[1] == ':') ||
+        (!resolved.empty() && (resolved[0] == '/' ||
+                                resolved[0] == '\\'));
+    if (!isAbs &&
+        resolved.compare(0, 7, "Assets/") != 0 &&
+        host->BoundAssetDatabase()) {
+        const std::string& root =
+            host->BoundAssetDatabase()->AssetsRoot();
+        if (!root.empty()) {
+            const char sep =
+                (root.back() == '/' || root.back() == '\\')
+                    ? '\0' : '/';
+            std::string joined = root;
+            if (sep) joined.push_back(sep);
+            joined.append(arg);
+            resolved = std::move(joined);
+        }
+    }
+    host->SetPendingSceneLoad(resolved);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 // scene.overlap_circle(cx, cy, r) -> table of entity names.
 // Same area-query shape as overlap_box but with a virtual
 // circle. Box colliders use the nearest-point-on-box clamp,
@@ -2504,6 +2543,7 @@ ScriptHost::ScriptHost() {
         {"overlap_box",       LuaSceneOverlapBox},
         {"overlap_circle",    LuaSceneOverlapCircle},
         {"find_path",         LuaSceneFindPath},
+        {"load",              LuaSceneLoad},
         {nullptr,             nullptr},
     };
     lua_newtable(L);
