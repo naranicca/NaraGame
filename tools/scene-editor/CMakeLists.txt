@@ -41,6 +41,7 @@ add_executable(scene-editor
     src/asset/AssetDatabase.cpp
     src/asset/AssetGuid.cpp
     src/asset/Autotile.cpp
+    src/asset/Pak.cpp
     src/asset/SpriteSheet.cpp
     src/asset/TextureImportSettings.cpp
     src/asset/Tileset.cpp

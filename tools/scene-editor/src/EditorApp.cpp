@@ -9,6 +9,7 @@
 #include "asset/Animation.h"
 #include "asset/AnimatorController.h"
 #include "asset/Autotile.h"
+#include "asset/Pak.h"
 #include "asset/SpriteSheet.h"
 #include "asset/TextureImportSettings.h"
 #include "asset/Tileset.h"
@@ -3271,20 +3272,26 @@ private:
                       rel.c_str());
     }
 
-    // M9c12 build a shippable game folder.
+    // M9c12 / M9c13 build a shippable game folder.
     //
     // Layout (after a successful build):
     //   <dest>/game.exe          -- copy of scene-editor.exe
-    //   <dest>/Assets/...        -- recursive copy
-    //   <dest>/ProjectSettings/  -- recursive copy
+    //   <dest>/assets.pak        -- single-file bundle of Assets/
+    //   <dest>/ProjectSettings/  -- recursive copy (kept loose
+    //                               so the user can edit
+    //                               post-ship volume / layer
+    //                               defaults without re-
+    //                               packing)
     //
     // Run `game.exe` directly: with no args it falls into the
     // standalone runtime path (CreateApplication auto-detects
-    // a project.json in its working directory + loads the
-    // project's mainScene). The asset DB, audio mixer + every
-    // scene/script/audio/texture path keeps working unmodified
-    // because the relative tree below Assets/ + the
-    // project.json filename are preserved.
+    // either a loose project tree or an assets.pak in its
+    // working directory + loads the project's mainScene). The
+    // asset DB, audio mixer + every scene/script/audio/texture
+    // path keeps working unmodified because the pak's TOC
+    // preserves the same Assets/-relative tree the editor
+    // wrote -- the runtime unpacks once into a temp folder +
+    // points the cwd at it.
     void DoBuildGame() {
         if (!m_project.IsOpen()) return;
         const std::string dest =
@@ -3328,21 +3335,28 @@ private:
             return;
         }
 
-        // Recursive copy of Assets/ + ProjectSettings/. .meta
-        // files come along automatically since they live
-        // alongside their asset.
+        // M9c13 pack the Assets/ tree into a single
+        // assets.pak archive instead of copying it loose. The
+        // pak's TOC stores forward-slash relative paths so
+        // the runtime extractor can reconstruct the same
+        // directory layout the loose-copy path used to
+        // produce.
+        const fs::path pakPath = fs::path(dest) / L"assets.pak";
+        if (!SceneEditor::WritePak(pakPath.string(),
+                                     m_project.AssetsDir())) {
+            NARAGAME_ERROR(
+                "Build Game: failed to write '%s'",
+                pakPath.string().c_str());
+            return;
+        }
+
+        // ProjectSettings stays loose -- it's small, the user
+        // may want to tweak `mainScene` or layer presets
+        // post-ship without re-running Build Game, and it
+        // doesn't carry the binary blobs that justify packing.
         const auto copyOpts =
             fs::copy_options::recursive |
             fs::copy_options::overwrite_existing;
-        fs::copy(m_project.AssetsDir(),
-                  (fs::path(dest) / L"Assets").string(),
-                  copyOpts, ec);
-        if (ec) {
-            NARAGAME_ERROR(
-                "Build Game: failed to copy Assets (%s)",
-                ec.message().c_str());
-            return;
-        }
         fs::copy(m_project.SettingsDir(),
                   (fs::path(dest) / L"ProjectSettings").string(),
                   copyOpts, ec);
@@ -11891,7 +11905,7 @@ private:
 } // namespace
 
 Application* NaraGame::CreateApplication(int argc, char** argv) {
-    std::string project, scene;
+    std::string project, scene, buildDest;
     bool standalone = false;
     // Two-pass parse: the flag arg lives on its own (no value),
     // the project/scene args eat the next argv. Keep the same
@@ -11906,17 +11920,102 @@ Application* NaraGame::CreateApplication(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--project") project = argv[++i];
         else if (a == "--scene") scene = argv[++i];
+        else if (a == "--build-game") buildDest = argv[++i];
     }
-    // M9c12 auto-standalone. When the user double-clicks a
-    // built game.exe with no args, look for the project tree
-    // sitting alongside it (./ProjectSettings/project.json)
-    // and fall straight into the standalone runtime path. The
-    // editor's own scene-editor.exe usually launches with no
-    // args too, so we only enable this when the project file
-    // is actually present in the cwd.
+    // M9c13 headless build mode. `--project <p> --build-game
+    // <dest>` opens the project, packs Assets/ into
+    // <dest>/assets.pak, copies <dest>/ProjectSettings/ +
+    // <dest>/game.exe, and exits without opening a window.
+    // Lets CI / snap scripts produce a packed game without
+    // walking the editor's menu.
+    if (!buildDest.empty() && !project.empty()) {
+        SceneEditor::RegisterBuiltinComponents();
+        SceneEditor::Project p;
+        if (!p.Open(project)) {
+            std::fprintf(stderr,
+                "build-game: cannot open project '%s'\n",
+                project.c_str());
+            std::exit(1);
+        }
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        if (fs::exists(buildDest, ec) &&
+            fs::is_directory(buildDest, ec) &&
+            fs::directory_iterator(buildDest, ec) !=
+                fs::directory_iterator()) {
+            std::fprintf(stderr,
+                "build-game: '%s' is not empty\n",
+                buildDest.c_str());
+            std::exit(1);
+        }
+        fs::create_directories(buildDest, ec);
+        wchar_t exePathW[MAX_PATH] = { 0 };
+        if (!GetModuleFileNameW(nullptr, exePathW, MAX_PATH)) {
+            std::fprintf(stderr,
+                "build-game: GetModuleFileName failed\n");
+            std::exit(1);
+        }
+        const fs::path destExe =
+            fs::path(buildDest) / L"game.exe";
+        fs::copy_file(fs::path(exePathW), destExe,
+            fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::fprintf(stderr,
+                "build-game: cannot copy exe (%s)\n",
+                ec.message().c_str());
+            std::exit(1);
+        }
+        const fs::path pakPath =
+            fs::path(buildDest) / L"assets.pak";
+        if (!SceneEditor::WritePak(pakPath.string(),
+                                     p.AssetsDir())) {
+            std::fprintf(stderr,
+                "build-game: WritePak failed\n");
+            std::exit(1);
+        }
+        fs::copy(p.SettingsDir(),
+                  (fs::path(buildDest) / L"ProjectSettings").string(),
+                  fs::copy_options::recursive |
+                  fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::fprintf(stderr,
+                "build-game: ProjectSettings copy failed (%s)\n",
+                ec.message().c_str());
+            std::exit(1);
+        }
+        std::fprintf(stdout,
+            "build-game: '%s' -> %s ok\n",
+            p.Name().c_str(), buildDest.c_str());
+        std::exit(0);
+    }
+    // M9c12 / M9c13 auto-standalone. When the user double-
+    // clicks a built game.exe with no args, look for the
+    // project tree sitting alongside it (./ProjectSettings/
+    // project.json) and fall straight into the standalone
+    // runtime path. The editor's own scene-editor.exe usually
+    // launches with no args too, so we only enable this when
+    // the project file is actually present in the cwd.
     if (project.empty() && !standalone) {
         namespace fs = std::filesystem;
         std::error_code ec;
+        // M9c13 first: if a packed `assets.pak` sits next to
+        // the exe + Assets/ hasn't already been extracted,
+        // unpack it now. The pak preserves the same
+        // Assets/-relative tree the rest of the asset DB +
+        // loaders already speak, so once it's on disk the
+        // standalone path takes over unchanged.
+        const bool havePak = fs::exists("assets.pak", ec);
+        const bool haveAssetsDir =
+            fs::is_directory("Assets", ec) &&
+            fs::directory_iterator("Assets", ec) !=
+                fs::directory_iterator();
+        if (havePak && !haveAssetsDir) {
+            if (!SceneEditor::ExtractPak("assets.pak", "Assets")) {
+                NARAGAME_ERROR(
+                    "auto-standalone: assets.pak failed to "
+                    "extract; falling back to editor mode.");
+            }
+        }
         if (fs::exists("ProjectSettings/project.json", ec)) {
             project    = ".";
             standalone = true;
