@@ -13,6 +13,23 @@
 
 namespace SceneEditor {
 
+// M9c10 emission shape. Point (the default) spawns every
+// particle at the emitter's Transform position; the other
+// shapes pick an offset from a 2D area / curve so multi-
+// particle systems can come from a wider source than a
+// single dot. Edge variants sample the boundary; Volume
+// variants sample the interior uniformly. Line samples a
+// segment from the emitter origin to `shapeLineEnd` in
+// local coordinates.
+enum class ParticleEmissionShape {
+    Point        = 0,
+    CircleEdge   = 1,
+    CircleVolume = 2,
+    BoxEdge      = 3,
+    BoxVolume    = 4,
+    Line         = 5,
+};
+
 // M9c2 2D particle emitter. Entity-attached system that spawns
 // short-lived particles each frame at the entity's Transform
 // position, integrates them under gravity, and renders each
@@ -83,6 +100,18 @@ public:
     // Y is the default falling direction the rest of the
     // engine uses (Y+ is up).
     NaraGame::Vec2 gravity { 0.0f, -2.0f };
+
+    // M9c10 emission shape + per-shape size params. Point
+    // ignores all three size fields; Circle uses `shapeRadius`;
+    // Box uses `shapeBoxSize` (full width / height); Line uses
+    // `shapeLineEnd` as the offset of the segment's far end
+    // from the entity origin (the near end is always 0,0).
+    // All three are stored even when not in use so swapping
+    // shapes doesn't lose the user's previous values.
+    ParticleEmissionShape shape         = ParticleEmissionShape::Point;
+    float                 shapeRadius   = 1.0f;
+    NaraGame::Vec2        shapeBoxSize  { 1.0f, 1.0f };
+    NaraGame::Vec2        shapeLineEnd  { 1.0f, 0.0f };
 
     // M9c4 optional texture. Invalid GUID (the default) keeps
     // the M9c2 untextured-rect path; a valid Texture asset

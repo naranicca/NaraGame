@@ -2498,7 +2498,72 @@ private:
                 if (ps->_liveCount >= ps->maxParticles) return false;
                 auto& p = ps->_pool[size_t(ps->_liveCount++)];
                 ++ps->_emittedTotal;
-                p.pos = { tr->position.x, tr->position.y };
+                // M9c10 spawn offset by shape. Point spawns
+                // at origin (legacy behaviour). Circle/Box
+                // edge variants land on the boundary; volume
+                // variants sample uniformly inside. Line
+                // walks from (0,0) to shapeLineEnd.
+                float ox = 0.0f, oy = 0.0f;
+                using Sh = SceneEditor::ParticleEmissionShape;
+                switch (ps->shape) {
+                case Sh::Point: break;
+                case Sh::CircleEdge: {
+                    const float a = frand(ps->_rng, 0.0f, 1.0f) *
+                        2.0f * 3.14159265358979323846f;
+                    ox = std::cos(a) * ps->shapeRadius;
+                    oy = std::sin(a) * ps->shapeRadius;
+                    break;
+                }
+                case Sh::CircleVolume: {
+                    const float a = frand(ps->_rng, 0.0f, 1.0f) *
+                        2.0f * 3.14159265358979323846f;
+                    // sqrt sample for uniform-by-area inside a
+                    // disk (linear sampling would crowd the
+                    // origin).
+                    const float r = ps->shapeRadius *
+                        std::sqrt(frand(ps->_rng, 0.0f, 1.0f));
+                    ox = std::cos(a) * r;
+                    oy = std::sin(a) * r;
+                    break;
+                }
+                case Sh::BoxEdge: {
+                    // Pick a perimeter parameter in [0, 1) and
+                    // map to one of the 4 sides by perimeter
+                    // fraction (so a tall, thin box favours its
+                    // long sides).
+                    const float w = ps->shapeBoxSize.x;
+                    const float h = ps->shapeBoxSize.y;
+                    const float perim = 2.0f * (w + h);
+                    float t = frand(ps->_rng, 0.0f, 1.0f) * perim;
+                    if (t < w) {
+                        ox = -0.5f * w + t; oy = -0.5f * h;
+                    } else if (t < w + h) {
+                        ox =  0.5f * w; oy = -0.5f * h + (t - w);
+                    } else if (t < 2.0f * w + h) {
+                        ox =  0.5f * w - (t - w - h);
+                        oy =  0.5f * h;
+                    } else {
+                        ox = -0.5f * w;
+                        oy =  0.5f * h - (t - 2.0f * w - h);
+                    }
+                    break;
+                }
+                case Sh::BoxVolume: {
+                    const float w = ps->shapeBoxSize.x;
+                    const float h = ps->shapeBoxSize.y;
+                    ox = frand(ps->_rng, -0.5f * w, 0.5f * w);
+                    oy = frand(ps->_rng, -0.5f * h, 0.5f * h);
+                    break;
+                }
+                case Sh::Line: {
+                    const float t = frand(ps->_rng, 0.0f, 1.0f);
+                    ox = ps->shapeLineEnd.x * t;
+                    oy = ps->shapeLineEnd.y * t;
+                    break;
+                }
+                }
+                p.pos = { tr->position.x + ox,
+                          tr->position.y + oy };
                 const float ang = frand(ps->_rng,
                     ps->dirAngleMinDeg,
                     ps->dirAngleMaxDeg) *
@@ -7230,6 +7295,47 @@ private:
             ps.gravity = { gv[0], gv[1] };
         }
 
+        // M9c10 emission shape + per-shape size params. Only
+        // the field relevant to the picked shape shows; the
+        // others stay in the component so a Point -> Circle ->
+        // Point round-trip doesn't lose the radius the user set.
+        using Sh = SceneEditor::ParticleEmissionShape;
+        static const char* kShapeNames[] = {
+            "Point", "Circle Edge", "Circle Volume",
+            "Box Edge", "Box Volume", "Line"
+        };
+        int shapeIdx = int(ps.shape);
+        if (ImGui::Combo("Shape", &shapeIdx,
+                          kShapeNames, IM_ARRAYSIZE(kShapeNames))) {
+            UndoSnapshot();
+            ps.shape = Sh(shapeIdx);
+        }
+        if (ps.shape == Sh::CircleEdge ||
+            ps.shape == Sh::CircleVolume) {
+            if (ImGui::DragFloat("Radius", &ps.shapeRadius,
+                                  0.02f, 0.0f, 0.0f, "%.2f")) {
+                UndoSnapshot();
+                if (ps.shapeRadius < 0.0f) ps.shapeRadius = 0.0f;
+            }
+        } else if (ps.shape == Sh::BoxEdge ||
+                    ps.shape == Sh::BoxVolume) {
+            float bs[2] = { ps.shapeBoxSize.x, ps.shapeBoxSize.y };
+            if (ImGui::DragFloat2("Box Size (w/h)", bs,
+                                   0.02f, 0.0f, 0.0f, "%.2f")) {
+                UndoSnapshot();
+                if (bs[0] < 0.0f) bs[0] = 0.0f;
+                if (bs[1] < 0.0f) bs[1] = 0.0f;
+                ps.shapeBoxSize = { bs[0], bs[1] };
+            }
+        } else if (ps.shape == Sh::Line) {
+            float le[2] = { ps.shapeLineEnd.x, ps.shapeLineEnd.y };
+            if (ImGui::DragFloat2("Line End (offset)", le,
+                                   0.05f, 0.0f, 0.0f, "%.2f")) {
+                UndoSnapshot();
+                ps.shapeLineEnd = { le[0], le[1] };
+            }
+        }
+
         // M9c7 rotation block. Velocity-align dominates -- when
         // it's on the start/spin ranges are still serialised
         // (toggling the flag off snaps live particles back to
@@ -9792,6 +9898,54 @@ private:
                     // rotation is 0 the result is identical to
                     // the M9c2 AddRectFilled output.
                     dl->AddQuadFilled(pTL, pTR, pBR, pBL, col);
+                }
+            }
+        }
+
+        // M9c10 emission-shape gizmo. Editor-only -- shows the
+        // outline of where new particles will spawn so the user
+        // can size a circle / box / line by eye. Skipped in
+        // standalone (game runtime) so a finished game doesn't
+        // leak debug glyphs.
+        if (!m_standalone) {
+            for (SceneEditor::EntityId id : ids) {
+                const auto* e = m_scene.Get(id);
+                if (!e || !e->enabled) continue;
+                const auto* ps =
+                    e->GetComponent<
+                        SceneEditor::ParticleSystemComponent>();
+                const auto* tr =
+                    e->GetComponent<SceneEditor::TransformComponent>();
+                if (!ps || !tr) continue;
+                using Sh = SceneEditor::ParticleEmissionShape;
+                if (ps->shape == Sh::Point) continue;
+                const ImVec2 sc = WorldToScreen(
+                    ImVec2{tr->position.x, tr->position.y},
+                    panelMin, panelSize);
+                const ImU32 gz = IM_COL32(150, 220, 255, 180);
+                const float z = m_viewCam.zoom;
+                if (ps->shape == Sh::CircleEdge ||
+                    ps->shape == Sh::CircleVolume) {
+                    dl->AddCircle(sc, ps->shapeRadius * z,
+                                  gz, 48, 1.5f);
+                } else if (ps->shape == Sh::BoxEdge ||
+                            ps->shape == Sh::BoxVolume) {
+                    const float hx = ps->shapeBoxSize.x * 0.5f * z;
+                    const float hy = ps->shapeBoxSize.y * 0.5f * z;
+                    dl->AddRect(
+                        ImVec2{sc.x - hx, sc.y - hy},
+                        ImVec2{sc.x + hx, sc.y + hy},
+                        gz, 0.0f, 0, 1.5f);
+                } else if (ps->shape == Sh::Line) {
+                    const ImVec2 end =
+                        WorldToScreen(
+                            ImVec2{
+                                tr->position.x +
+                                    ps->shapeLineEnd.x,
+                                tr->position.y +
+                                    ps->shapeLineEnd.y},
+                            panelMin, panelSize);
+                    dl->AddLine(sc, end, gz, 1.5f);
                 }
             }
         }

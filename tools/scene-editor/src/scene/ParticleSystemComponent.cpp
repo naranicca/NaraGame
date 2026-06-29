@@ -6,6 +6,27 @@ using NaraGame::MiniJson::Value;
 
 namespace {
 
+const char* ShapeName(ParticleEmissionShape s) {
+    switch (s) {
+    case ParticleEmissionShape::Point:        return "Point";
+    case ParticleEmissionShape::CircleEdge:   return "CircleEdge";
+    case ParticleEmissionShape::CircleVolume: return "CircleVolume";
+    case ParticleEmissionShape::BoxEdge:      return "BoxEdge";
+    case ParticleEmissionShape::BoxVolume:    return "BoxVolume";
+    case ParticleEmissionShape::Line:         return "Line";
+    }
+    return "Point";
+}
+
+ParticleEmissionShape ParseShape(const std::string& s) {
+    if (s == "CircleEdge")   return ParticleEmissionShape::CircleEdge;
+    if (s == "CircleVolume") return ParticleEmissionShape::CircleVolume;
+    if (s == "BoxEdge")      return ParticleEmissionShape::BoxEdge;
+    if (s == "BoxVolume")    return ParticleEmissionShape::BoxVolume;
+    if (s == "Line")         return ParticleEmissionShape::Line;
+    return ParticleEmissionShape::Point;
+}
+
 Value ColorToJson(const NaraGame::Color& c) {
     Value a = Value::MakeArray();
     a.Push(Value::MakeNumber(c.r));
@@ -67,6 +88,10 @@ void ParticleSystemComponent::Serialize(Value& out) const {
     out.Add("startColor",     ColorToJson(startColor));
     out.Add("endColor",       ColorToJson(endColor));
     out.Add("gravity",        Vec2ToJson(gravity));
+    out.Add("shape",          Value::MakeString(ShapeName(shape)));
+    out.Add("shapeRadius",    Value::MakeNumber(shapeRadius));
+    out.Add("shapeBoxSize",   Vec2ToJson(shapeBoxSize));
+    out.Add("shapeLineEnd",   Vec2ToJson(shapeLineEnd));
     out.Add("texture",        Value::MakeString(texture.ToString()));
     out.Add("subSprite",      Value::MakeString(subSprite));
     Value frames = Value::MakeArray();
@@ -117,6 +142,12 @@ void ParticleSystemComponent::Deserialize(const Value& obj) {
                                   NaraGame::Color{1.0f, 1.0f, 1.0f, 0.0f});
     gravity        = JsonToVec2(obj.Find("gravity"),
                                  NaraGame::Vec2{0.0f, -2.0f});
+    shape          = ParseShape(obj.GetString("shape", "Point"));
+    shapeRadius    = float(obj.GetNumber("shapeRadius", 1.0));
+    shapeBoxSize   = JsonToVec2(obj.Find("shapeBoxSize"),
+                                 NaraGame::Vec2{1.0f, 1.0f});
+    shapeLineEnd   = JsonToVec2(obj.Find("shapeLineEnd"),
+                                 NaraGame::Vec2{1.0f, 0.0f});
     texture        = AssetGuid::FromString(obj.GetString("texture", ""));
     subSprite      = obj.GetString("subSprite", "");
     animFrames.clear();
