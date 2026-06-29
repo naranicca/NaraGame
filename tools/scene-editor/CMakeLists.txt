@@ -47,6 +47,7 @@ add_executable(scene-editor
     src/project/Project.cpp
     src/scene/AnimatorComponent.cpp
     src/scene/BoxColliderComponent.cpp
+    src/scene/CameraComponent.cpp
     src/scene/CapsuleColliderComponent.cpp
     src/scene/CircleColliderComponent.cpp
     src/audio/Audio.cpp

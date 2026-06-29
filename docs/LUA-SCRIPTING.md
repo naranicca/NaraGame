@@ -72,13 +72,13 @@ argument.
 
 ## API surface
 
-The host registers ten global tables: `animator`, `transform`,
-`sprite`, `rigidbody`, `input`, `time`, `audio`, `particle`,
-`scene`, `math` (extension methods on the stdlib `math`
-table). Every API entry takes the target entity's name as its
-first argument (when applicable). Missing entities and missing
-components are silent no-ops that return a sensible default
-rather than raising errors.
+The host registers eleven global tables: `animator`,
+`transform`, `sprite`, `rigidbody`, `input`, `time`, `audio`,
+`particle`, `camera`, `scene`, `math` (extension methods on
+the stdlib `math` table). Every API entry takes the target
+entity's name as its first argument (when applicable). Missing
+entities and missing components are silent no-ops that return
+a sensible default rather than raising errors.
 
 ### `animator.*`
 
@@ -309,6 +309,39 @@ Steady-state ambience (smoke, dust, fountains): use a non-zero
 `set_emission_rate` only when a runtime event needs to thin
 or thicken the stream.
 
+### `camera.*`
+
+Drives a `CameraComponent` (M9c11) at runtime. The standalone
+runtime resolves the highest-priority enabled `CameraComponent`
+every frame + sets the viewport's centre to that entity's
+Transform position + the viewport zoom to the component's
+`zoom`. Editor mode keeps user pan/zoom; use the inspector's
+"Preview in Viewport" button to peek what a camera would frame.
+
+| Function | Returns | Notes |
+| -------- | ------- | ----- |
+| `camera.set_zoom(entity, zoom)`        | bool | Pixels per world unit. Clamped to >= 0.01. |
+| `camera.get_zoom(entity)`              | num or `nil` | nil when the entity has no CameraComponent. |
+| `camera.set_priority(entity, p)`       | bool | Higher wins; ties break in scene-traversal order. |
+| `camera.get_priority(entity)`          | int or `nil` |
+| `camera.get_active()`                  | str | Name of the highest-priority enabled CameraComponent entity. `""` when none. |
+
+Typical patterns:
+
+- **Player follow**: a camera entity with a `Script` that
+  lerps its Transform toward the player each `OnUpdate`. The
+  standalone viewport picks up the lerped position on the
+  same frame.
+- **Cutscene override**: a parked camera entity at
+  `priority = 10`. Enable it when the cutscene starts;
+  disable it when done -- the player-follow camera at
+  `priority = 0` automatically reclaims the viewport.
+- **Zoom punch**: `camera.set_zoom("MainCam", 96)` for a hit,
+  lerp back to 64 over half a second on `OnUpdate`.
+- **Screen shake**: drive the camera entity's Transform with
+  a damped random offset in `OnUpdate`; the viewport tracks
+  every nudge.
+
 ### `scene.*`
 
 Twenty-four entries spanning entity / component / hierarchy /
@@ -344,7 +377,7 @@ strings: `"Transform"`, `"SpriteRenderer"`, `"Tilemap"`,
 `"Animator"`, `"Script"`, `"BoxCollider"`, `"CircleCollider"`,
 `"CapsuleCollider"`, `"PolygonCollider"`, `"EdgeCollider"`,
 `"Rigidbody2D"`, `"AudioSource"`, `"AudioListener"`,
-`"ParticleSystem"`.
+`"ParticleSystem"`, `"Camera"`.
 
 ### Physics components
 
@@ -455,6 +488,12 @@ pairs cost no per-shape math and never fire events.
 | --------- | ---------- | ----- |
 | `AudioSource` | `clip` (Audio GUID), `volume`, `playOnStart`, `loop`, `is3D`, `minDistance`, `maxDistance` | Auto-plays its clip on rising-edge play-mode entry. `loop = true` routes through `play_music` (streaming + loop); `loop = false` uses the SFX cache. `is3D` toggles distance attenuation + stereo pan against the active AudioListener (M8c8). `is3D + loop` is silently ignored -- streaming voices don't update as the entity moves yet |
 | `AudioListener` | -- (marker component) | Attach to the player / camera / follow-target. The runtime takes the listener's Transform position as the reference point for 3D source attenuation + stereo pan. First enabled entity carrying the component wins -- only one active per scene |
+
+### Camera component (M9c11)
+
+| Component | Key fields | Notes |
+| --------- | ---------- | ----- |
+| `Camera` | `zoom`, `priority` | Game-runtime viewpoint. The standalone runtime resolves the highest-priority enabled `Camera` every frame + locks the viewport centre to that entity's Transform position + zoom to `zoom` (pixels per world unit). Editor mode keeps user pan/zoom; an inspector "Preview in Viewport" button snaps the editor camera to match. The editor viewport overlays a yellow CAM-labelled frustum rectangle showing what each camera would render at a 16:9 window; suppressed in standalone. See `camera.*` for script hooks |
 
 ### VFX components (M9c2)
 

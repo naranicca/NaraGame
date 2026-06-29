@@ -20,6 +20,7 @@
 #include "scene/AudioSourceComponent.h"
 #include "scene/CapsuleColliderComponent.h"
 #include "scene/CircleColliderComponent.h"
+#include "scene/CameraComponent.h"
 #include "scene/EdgeColliderComponent.h"
 #include "scene/ParticleSystemComponent.h"
 #include "scene/PolygonColliderComponent.h"
@@ -309,6 +310,23 @@ public:
             TickAudioSources(ImGui::GetIO().DeltaTime);
             TickParticles(ImGui::GetIO().DeltaTime);
             SceneEditor::Audio::UpdateMusic();
+            // M9c11 standalone camera drive. Re-resolve every
+            // frame so a script that moves the camera entity
+            // (or swaps priorities mid-cutscene) is visible
+            // immediately. No camera component? Keep whatever
+            // m_viewCam already holds.
+            if (SceneEditor::Entity* camEnt =
+                    ResolveActiveCameraEntity()) {
+                const auto* tr = camEnt->GetComponent<
+                    SceneEditor::TransformComponent>();
+                const auto* cam = camEnt->GetComponent<
+                    SceneEditor::CameraComponent>();
+                if (tr && cam) {
+                    m_viewCam.center =
+                        ImVec2{tr->position.x, tr->position.y};
+                    m_viewCam.zoom = cam->zoom;
+                }
+            }
             DrawViewportPanel();
             ImGui::Render();
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -7171,8 +7189,63 @@ private:
             DrawRigidbody2DEditor(entity, *rb);
         } else if (auto* ps = dynamic_cast<SceneEditor::ParticleSystemComponent*>(comp)) {
             DrawParticleSystemEditor(entity, *ps);
+        } else if (auto* cm = dynamic_cast<SceneEditor::CameraComponent*>(comp)) {
+            DrawCameraEditor(entity, *cm);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
+        }
+    }
+
+    // M9c11 Camera inspector. Two fields drive everything:
+    // `zoom` (pixels per world unit) + `priority` (higher
+    // wins when multiple cameras coexist). The active-camera
+    // resolver re-runs every standalone frame so changes are
+    // immediate.
+    void DrawCameraEditor(SceneEditor::Entity& /*entity*/,
+                           SceneEditor::CameraComponent& cm) {
+        if (ImGui::DragFloat("Zoom (px/unit)", &cm.zoom,
+                              0.5f, 1.0f, 1024.0f, "%.1f")) {
+            UndoSnapshot();
+            if (cm.zoom < 0.01f) cm.zoom = 0.01f;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Pixels per world unit. Matches the editor's\n"
+                "viewport-camera scale; standalone runs use\n"
+                "this directly. Higher = closer / bigger\n"
+                "objects on screen.");
+        }
+        if (ImGui::DragInt("Priority", &cm.priority,
+                            1.0f, -1024, 1024)) {
+            UndoSnapshot();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "When multiple enabled CameraComponents exist,\n"
+                "the highest priority wins. Ties break in\n"
+                "scene-traversal order. A cutscene camera at\n"
+                "priority 10 grabs the viewport from a\n"
+                "player-follow camera at priority 0 the moment\n"
+                "you enable it.");
+        }
+        // Quick "Frame in viewport" shortcut: snap the editor
+        // camera to this component so the user can preview
+        // what the game will see.
+        if (ImGui::Button("Preview in Viewport")) {
+            if (const auto* tr = m_scene.Get(m_selection)
+                    ? m_scene.Get(m_selection)
+                        ->GetComponent<SceneEditor::TransformComponent>()
+                    : nullptr) {
+                m_viewCam.center = ImVec2{tr->position.x,
+                                           tr->position.y};
+                m_viewCam.zoom   = cm.zoom;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Snap the editor's pan + zoom to match this\n"
+                "camera. Editor-only convenience; standalone\n"
+                "always uses the highest-priority camera live.");
         }
     }
 
@@ -8815,6 +8888,33 @@ private:
                       m_viewCam.center.y - (screenPos.y - centre.y) / m_viewCam.zoom};
     }
 
+    // M9c11 active-camera resolver. Walks the scene + returns
+    // the enabled CameraComponent entity with the highest
+    // `priority`. Ties break in scene-traversal order. Returns
+    // nullptr when no camera component is present + enabled --
+    // the standalone path then falls back to the last known
+    // viewport state, the editor path keeps its user-driven
+    // m_viewCam unchanged.
+    SceneEditor::Entity* ResolveActiveCameraEntity() {
+        std::vector<SceneEditor::EntityId> ids;
+        ids.reserve(64);
+        CollectAllEntities(m_scene.Roots(), ids);
+        SceneEditor::Entity* best     = nullptr;
+        int                  bestPrio = 0;
+        for (SceneEditor::EntityId id : ids) {
+            SceneEditor::Entity* e = m_scene.Get(id);
+            if (!e || !e->enabled) continue;
+            auto* cam = e->GetComponent<
+                SceneEditor::CameraComponent>();
+            if (!cam) continue;
+            if (!best || cam->priority > bestPrio) {
+                best     = e;
+                bestPrio = cam->priority;
+            }
+        }
+        return best;
+    }
+
     // Compose the entity's world-space transform by walking up the
     // parent chain and summing local translations. Rotation + scale are
     // ignored for the marker pass; the goal is to show the user where
@@ -9899,6 +9999,47 @@ private:
                     // the M9c2 AddRectFilled output.
                     dl->AddQuadFilled(pTL, pTR, pBR, pBL, col);
                 }
+            }
+        }
+
+        // M9c11 camera frustum gizmo. Editor-only -- shows the
+        // rectangle the active CameraComponent would render
+        // to a 16:9 viewport at its `zoom`. Lets the user size
+        // a camera by eye + spot which entities sit outside the
+        // current shot. Suppressed in standalone (the camera
+        // *is* the view, no need to overlay it on itself).
+        if (!m_standalone) {
+            for (SceneEditor::EntityId id : ids) {
+                const auto* e = m_scene.Get(id);
+                if (!e || !e->enabled) continue;
+                const auto* cm = e->GetComponent<
+                    SceneEditor::CameraComponent>();
+                const auto* tr = e->GetComponent<
+                    SceneEditor::TransformComponent>();
+                if (!cm || !tr || cm->zoom <= 0.0f) continue;
+                // Frustum half-extents (world units) at 16:9
+                // for a 1600x900 window the editor defaults
+                // to. The actual standalone view follows the
+                // window's aspect ratio at run time; the
+                // editor gizmo just gives a representative
+                // size + scales with the camera's zoom.
+                const float halfW = (1600.0f / cm->zoom) * 0.5f;
+                const float halfH = ( 900.0f / cm->zoom) * 0.5f;
+                const ImVec2 tl = WorldToScreen(
+                    ImVec2{tr->position.x - halfW,
+                           tr->position.y + halfH},
+                    panelMin, panelSize);
+                const ImVec2 br = WorldToScreen(
+                    ImVec2{tr->position.x + halfW,
+                           tr->position.y - halfH},
+                    panelMin, panelSize);
+                const ImU32 col = IM_COL32(255, 200, 80, 200);
+                dl->AddRect(tl, br, col, 0.0f, 0, 2.0f);
+                // Small "CAM" label so the user can tell a
+                // camera frustum from an emission-shape box.
+                dl->AddText(
+                    ImVec2{tl.x + 4.0f, tl.y + 2.0f},
+                    col, "CAM");
             }
         }
 

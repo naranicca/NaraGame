@@ -7,6 +7,7 @@
 #include "../scene/BoxColliderComponent.h"
 #include "../scene/CircleColliderComponent.h"
 #include "../scene/Component.h"
+#include "../scene/CameraComponent.h"
 #include "../scene/ParticleSystemComponent.h"
 #include "../scene/Rigidbody2DComponent.h"
 #include "../scene/Entity.h"
@@ -1353,6 +1354,97 @@ static int LuaParticleIsPlaying(lua_State* L) {
     return 1;
 }
 
+// M9c11 camera.* helpers.
+static CameraComponent* FindCamera(ScriptHost* host,
+                                    const char* entityName) {
+    if (!host || !host->BoundScene() || !entityName) return nullptr;
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) return nullptr;
+    return e->GetComponent<CameraComponent>();
+}
+
+// camera.set_zoom(entity, zoom) -> bool. Sets the component's
+// zoom in pixels per world unit. Negative / zero values clamp
+// to 0.01 so a typo doesn't divide-by-zero the projection.
+static int LuaCameraSetZoom(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    const float z    = float(luaL_checknumber(L, 2));
+    CameraComponent* cam = FindCamera(host, name);
+    if (!cam) { lua_pushboolean(L, 0); return 1; }
+    cam->zoom = (z < 0.01f) ? 0.01f : z;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// camera.get_zoom(entity) -> num or nil when entity has no
+// CameraComponent.
+static int LuaCameraGetZoom(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    CameraComponent* cam = FindCamera(host, name);
+    if (!cam) { lua_pushnil(L); return 1; }
+    lua_pushnumber(L, cam->zoom);
+    return 1;
+}
+
+// camera.set_priority(entity, priority) -> bool. Higher wins
+// when multiple cameras coexist; the runtime re-resolves the
+// active camera every frame, so script-driven swaps land
+// immediately.
+static int LuaCameraSetPriority(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    const int   p    = int(luaL_checkinteger(L, 2));
+    CameraComponent* cam = FindCamera(host, name);
+    if (!cam) { lua_pushboolean(L, 0); return 1; }
+    cam->priority = p;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// camera.get_priority(entity) -> int or nil.
+static int LuaCameraGetPriority(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    const char* name = luaL_checkstring(L, 1);
+    CameraComponent* cam = FindCamera(host, name);
+    if (!cam) { lua_pushnil(L); return 1; }
+    lua_pushinteger(L, cam->priority);
+    return 1;
+}
+
+// camera.get_active() -> str entity name (or "" when no
+// CameraComponent is enabled). Walks the scene + picks the
+// highest-priority enabled CameraComponent; ties break in
+// traversal order.
+static int LuaCameraGetActive(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    Scene* scene = host ? host->BoundScene() : nullptr;
+    if (!scene) { lua_pushstring(L, ""); return 1; }
+    Entity*  best     = nullptr;
+    int      bestPrio = 0;
+    auto walk = [&](auto& self,
+                    const std::vector<EntityId>& roots) -> void {
+        std::vector<EntityId> stack(roots.begin(), roots.end());
+        while (!stack.empty()) {
+            EntityId id = stack.back(); stack.pop_back();
+            Entity* e = scene->Get(id);
+            if (!e) continue;
+            for (EntityId childId : e->children) stack.push_back(childId);
+            if (!e->enabled) continue;
+            auto* cam = e->GetComponent<CameraComponent>();
+            if (!cam) continue;
+            if (!best || cam->priority > bestPrio) {
+                best     = e;
+                bestPrio = cam->priority;
+            }
+        }
+    };
+    walk(walk, scene->Roots());
+    lua_pushstring(L, best ? best->name.c_str() : "");
+    return 1;
+}
+
 // scene.overlap_circle(cx, cy, r) -> table of entity names.
 // Same area-query shape as overlap_box but with a virtual
 // circle. Box colliders use the nearest-point-on-box clamp,
@@ -2376,6 +2468,20 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kParticleApi, 1);
     lua_setglobal(L, "particle");
+    // M9c11 camera table. Same upvalue idiom; every binding
+    // resolves the named entity through ScriptHost::BoundScene.
+    static const luaL_Reg kCameraApi[] = {
+        {"set_zoom",     LuaCameraSetZoom},
+        {"get_zoom",     LuaCameraGetZoom},
+        {"set_priority", LuaCameraSetPriority},
+        {"get_priority", LuaCameraGetPriority},
+        {"get_active",   LuaCameraGetActive},
+        {nullptr,        nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kCameraApi, 1);
+    lua_setglobal(L, "camera");
     static const luaL_Reg kSceneApi[] = {
         {"create_entity",     LuaSceneCreateEntity},
         {"destroy_entity",    LuaSceneDestroyEntity},

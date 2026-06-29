@@ -4,6 +4,7 @@
 #include "AudioListenerComponent.h"
 #include "AudioSourceComponent.h"
 #include "BoxColliderComponent.h"
+#include "CameraComponent.h"
 #include "CapsuleColliderComponent.h"
 #include "CircleColliderComponent.h"
 #include "EdgeColliderComponent.h"
@@ -74,6 +75,8 @@ void RegisterBuiltinComponents() {
                [] { return std::make_unique<Rigidbody2DComponent>(); });
     r.Register(ParticleSystemComponent::StaticTypeName(),
                [] { return std::make_unique<ParticleSystemComponent>(); });
+    r.Register(CameraComponent::StaticTypeName(),
+               [] { return std::make_unique<CameraComponent>(); });
 }
 
 } // namespace SceneEditor
