@@ -40,6 +40,17 @@ public:
     float startSpeedMax = 2.5f;
     float startSizeMin  = 0.08f;
     float startSizeMax  = 0.18f;
+    // M9c8 end-of-life size. Sampled per emit independently
+    // of startSize so a particle that spawns at 0.1 can end
+    // at 0.4 (grow) or 0.0 (shrink to nothing). The renderer
+    // lerps `startSize -> endSize` across age/lifetime. The
+    // sentinel default of -1 means "use startSize as endSize"
+    // -- legacy scenes without these fields load that way so
+    // size stays constant through the lifetime the same as
+    // pre-M9c8 behaviour. Inspector + serialize translate the
+    // sentinel; user-visible values are always real sizes.
+    float endSizeMin    = -1.0f;
+    float endSizeMax    = -1.0f;
 
     // Emission direction (degrees, 0 = +X, CCW positive).
     // The default (45 .. 135) shoots upward in a fan; setting
@@ -128,6 +139,11 @@ public:
         float age        = 0.0f;
         float lifetime   = 1.0f;
         float size       = 0.1f;
+        // M9c8 end-of-life size. Sampled once per emit so
+        // the lerp is deterministic across the particle's
+        // life even though the component's endSizeMin/Max can
+        // change underfoot during play-mode tweaking.
+        float endSize    = 0.1f;
         // M9c7. Stored in radians so the draw path's
         // cos/sin doesn't have to convert every frame.
         // `angularVel` is also radians/sec; both are

@@ -55,6 +55,8 @@ void ParticleSystemComponent::Serialize(Value& out) const {
     out.Add("startSpeedMax",  Value::MakeNumber(startSpeedMax));
     out.Add("startSizeMin",   Value::MakeNumber(startSizeMin));
     out.Add("startSizeMax",   Value::MakeNumber(startSizeMax));
+    out.Add("endSizeMin",     Value::MakeNumber(endSizeMin));
+    out.Add("endSizeMax",     Value::MakeNumber(endSizeMax));
     out.Add("dirAngleMinDeg", Value::MakeNumber(dirAngleMinDeg));
     out.Add("dirAngleMaxDeg", Value::MakeNumber(dirAngleMaxDeg));
     out.Add("startRotationMinDeg", Value::MakeNumber(startRotationMinDeg));
@@ -87,6 +89,12 @@ void ParticleSystemComponent::Deserialize(const Value& obj) {
     startSpeedMax  = float(obj.GetNumber("startSpeedMax",   2.5));
     startSizeMin   = float(obj.GetNumber("startSizeMin",    0.08));
     startSizeMax   = float(obj.GetNumber("startSizeMax",    0.18));
+    // M9c8 legacy compat: missing endSize fields fall back to
+    // the sentinel (-1), which the emit path then treats as
+    // "use startSize" -- legacy scenes load with size that
+    // stays constant, exactly as they did pre-M9c8.
+    endSizeMin     = float(obj.GetNumber("endSizeMin", -1.0));
+    endSizeMax     = float(obj.GetNumber("endSizeMax", -1.0));
     dirAngleMinDeg = float(obj.GetNumber("dirAngleMinDeg", 45.0));
     dirAngleMaxDeg = float(obj.GetNumber("dirAngleMaxDeg", 135.0));
     startRotationMinDeg = float(obj.GetNumber("startRotationMinDeg", 0.0));

@@ -2514,6 +2514,22 @@ private:
                                   ps->lifetimeMax));
                     p.size     = frand(ps->_rng,
                         ps->startSizeMin, ps->startSizeMax);
+                    // M9c8 sample end size. The -1 sentinel
+                    // means "no lerp" -- keep size constant
+                    // at the start value across the whole
+                    // lifetime. Otherwise grab a per-particle
+                    // end size from [endSizeMin, endSizeMax]
+                    // so the lerp's destination is stable
+                    // even when the inspector slider moves.
+                    if (ps->endSizeMin < 0.0f ||
+                        ps->endSizeMax < 0.0f) {
+                        p.endSize = p.size;
+                    } else {
+                        p.endSize = frand(ps->_rng,
+                            ps->endSizeMin,
+                            std::max(ps->endSizeMin,
+                                      ps->endSizeMax));
+                    }
                     // M9c7 sample initial rotation + angular
                     // speed in radians. Stored even when
                     // velocityAlign is on so toggling the
@@ -7115,6 +7131,37 @@ private:
             if (sz[1] < sz[0])  sz[1] = sz[0];
             ps.startSizeMin = sz[0]; ps.startSizeMax = sz[1];
         }
+        // M9c8 end-of-life size. The -1 sentinel surfaces as
+        // a "Size over Lifetime" checkbox: unchecked = both
+        // ends sit at -1 (no lerp -> particle stays at its
+        // start size); checked = real values flow into the
+        // DragFloat2 + lerp kicks in. Switching the toggle
+        // off preserves the previous values via -1, so
+        // toggling back on doesn't lose what the user typed.
+        bool sizeLerp = (ps.endSizeMin >= 0.0f);
+        if (ImGui::Checkbox("Size over Lifetime", &sizeLerp)) {
+            UndoSnapshot();
+            if (sizeLerp) {
+                // Default the lerp endpoints to 0 (shrink to
+                // nothing) when the user enables the feature
+                // for the first time -- the most common case.
+                ps.endSizeMin = 0.0f;
+                ps.endSizeMax = 0.0f;
+            } else {
+                ps.endSizeMin = -1.0f;
+                ps.endSizeMax = -1.0f;
+            }
+        }
+        if (sizeLerp) {
+            float ez[2] = { ps.endSizeMin, ps.endSizeMax };
+            if (ImGui::DragFloat2("End Size (min/max)", ez,
+                                   0.01f, 0.0f, 0.0f, "%.3f")) {
+                UndoSnapshot();
+                if (ez[0] < 0.0f) ez[0] = 0.0f;
+                if (ez[1] < ez[0]) ez[1] = ez[0];
+                ps.endSizeMin = ez[0]; ps.endSizeMax = ez[1];
+            }
+        }
         float ang[2] = { ps.dirAngleMinDeg, ps.dirAngleMaxDeg };
         if (ImGui::DragFloat2("Direction (deg, min/max)", ang,
                                1.0f, -360.0f, 720.0f, "%.0f")) {
@@ -9585,7 +9632,13 @@ private:
                 if (clA <= 0.001f) continue;
                 const ImVec2 sc = WorldToScreen(
                     ImVec2{p.pos.x, p.pos.y}, panelMin, panelSize);
-                const float half = p.size * 0.5f * m_viewCam.zoom;
+                // M9c8 size lerp: startSize at age 0, endSize
+                // at age = lifetime. Same `t` the colour lerp
+                // already used, just re-applied to the radius.
+                const float curSize =
+                    p.size + (p.endSize - p.size) * t;
+                const float drawSize = curSize < 0.0f ? 0.0f : curSize;
+                const float half = drawSize * 0.5f * m_viewCam.zoom;
                 const ImU32 col = IM_COL32(
                     int(r * 255.0f),
                     int(g * 255.0f),
