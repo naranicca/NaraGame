@@ -19,10 +19,16 @@
 #include "../asset/Tileset.h"
 #include "../asset/TextureImportSettings.h"
 
+#include <NaraGame/assets/MiniJson.h>
+
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <queue>
+#include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 #if defined(NARAGAME_SCENE_EDITOR_HAS_LUA) && NARAGAME_SCENE_EDITOR_HAS_LUA
 #include <imgui.h>
@@ -1445,6 +1451,243 @@ static int LuaCameraGetActive(lua_State* L) {
     return 1;
 }
 
+// M9c16 Lua <-> MiniJson value bridge. Used by state.save +
+// state.load to serialise the per-game `state` table. Handles
+// nested tables (encoded as objects when keys are strings,
+// arrays when keys are a contiguous 1..N integer range),
+// numbers (float-or-int auto-detect), strings + booleans.
+// Nil values are skipped on encode. Cycles are detected via a
+// visited-set so a misconfigured state graph can't blow the
+// stack.
+static NaraGame::MiniJson::Value LuaToJson(
+        lua_State* L, int idx,
+        std::unordered_set<const void*>& visited) {
+    using NaraGame::MiniJson::Value;
+    const int absIdx = lua_absindex(L, idx);
+    const int t = lua_type(L, absIdx);
+    if (t == LUA_TBOOLEAN) {
+        return Value::MakeBool(lua_toboolean(L, absIdx) != 0);
+    }
+    if (t == LUA_TNUMBER) {
+        return Value::MakeNumber(double(lua_tonumber(L, absIdx)));
+    }
+    if (t == LUA_TSTRING) {
+        size_t n = 0;
+        const char* s = lua_tolstring(L, absIdx, &n);
+        return Value::MakeString(std::string(s, n));
+    }
+    if (t != LUA_TTABLE) {
+        // nil + everything else encode as nothing useful; the
+        // table writer ignores nulls so a userdata field just
+        // drops out of the save.
+        Value v;  // default = Null
+        return v;
+    }
+    const void* ptr = lua_topointer(L, absIdx);
+    if (ptr && !visited.insert(ptr).second) {
+        // Cycle -- write an empty object so the JSON stays
+        // valid.
+        return Value::MakeObject();
+    }
+    // Decide array vs object: scan once for integer keys.
+    bool asArray = true;
+    int  maxIdx  = 0;
+    lua_pushnil(L);
+    while (lua_next(L, absIdx) != 0) {
+        if (lua_type(L, -2) != LUA_TNUMBER) {
+            asArray = false;
+        } else {
+            const lua_Number k = lua_tonumber(L, -2);
+            const int ki = int(k);
+            if (lua_Number(ki) != k || ki < 1) {
+                asArray = false;
+            } else if (ki > maxIdx) {
+                maxIdx = ki;
+            }
+        }
+        lua_pop(L, 1);  // pop value, keep key
+    }
+    if (asArray) {
+        Value arr = Value::MakeArray();
+        for (int i = 1; i <= maxIdx; ++i) {
+            lua_rawgeti(L, absIdx, i);
+            arr.Push(LuaToJson(L, -1, visited));
+            lua_pop(L, 1);
+        }
+        return arr;
+    }
+    Value obj = Value::MakeObject();
+    lua_pushnil(L);
+    while (lua_next(L, absIdx) != 0) {
+        const int kt = lua_type(L, -2);
+        std::string key;
+        if (kt == LUA_TSTRING) {
+            size_t n = 0;
+            const char* s = lua_tolstring(L, -2, &n);
+            key.assign(s, n);
+        } else if (kt == LUA_TNUMBER) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%g",
+                           lua_tonumber(L, -2));
+            key = buf;
+        } else {
+            lua_pop(L, 1);
+            continue;
+        }
+        obj.Add(key, LuaToJson(L, -1, visited));
+        lua_pop(L, 1);
+    }
+    return obj;
+}
+
+static void JsonToLua(lua_State* L,
+                       const NaraGame::MiniJson::Value& v) {
+    using NaraGame::MiniJson::Value;
+    if (v.IsNull())   { lua_pushnil(L); return; }
+    if (v.IsBool())   { lua_pushboolean(L, v.boolValue ? 1 : 0); return; }
+    if (v.IsNumber()) { lua_pushnumber(L, v.numberValue); return; }
+    if (v.IsString()) {
+        lua_pushlstring(L, v.stringValue.data(),
+                         v.stringValue.size());
+        return;
+    }
+    if (v.IsArray()) {
+        lua_createtable(L, int(v.arrayValue.size()), 0);
+        for (size_t i = 0; i < v.arrayValue.size(); ++i) {
+            JsonToLua(L, v.arrayValue[i]);
+            lua_rawseti(L, -2, int(i + 1));
+        }
+        return;
+    }
+    if (v.IsObject()) {
+        lua_createtable(L, 0, 8);
+        // MiniJson stores objects via internal arrays whose
+        // contents we walk here. The header file exposes a
+        // sister field name we can't lean on portably, so we
+        // iterate the public Find-equivalent surface by
+        // collecting keys via the parser's own iteration on
+        // demand. For our save scope, the object writer above
+        // also produced parallel objectKeys / objectValues
+        // vectors, which we read directly below.
+        const auto& keys = v.objectKeys;
+        const auto& vals = v.objectValues;
+        const size_t n = keys.size() < vals.size()
+                          ? keys.size() : vals.size();
+        for (size_t i = 0; i < n; ++i) {
+            lua_pushlstring(L, keys[i].data(), keys[i].size());
+            JsonToLua(L, vals[i]);
+            lua_settable(L, -3);
+        }
+        return;
+    }
+    lua_pushnil(L);
+}
+
+static std::string SaveDir() {
+    return "saves";
+}
+
+static std::string SafeSlot(const char* slot) {
+    if (!slot || !*slot) return "default";
+    std::string s = slot;
+    for (char& c : s) {
+        if (!((c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') ||
+               c == '_' || c == '-')) {
+            c = '_';
+        }
+    }
+    return s;
+}
+
+static std::string SlotPath(const char* slot) {
+    return SaveDir() + "/" + SafeSlot(slot) + ".json";
+}
+
+// state.save(slot?) -> bool. Walks the global `state` table
+// + writes it to saves/<slot>.json. `slot` defaults to
+// "default"; safe-chars only ([A-Za-z0-9_-]), anything else
+// becomes '_' so a script can't escape the saves/ directory.
+static int LuaStateSave(lua_State* L) {
+    const char* slot = lua_gettop(L) >= 1
+        ? luaL_checkstring(L, 1) : "default";
+    lua_getglobal(L, "state");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    std::unordered_set<const void*> visited;
+    NaraGame::MiniJson::Value v = LuaToJson(L, -1, visited);
+    lua_pop(L, 1);
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::create_directories(SaveDir(), ec);
+    std::ofstream out(SlotPath(slot), std::ios::binary);
+    if (!out) { lua_pushboolean(L, 0); return 1; }
+    out << NaraGame::MiniJson::Write(v);
+    lua_pushboolean(L, out.good() ? 1 : 0);
+    return 1;
+}
+
+// state.load(slot?) -> bool. Replaces the global `state`
+// table with the parsed JSON contents. Missing slot file +
+// invalid JSON return false + leave the existing `state`
+// untouched so a corrupted save can't wipe the live session.
+static int LuaStateLoad(lua_State* L) {
+    const char* slot = lua_gettop(L) >= 1
+        ? luaL_checkstring(L, 1) : "default";
+    std::ifstream in(SlotPath(slot), std::ios::binary);
+    if (!in) { lua_pushboolean(L, 0); return 1; }
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const std::string src = ss.str();
+    std::string err;
+    const NaraGame::MiniJson::Value v =
+        NaraGame::MiniJson::Parse(src, &err);
+    if (!err.empty()) {
+        lua_pushboolean(L, 0); return 1;
+    }
+    JsonToLua(L, v);
+    lua_setglobal(L, "state");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// state.clear() -> nil. Resets the global `state` table to
+// empty without touching the on-disk slots.
+static int LuaStateClear(lua_State* L) {
+    lua_newtable(L);
+    lua_setglobal(L, "state");
+    return 0;
+}
+
+// state.exists(slot?) -> bool. Cheap probe so UI code can
+// gate a "Continue" button without trying to parse the file.
+static int LuaStateExists(lua_State* L) {
+    const char* slot = lua_gettop(L) >= 1
+        ? luaL_checkstring(L, 1) : "default";
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    lua_pushboolean(L,
+        fs::exists(SlotPath(slot), ec) ? 1 : 0);
+    return 1;
+}
+
+// state.delete_slot(slot?) -> bool. Removes one slot file
+// from disk. The in-memory `state` table is untouched -- call
+// state.clear separately if the caller wants a fresh start.
+static int LuaStateDeleteSlot(lua_State* L) {
+    const char* slot = lua_gettop(L) >= 1
+        ? luaL_checkstring(L, 1) : "default";
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const bool ok = fs::remove(SlotPath(slot), ec);
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
 // M9c15 scene.load(path_or_guid) -> bool. Queues a scene
 // swap; the host actually executes it at the end of the
 // current frame so the script callback iterating live
@@ -2521,6 +2764,25 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kCameraApi, 1);
     lua_setglobal(L, "camera");
+    // M9c16 game-state save / load. `state` is an empty
+    // plain Lua table the script writes into freely; the
+    // five `savegame.*` functions read + write that table
+    // to saves/<slot>.json on disk. Two namespaces so users
+    // can't accidentally clobber savegame.save by writing
+    // `state.save = my_data`.
+    lua_newtable(L);
+    lua_setglobal(L, "state");
+    static const luaL_Reg kSavegameApi[] = {
+        {"save",         LuaStateSave},
+        {"load",         LuaStateLoad},
+        {"clear",        LuaStateClear},
+        {"exists",       LuaStateExists},
+        {"delete_slot",  LuaStateDeleteSlot},
+        {nullptr,        nullptr},
+    };
+    lua_newtable(L);
+    luaL_setfuncs(L, kSavegameApi, 0);
+    lua_setglobal(L, "savegame");
     static const luaL_Reg kSceneApi[] = {
         {"create_entity",     LuaSceneCreateEntity},
         {"destroy_entity",    LuaSceneDestroyEntity},
