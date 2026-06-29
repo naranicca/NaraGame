@@ -175,6 +175,41 @@ ActionBindings() {
     return map;
 }
 
+// M10c1 read-side helper so ScriptHost members (which live in
+// the surrounding namespace) can reach the per-process binding
+// table without re-declaring it. The function-local static
+// pattern is the same as ActionBindings() right above.
+const std::unordered_map<std::string, std::string>&
+ActionBindingsConst() {
+    return ActionBindings();
+}
+
+// M10c1 settings.* table. A pure visibility flag that flips
+// ScriptHost::m_settingsVisible; EditorApp polls IsSettingsVisible()
+// each frame + renders the overlay (audio sliders + key rebind) on
+// top of the editor / standalone viewport. The settings UI itself
+// lives entirely on the C++ side so a script doesn't need to draw
+// ImGui itself to expose a settings menu -- it just calls
+// `settings.show()` (typically on an ESC key handler) + the bound
+// audio + action tables show up.
+static int LuaSettingsShow(lua_State* L) {
+    if (ScriptHost* host = HostFromUpvalue(L)) host->SetSettingsVisible(true);
+    return 0;
+}
+static int LuaSettingsHide(lua_State* L) {
+    if (ScriptHost* host = HostFromUpvalue(L)) host->SetSettingsVisible(false);
+    return 0;
+}
+static int LuaSettingsToggle(lua_State* L) {
+    if (ScriptHost* host = HostFromUpvalue(L)) host->ToggleSettingsVisible();
+    return 0;
+}
+static int LuaSettingsIsVisible(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    lua_pushboolean(L, host && host->IsSettingsVisible());
+    return 1;
+}
+
 // input.bind(action, key) -> nil. Stores the action -> key
 // mapping; replaces any previous binding for `action`.
 // Subsequent input.is_action_* calls dispatch through here.
@@ -2866,6 +2901,22 @@ ScriptHost::ScriptHost() {
     lua_newtable(L);
     luaL_setfuncs(L, kSavegameApi, 0);
     lua_setglobal(L, "savegame");
+    // M10c1 settings overlay. Pure visibility flag -- the panel
+    // itself is rendered by EditorApp::DrawSettingsPanel() which
+    // polls ScriptHost::IsSettingsVisible() each frame in both
+    // editor + standalone modes. The closure carries `this` so
+    // every callback can flip the host's flag without a global.
+    static const luaL_Reg kSettingsApi[] = {
+        {"show",       LuaSettingsShow},
+        {"hide",       LuaSettingsHide},
+        {"toggle",     LuaSettingsToggle},
+        {"is_visible", LuaSettingsIsVisible},
+        {nullptr,      nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kSettingsApi, 1);
+    lua_setglobal(L, "settings");
     static const luaL_Reg kSceneApi[] = {
         {"create_entity",     LuaSceneCreateEntity},
         {"destroy_entity",    LuaSceneDestroyEntity},
@@ -3294,6 +3345,36 @@ void ScriptHost::OnAnimationEvent(
     m_dispatchEntity.clear();
 }
 
+// M10c1 settings overlay action binding accessors. The underlying
+// table lives in the anonymous helper above (ActionBindings()); these
+// members are the public-API view EditorApp uses to render the
+// in-game rebind UI. SetActionBinding is wired through the same map
+// Lua's `input.bind` writes to, so editor + script edits unify.
+void ScriptHost::SetActionBinding(const std::string& action,
+                                  const std::string& key) {
+    if (action.empty() || key.empty()) return;
+    ActionBindings()[action] = key;
+}
+
+std::string ScriptHost::ActionBinding(const std::string& action) const {
+    const auto& map = ActionBindingsConst();
+    auto it = map.find(action);
+    return it == map.end() ? std::string{} : it->second;
+}
+
+std::vector<std::pair<std::string, std::string>>
+ScriptHost::AllActionBindings() const {
+    std::vector<std::pair<std::string, std::string>> out;
+    const auto& map = ActionBindingsConst();
+    out.reserve(map.size());
+    for (const auto& kv : map) out.emplace_back(kv.first, kv.second);
+    std::sort(out.begin(), out.end(),
+              [](const auto& a, const auto& b) {
+                  return a.first < b.first;
+              });
+    return out;
+}
+
 #else
 // -----------------------------------------------------------------
 // Stub fallback (M6c1). Used when third_party/lua isn't vendored.
@@ -3385,6 +3466,22 @@ void ScriptHost::OnAnimationEvent(
                       event.name.c_str());
     }
     AppendLine(buf);
+}
+
+// M10c1 stub fallbacks. Without Lua there are no script-side bindings
+// to wrap, but EditorApp still queries these so the settings overlay
+// renders an empty (but functional) rebind list when the user vendored
+// without Lua.
+void ScriptHost::SetActionBinding(const std::string&,
+                                  const std::string&) { /* stub no-op */ }
+
+std::string ScriptHost::ActionBinding(const std::string&) const {
+    return std::string{};
+}
+
+std::vector<std::pair<std::string, std::string>>
+ScriptHost::AllActionBindings() const {
+    return {};
 }
 
 #endif

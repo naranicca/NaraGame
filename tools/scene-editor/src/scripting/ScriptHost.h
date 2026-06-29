@@ -3,6 +3,7 @@
 #include "../asset/Animation.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace SceneEditor {
@@ -182,6 +183,27 @@ private:
     // dispatcher sets this to its target entity name before the
     // lua_pcall + clears it on return.
     std::string m_dispatchEntity;
+
+    // M10c1 settings panel visibility flag. EditorApp draws the
+    // in-game settings overlay (audio sliders + key rebind UI)
+    // whenever this is true; Lua's `settings.*` table flips it.
+    bool m_settingsVisible = false;
+
+public:
+    // M10c1 settings panel visibility -- shared flag between Lua's
+    // `settings.show/hide/toggle/is_visible` + EditorApp's overlay
+    // renderer. Polling-based; the renderer reads this every frame.
+    void SetSettingsVisible(bool v)    { m_settingsVisible = v; }
+    bool IsSettingsVisible() const     { return m_settingsVisible; }
+    void ToggleSettingsVisible()       { m_settingsVisible = !m_settingsVisible; }
+
+    // M10c1 action binding accessors so the settings overlay can list
+    // every bound action (input rebind UI). These wrap the same per-
+    // process table Lua's `input.bind` writes to, so a UI-side rebind
+    // and a script-side bind end up in the same map.
+    void SetActionBinding(const std::string& action, const std::string& key);
+    std::string ActionBinding(const std::string& action) const;
+    std::vector<std::pair<std::string, std::string>> AllActionBindings() const;
 };
 
 } // namespace SceneEditor

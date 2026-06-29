@@ -330,6 +330,7 @@ public:
                 }
             }
             DrawViewportPanel();
+            DrawSettingsPanel();
             ImGui::Render();
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             return;
@@ -370,6 +371,7 @@ public:
         DrawSortingLayersModal();
         DrawCollisionMatrixModal();
         DrawAudioMixerModal();
+        DrawSettingsPanel();
         DrawSpriteEditorWindow();
         DrawTilesetEditorWindow();
         DrawAutotileEditorWindow();
@@ -7065,6 +7067,206 @@ private:
         ImGui::EndPopup();
     }
 
+    // M10c1 in-game settings overlay. Renders in BOTH editor and
+    // standalone modes -- a Lua script that calls settings.show()
+    // (typical pattern: bind to ESC) gets the same panel either way.
+    // Two sections: audio bus sliders (re-using the Audio mixer
+    // wiring) + an input rebind list driven by ScriptHost's action
+    // binding map. The window is a plain ImGui::Begin (not a popup)
+    // so it stacks cleanly on top of the standalone borderless
+    // viewport where modal popup state would fight the lack of a
+    // host dockspace.
+    void DrawSettingsPanel() {
+        if (!m_scriptHost.IsSettingsVisible()) {
+            // Drop a stale rebind capture when the panel hides --
+            // otherwise the next show would pick up an old action.
+            m_settingsRebindAction.clear();
+            return;
+        }
+
+        ImGuiIO& io = ImGui::GetIO();
+        const float w = std::min(540.0f, io.DisplaySize.x * 0.7f);
+        const float h = std::min(480.0f, io.DisplaySize.y * 0.8f);
+        ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(
+            ImVec2((io.DisplaySize.x - w) * 0.5f,
+                   (io.DisplaySize.y - h) * 0.5f),
+            ImGuiCond_FirstUseEver);
+
+        bool open = true;
+        if (!ImGui::Begin("Settings##m10c1", &open,
+                          ImGuiWindowFlags_NoCollapse)) {
+            ImGui::End();
+            if (!open) m_scriptHost.SetSettingsVisible(false);
+            return;
+        }
+        if (!open) {
+            m_scriptHost.SetSettingsVisible(false);
+            ImGui::End();
+            return;
+        }
+
+        // --- Audio section ---------------------------------------
+        if (ImGui::CollapsingHeader("Audio",
+                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+            struct Row {
+                const char* label;
+                float       value;
+                int         kind; // 0=master, 1=sfx, 2=music, 3=reverb
+            };
+            Row rows[4] = {
+                {"Master",      m_project.AudioMasterVolume(), 0},
+                {"SFX",         m_project.AudioSfxVolume(),    1},
+                {"Music",       m_project.AudioMusicVolume(),  2},
+                {"Reverb (Wet)",m_project.AudioReverbWet(),    3},
+            };
+            bool changed = false;
+            for (Row& r : rows) {
+                ImGui::PushID(r.label);
+                ImGui::SetNextItemWidth(220.0f);
+                if (ImGui::SliderFloat(r.label, &r.value,
+                                       0.0f, 1.0f, "%.2f")) {
+                    switch (r.kind) {
+                    case 0:
+                        SceneEditor::Audio::SetBusVolume(
+                            SceneEditor::Audio::Bus::Master, r.value);
+                        m_project.SetAudioMasterVolume(r.value);
+                        break;
+                    case 1:
+                        SceneEditor::Audio::SetBusVolume(
+                            SceneEditor::Audio::Bus::Sfx, r.value);
+                        m_project.SetAudioSfxVolume(r.value);
+                        break;
+                    case 2:
+                        SceneEditor::Audio::SetBusVolume(
+                            SceneEditor::Audio::Bus::Music, r.value);
+                        m_project.SetAudioMusicVolume(r.value);
+                        break;
+                    case 3:
+                        SceneEditor::Audio::SetReverbWet(r.value);
+                        m_project.SetAudioReverbWet(r.value);
+                        break;
+                    }
+                    changed = true;
+                }
+                ImGui::PopID();
+            }
+            // In editor mode we persist into project.json so the
+            // mixer slider matches next time. Standalone uses the
+            // same UI but skips the project write (the runtime
+            // copy of project.json lives next to the .exe and we
+            // don't want surprise file changes in a shipped build).
+            if (changed && !m_standalone) m_project.Save();
+        }
+
+        ImGui::Separator();
+
+        // --- Input rebind section --------------------------------
+        if (ImGui::CollapsingHeader("Input",
+                                    ImGuiTreeNodeFlags_DefaultOpen)) {
+            const auto bindings = m_scriptHost.AllActionBindings();
+            if (bindings.empty()) {
+                ImGui::TextDisabled(
+                    "No actions bound. Call input.bind(action, key)\n"
+                    "from a script before opening this panel.");
+            } else {
+                if (ImGui::BeginTable("##m10c1_bindings", 3,
+                        ImGuiTableFlags_SizingStretchProp |
+                        ImGuiTableFlags_RowBg)) {
+                    ImGui::TableSetupColumn("Action",
+                        ImGuiTableColumnFlags_WidthStretch, 0.50f);
+                    ImGui::TableSetupColumn("Key",
+                        ImGuiTableColumnFlags_WidthStretch, 0.30f);
+                    ImGui::TableSetupColumn("##rebind",
+                        ImGuiTableColumnFlags_WidthStretch, 0.20f);
+                    for (const auto& kv : bindings) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(kv.first.c_str());
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::TextUnformatted(kv.second.c_str());
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::PushID(kv.first.c_str());
+                        const bool capturing =
+                            m_settingsRebindAction == kv.first;
+                        const char* btn = capturing
+                            ? "[press a key]" : "Rebind";
+                        if (ImGui::Button(btn, ImVec2(-FLT_MIN, 0))) {
+                            m_settingsRebindAction =
+                                capturing ? std::string{} : kv.first;
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::EndTable();
+                }
+            }
+            if (!m_settingsRebindAction.empty()) {
+                if (const char* captured = CaptureRebindKey()) {
+                    m_scriptHost.SetActionBinding(
+                        m_settingsRebindAction, captured);
+                    m_settingsRebindAction.clear();
+                }
+            }
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("Close", ImVec2(120, 0))) {
+            m_scriptHost.SetSettingsVisible(false);
+        }
+        ImGui::End();
+    }
+
+    // Captures the first non-modifier key currently pressed and
+    // maps it back to the string spellings ScriptHost::ActionKey
+    // understands (single letter A-Z / 0-9, named keys like Space
+    // / Enter / Up). Returns nullptr when nothing usable is down,
+    // so the caller polls each frame until something lands.
+    const char* CaptureRebindKey() {
+        struct Entry { ImGuiKey key; const char* name; };
+        static const Entry kTable[] = {
+            {ImGuiKey_Space,     "Space"},
+            {ImGuiKey_Enter,     "Enter"},
+            {ImGuiKey_Escape,    "Escape"},
+            {ImGuiKey_Tab,       "Tab"},
+            {ImGuiKey_Backspace, "Backspace"},
+            {ImGuiKey_Delete,    "Delete"},
+            {ImGuiKey_Home,      "Home"},
+            {ImGuiKey_End,       "End"},
+            {ImGuiKey_PageUp,    "PageUp"},
+            {ImGuiKey_PageDown,  "PageDown"},
+            {ImGuiKey_UpArrow,   "Up"},
+            {ImGuiKey_DownArrow, "Down"},
+            {ImGuiKey_LeftArrow, "Left"},
+            {ImGuiKey_RightArrow,"Right"},
+            {ImGuiKey_LeftShift, "LeftShift"},
+            {ImGuiKey_RightShift,"RightShift"},
+            {ImGuiKey_LeftCtrl,  "LeftCtrl"},
+            {ImGuiKey_RightCtrl, "RightCtrl"},
+            {ImGuiKey_LeftAlt,   "LeftAlt"},
+            {ImGuiKey_RightAlt,  "RightAlt"},
+        };
+        // Single A-Z and 0-9 are emitted as static character buffers
+        // so the caller (which copies into std::string) doesn't have
+        // to manage the lifetime.
+        static thread_local char single[2] = {0, 0};
+        for (int i = 0; i < 26; ++i) {
+            if (ImGui::IsKeyPressed(ImGuiKey(ImGuiKey_A + i), false)) {
+                single[0] = char('A' + i);
+                return single;
+            }
+        }
+        for (int i = 0; i < 10; ++i) {
+            if (ImGui::IsKeyPressed(ImGuiKey(ImGuiKey_0 + i), false)) {
+                single[0] = char('0' + i);
+                return single;
+            }
+        }
+        for (const Entry& e : kTable) {
+            if (ImGui::IsKeyPressed(e.key, false)) return e.name;
+        }
+        return nullptr;
+    }
+
     void DrawNewProjectModal() {
         if (m_openNewProjectModal) {
             ImGui::OpenPopup("New Project");
@@ -11695,6 +11897,11 @@ private:
     bool                m_openLayersModal = false;
     bool                m_openCollisionMatrixModal = false;
     bool                m_openAudioMixerModal = false;
+    // M10c1 settings overlay rebind capture. Empty when no rebind
+    // is in progress; set to the action name when the user clicks
+    // "Rebind" + cleared on the next key press (which writes the
+    // captured key into ScriptHost's action binding map).
+    std::string         m_settingsRebindAction;
     // Sprite Editor state. m_spriteEditorOpen drives the window's
     // visibility; activating it via OpenSpriteEditor pre-focuses the
     // window so a stale floating instance doesn't get lost behind a
