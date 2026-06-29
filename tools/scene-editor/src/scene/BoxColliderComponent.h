@@ -12,10 +12,15 @@ namespace SceneEditor {
 // extents (full width / height, not half-extents) centred on
 // the owning Transform's position plus `offset`.
 //
-// `isTrigger` defaults true so M7c1 ships an "overlap only,
-// no physics response" surface -- scripts react via the
-// OnTriggerEnter / OnTriggerExit Lua hooks. A future commit
-// can add solid collisions on top of the same data model.
+// `isTrigger` defaults true so a freshly-dropped BoxCollider
+// fires OnTriggerEnter / Exit without pushing entities around
+// -- the most common case for level-design probes. Set it to
+// false (in the inspector or via deserialisation) to get the
+// M7c10 solid response: MTV push-out split by inverse mass +
+// bounce by combined restitution + tangent damping by combined
+// friction. Without a Rigidbody2D the entity is treated as
+// infinite-mass / static, so the moving side absorbs the full
+// push.
 class BoxColliderComponent final : public Component {
 public:
     NaraGame::Vec2 size   { 1.0f, 1.0f };

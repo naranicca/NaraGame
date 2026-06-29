@@ -33,9 +33,12 @@ enum class ParticleEmissionShape {
 // M9c2 2D particle emitter. Entity-attached system that spawns
 // short-lived particles each frame at the entity's Transform
 // position, integrates them under gravity, and renders each
-// as an axis-aligned coloured quad in the viewport's draw
-// list. Designed for fire / smoke / dust / muzzle-flash bursts;
-// textured particles + custom sub-sprites are future-work.
+// as a coloured / textured quad in the viewport's draw list.
+// Designed for fire / smoke / dust / muzzle-flash bursts.
+// M9c4 added textured particles; M9c5 sub-sprite support;
+// M9c6 per-particle frame animation; M9c7 rotation +
+// velocity-align; M9c8 size-over-lifetime; M9c9 burst
+// events; M9c10 emission shapes.
 //
 // Per-axis "min/max" ranges (lifetime, speed, size) sample a
 // uniform random value per emit so a single set of fields can

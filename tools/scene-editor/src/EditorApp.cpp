@@ -8385,8 +8385,9 @@ private:
 
     // BoxCollider inspector. size + offset are DragFloat2s in
     // world units; isTrigger flips between "overlap-only event
-    // surface" (the M7c1 default) and "future solid response"
-    // (not yet wired into the runtime).
+    // surface" (M7c1 default) and the M7c10 solid response
+    // (MTV push-out + restitution + friction routed through
+    // the companion Rigidbody2D when present).
     void DrawBoxColliderEditor(SceneEditor::Entity& /*entity*/,
                                SceneEditor::BoxColliderComponent& bc) {
         float sz[2] = { bc.size.x, bc.size.y };
@@ -8409,8 +8410,11 @@ private:
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
                 "When set, overlap fires OnTriggerEnter / Exit\n"
-                "without a physical response. Solid collisions\n"
-                "(non-trigger) ship in a follow-up commit.");
+                "without a physical response. When unset, the\n"
+                "M7c10 solid response runs: MTV push-out split\n"
+                "by inverse mass + bounce by combined\n"
+                "restitution + tangent damping by combined\n"
+                "friction (via the companion Rigidbody2D).");
         }
         DrawColliderLayerCombo(bc.layer);
     }
