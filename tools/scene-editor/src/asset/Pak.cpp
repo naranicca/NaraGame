@@ -8,6 +8,10 @@
 #include <filesystem>
 #include <fstream>
 
+#if defined(NARAGAME_HAS_MINIZ) && NARAGAME_HAS_MINIZ
+#include "miniz.h"
+#endif
+
 namespace SceneEditor {
 
 namespace fs = std::filesystem;
@@ -15,7 +19,39 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr char     kMagic[4] = { 'N', 'P', 'A', 'K' };
-constexpr uint32_t kVersion  = 1;
+// M9c14 bumped to 2: TOC entries grew a compressedSize +
+// flags byte so each blob can be either stored (flags=0) or
+// deflated (flags=1). Readers must check the version + reject
+// older paks rather than mis-parse them.
+constexpr uint32_t kVersion  = 2;
+
+constexpr uint8_t  kFlagStored   = 0;
+constexpr uint8_t  kFlagDeflated = 1;
+
+// Files below this size + extensions that are already
+// compressed get stored as-is. Skipping tiny entries removes
+// the ~5 byte deflate header overhead; skipping pre-compressed
+// formats avoids paying CPU for negligible (often negative)
+// gains.
+constexpr uint32_t kCompressMinBytes = 256;
+bool ExtensionAlreadyCompressed(const std::string& path) {
+    auto endsWith = [&](const char* suffix) {
+        const size_t n = std::strlen(suffix);
+        if (path.size() < n) return false;
+        for (size_t i = 0; i < n; ++i) {
+            char a = path[path.size() - n + i];
+            char b = suffix[i];
+            if (a >= 'A' && a <= 'Z') a = char(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = char(b - 'A' + 'a');
+            if (a != b) return false;
+        }
+        return true;
+    };
+    return endsWith(".png") || endsWith(".jpg") ||
+           endsWith(".jpeg") || endsWith(".ogg") ||
+           endsWith(".mp3") || endsWith(".wav") ||
+           endsWith(".pak");
+}
 
 void Write32(std::vector<uint8_t>& buf, uint32_t v) {
     buf.push_back(uint8_t( v        & 0xFF));
@@ -63,14 +99,20 @@ bool WritePak(const std::string& outPath,
         return false;
     }
 
-    // First pass: collect every file under assetsRoot + record
-    // its relative path + size. We need the offset of each
-    // file in the data section, so size has to be known before
-    // the TOC is written.
+    // M9c14: load every source file in full + (optionally)
+    // compress so the TOC knows each blob's compressed size
+    // before the header is written. This forces O(total
+    // Assets) RAM during pack, but a typical 2D project's
+    // Assets/ is well under 1 GB. Stream-compressing into a
+    // length-then-data layout would lift that cap; future
+    // work.
     struct Entry {
-        std::string relPath;
-        uint32_t    size;
-        uint32_t    offset;  // filled after size pass
+        std::string          relPath;
+        uint32_t             size;            // uncompressed
+        uint32_t             compressedSize;  // == size when stored
+        uint32_t             offset;          // in data section
+        uint8_t              flags;
+        std::vector<uint8_t> blob;            // payload as written
     };
     std::vector<Entry> entries;
     for (const auto& de :
@@ -92,15 +134,61 @@ bool WritePak(const std::string& outPath,
         }
         if (fsize > UINT32_MAX) {
             NARAGAME_ERROR(
-                "WritePak: '%s' exceeds 4 GB cap -- pak v1 uses "
-                "32-bit sizes.",
+                "WritePak: '%s' exceeds 4 GB cap -- pak v2 "
+                "uses 32-bit sizes.",
                 de.path().string().c_str());
             return false;
         }
         Entry e;
-        e.relPath = Normalise(rel);
-        e.size    = uint32_t(fsize);
-        e.offset  = 0;
+        e.relPath        = Normalise(rel);
+        e.size           = uint32_t(fsize);
+        e.compressedSize = e.size;
+        e.offset         = 0;
+        e.flags          = kFlagStored;
+        std::ifstream in(de.path().string(), std::ios::binary);
+        if (!in) {
+            NARAGAME_ERROR("WritePak: cannot read '%s'",
+                           e.relPath.c_str());
+            return false;
+        }
+        e.blob.resize(e.size);
+        if (e.size > 0) {
+            in.read(reinterpret_cast<char*>(&e.blob[0]),
+                    std::streamsize(e.size));
+            if (std::streamsize(in.gcount()) !=
+                std::streamsize(e.size)) {
+                NARAGAME_ERROR(
+                    "WritePak: short read on '%s'",
+                    e.relPath.c_str());
+                return false;
+            }
+        }
+
+        // M9c14 compression decision. Skip tiny entries +
+        // already-compressed extensions; everything else
+        // tries deflate + keeps the result only if it
+        // actually shrunk the payload.
+#if defined(NARAGAME_HAS_MINIZ) && NARAGAME_HAS_MINIZ
+        if (e.size >= kCompressMinBytes &&
+            !ExtensionAlreadyCompressed(e.relPath)) {
+            mz_ulong bound = mz_compressBound(e.size);
+            std::vector<uint8_t> compressed;
+            compressed.resize(size_t(bound));
+            mz_ulong destLen = bound;
+            const int rc = mz_compress2(
+                &compressed[0], &destLen,
+                &e.blob[0], e.size,
+                MZ_DEFAULT_LEVEL);
+            if (rc == MZ_OK &&
+                destLen > 0 &&
+                destLen < e.size) {
+                compressed.resize(size_t(destLen));
+                e.blob           = std::move(compressed);
+                e.compressedSize = uint32_t(destLen);
+                e.flags          = kFlagDeflated;
+            }
+        }
+#endif
         entries.push_back(std::move(e));
     }
 
@@ -109,7 +197,7 @@ bool WritePak(const std::string& outPath,
     uint32_t running = 0;
     for (Entry& e : entries) {
         e.offset = running;
-        running += e.size;
+        running += e.compressedSize;
     }
 
     // Header + TOC into an in-memory buffer first; only when
@@ -133,7 +221,9 @@ bool WritePak(const std::string& outPath,
         headerToc.insert(headerToc.end(),
                           e.relPath.begin(), e.relPath.end());
         Write32(headerToc, e.size);
+        Write32(headerToc, e.compressedSize);
         Write32(headerToc, e.offset);
+        headerToc.push_back(e.flags);
     }
     const uint32_t dataOffset = uint32_t(headerToc.size());
     headerToc[dataOffsetPos + 0] = uint8_t( dataOffset        & 0xFF);
@@ -141,8 +231,6 @@ bool WritePak(const std::string& outPath,
     headerToc[dataOffsetPos + 2] = uint8_t((dataOffset >> 16) & 0xFF);
     headerToc[dataOffsetPos + 3] = uint8_t((dataOffset >> 24) & 0xFF);
 
-    // Stream the result. Open binary write, write the header +
-    // TOC, then re-open each source file + stream its bytes.
     std::ofstream out(outPath, std::ios::binary);
     if (!out) {
         NARAGAME_ERROR("WritePak: cannot open '%s' for write",
@@ -152,27 +240,9 @@ bool WritePak(const std::string& outPath,
     out.write(reinterpret_cast<const char*>(&headerToc[0]),
               std::streamsize(headerToc.size()));
     for (const Entry& e : entries) {
-        std::ifstream in((root / e.relPath).string(),
-                          std::ios::binary);
-        if (!in) {
-            NARAGAME_ERROR("WritePak: cannot read '%s'",
-                           e.relPath.c_str());
-            return false;
-        }
-        constexpr std::streamsize kChunk = 64 * 1024;
-        std::vector<char> chunkBuf;
-        chunkBuf.resize(size_t(kChunk));
-        char* chunkPtr = chunkBuf.empty() ? nullptr : &chunkBuf[0];
-        std::streamsize remaining = std::streamsize(e.size);
-        while (remaining > 0) {
-            const std::streamsize want =
-                (remaining < kChunk) ? remaining : kChunk;
-            in.read(chunkPtr, want);
-            const std::streamsize got = in.gcount();
-            if (got <= 0) break;
-            out.write(chunkPtr, got);
-            remaining -= got;
-        }
+        if (e.compressedSize == 0) continue;
+        out.write(reinterpret_cast<const char*>(&e.blob[0]),
+                  std::streamsize(e.compressedSize));
     }
     return out.good();
 }
@@ -218,7 +288,9 @@ bool ExtractPak(const std::string& pakPath,
     struct TocEntry {
         std::string path;
         uint32_t    size;
+        uint32_t    compressedSize;
         uint32_t    offset;
+        uint8_t     flags;
     };
     std::vector<TocEntry> toc;
     toc.reserve(numEntries);
@@ -238,19 +310,23 @@ bool ExtractPak(const std::string& pakPath,
         }
         TocEntry e;
         e.path.assign(pathBytes.begin(), pathBytes.end());
-        if (!Read32(f, e.size) || !Read32(f, e.offset)) {
+        if (!Read32(f, e.size) ||
+            !Read32(f, e.compressedSize) ||
+            !Read32(f, e.offset)) {
             NARAGAME_ERROR("ExtractPak: TOC truncated at entry %u", i);
             return false;
         }
+        uint8_t flagsByte = 0;
+        if (std::fread(&flagsByte, 1, 1, f) != 1) {
+            NARAGAME_ERROR("ExtractPak: TOC truncated at entry %u", i);
+            return false;
+        }
+        e.flags = flagsByte;
         toc.push_back(std::move(e));
     }
 
     std::error_code ec;
     fs::create_directories(destDir, ec);
-    constexpr size_t kChunk = 64 * 1024;
-    std::vector<char> chunkBuf;
-    chunkBuf.resize(kChunk);
-    char* chunkPtr = chunkBuf.empty() ? nullptr : &chunkBuf[0];
     for (const TocEntry& e : toc) {
         const fs::path full = fs::path(destDir) / e.path;
         fs::create_directories(full.parent_path(), ec);
@@ -258,6 +334,55 @@ bool ExtractPak(const std::string& pakPath,
             != 0) {
             NARAGAME_ERROR(
                 "ExtractPak: seek failed for '%s'", e.path.c_str());
+            return false;
+        }
+        std::vector<uint8_t> srcBuf;
+        srcBuf.resize(e.compressedSize);
+        if (e.compressedSize > 0 &&
+            std::fread(&srcBuf[0], 1, e.compressedSize, f) !=
+                e.compressedSize) {
+            NARAGAME_ERROR(
+                "ExtractPak: short read on '%s'",
+                e.path.c_str());
+            return false;
+        }
+        std::vector<uint8_t> outBuf;
+        const uint8_t* writePtr = nullptr;
+        size_t         writeLen = 0;
+        if (e.flags == kFlagStored) {
+            writePtr = srcBuf.empty() ? nullptr : &srcBuf[0];
+            writeLen = srcBuf.size();
+        } else if (e.flags == kFlagDeflated) {
+#if defined(NARAGAME_HAS_MINIZ) && NARAGAME_HAS_MINIZ
+            outBuf.resize(e.size);
+            mz_ulong destLen = e.size;
+            const int rc = mz_uncompress(
+                outBuf.empty() ? nullptr : &outBuf[0], &destLen,
+                srcBuf.empty() ? nullptr : &srcBuf[0],
+                e.compressedSize);
+            if (rc != MZ_OK || destLen != e.size) {
+                NARAGAME_ERROR(
+                    "ExtractPak: inflate failed for '%s' "
+                    "(rc=%d, len=%lu/%u)",
+                    e.path.c_str(), rc,
+                    (unsigned long)destLen, e.size);
+                return false;
+            }
+            writePtr = outBuf.empty() ? nullptr : &outBuf[0];
+            writeLen = outBuf.size();
+#else
+            NARAGAME_ERROR(
+                "ExtractPak: entry '%s' is deflated but this "
+                "build of scene-editor lacks miniz support. "
+                "Re-pack with a stored (uncompressed) writer "
+                "or rebuild with third_party/miniz/.",
+                e.path.c_str());
+            return false;
+#endif
+        } else {
+            NARAGAME_ERROR(
+                "ExtractPak: unknown flags 0x%02X on '%s'",
+                unsigned(e.flags), e.path.c_str());
             return false;
         }
         FILE* of = nullptr;
@@ -272,14 +397,8 @@ bool ExtractPak(const std::string& pakPath,
                 full.string().c_str());
             return false;
         }
-        uint32_t remaining = e.size;
-        while (remaining > 0) {
-            const size_t want = remaining < kChunk
-                                  ? remaining : kChunk;
-            const size_t got = std::fread(chunkPtr, 1, want, f);
-            if (got == 0) break;
-            std::fwrite(chunkPtr, 1, got, of);
-            remaining -= uint32_t(got);
+        if (writeLen > 0 && writePtr) {
+            std::fwrite(writePtr, 1, writeLen, of);
         }
         std::fclose(of);
     }

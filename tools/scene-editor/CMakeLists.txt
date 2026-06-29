@@ -93,6 +93,27 @@ if(EXISTS ${AUDIO_DECODERS_DIR}/minimp3.h
     target_include_directories(scene-editor PRIVATE ${AUDIO_DECODERS_DIR})
     message(STATUS "scene-editor: minimp3 found -- MP3 playback enabled.")
 endif()
+# ---------------------------------------------------------------------------
+# M9c14 miniz (zlib-compatible single-file compressor) for asset paks.
+# Same vendor pattern as the audio decoders: drop miniz.h + miniz.c into
+# third_party/miniz/ and the build flips the NARAGAME_HAS_MINIZ define.
+# Without these files the build still works -- WritePak emits all entries as
+# `stored` (uncompressed). See third_party/miniz/README.md for sources.
+# ---------------------------------------------------------------------------
+set(MINIZ_DIR ${CMAKE_SOURCE_DIR}/third_party/miniz)
+if(EXISTS ${MINIZ_DIR}/miniz.c AND EXISTS ${MINIZ_DIR}/miniz.h)
+    enable_language(C)
+    add_library(miniz STATIC ${MINIZ_DIR}/miniz.c)
+    target_include_directories(miniz PUBLIC ${MINIZ_DIR})
+    set_target_properties(miniz PROPERTIES FOLDER "third_party")
+    if(MSVC)
+        target_compile_definitions(miniz PRIVATE _CRT_SECURE_NO_WARNINGS=1)
+        target_compile_options(miniz PRIVATE /W3)
+    endif()
+    target_compile_definitions(scene-editor PRIVATE NARAGAME_HAS_MINIZ=1)
+    target_link_libraries(scene-editor PRIVATE miniz)
+    message(STATUS "scene-editor: miniz found -- pak compression enabled.")
+endif()
 set_target_properties(scene-editor PROPERTIES FOLDER "tools")
 
 # ---------------------------------------------------------------------------
