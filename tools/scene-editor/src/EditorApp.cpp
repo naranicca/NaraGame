@@ -61,6 +61,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 #include <system_error>
@@ -7623,6 +7624,74 @@ private:
         ImGui::End();
     }
 
+    // M11c5 recursive entity duplication. Mints a fresh entity for
+    // each node in the source subtree, copies every component
+    // through a Serialize -> Deserialize round-trip (the same path
+    // scene save/load uses, so behaviour mirrors what a save +
+    // reload would produce), + recurses into children so a copied
+    // node also carries its descendants.
+    //
+    // Naming: the root copy gets a " (Copy)" suffix to keep the
+    // Hierarchy panel unambiguous; children keep their original
+    // names so a "Wheel" inside "Car (Copy)" reads correctly.
+    SceneEditor::EntityId DuplicateEntityRecursive(
+            SceneEditor::EntityId srcId,
+            SceneEditor::EntityId newParent,
+            bool topLevel = true) {
+        SceneEditor::Entity* src = m_scene.Get(srcId);
+        if (!src) return SceneEditor::kInvalidEntityId;
+        const std::string baseName = topLevel
+            ? src->name + " (Copy)" : src->name;
+        // Snapshot the source's component data + child list before
+        // we touch the scene -- CreateEntity may grow the entity
+        // map, and any later Get() calls on srcId return a fresh
+        // pointer to the same unique_ptr, but we re-fetch to be
+        // safe.
+        std::vector<std::pair<std::string, NaraGame::MiniJson::Value>>
+            compData;
+        compData.reserve(src->components.size());
+        for (const auto& srcC : src->components) {
+            if (!srcC) continue;
+            NaraGame::MiniJson::Value tmp =
+                NaraGame::MiniJson::Value::MakeObject();
+            srcC->Serialize(tmp);
+            compData.emplace_back(srcC->TypeName(), std::move(tmp));
+        }
+        const std::vector<SceneEditor::EntityId> srcChildren = src->children;
+        const bool srcEnabled = src->enabled;
+        const SceneEditor::EntityId copy =
+            m_scene.CreateEntity(baseName, newParent);
+        SceneEditor::Entity* dst = m_scene.Get(copy);
+        if (!dst) return SceneEditor::kInvalidEntityId;
+        dst->enabled = srcEnabled;
+        // Drop the default Transform CreateEntity installed -- the
+        // source's serialised Transform comes in via the loop
+        // below.
+        dst->components.clear();
+        for (auto& [typeName, payload] : compData) {
+            auto fresh =
+                SceneEditor::ComponentRegistry::Get().Create(typeName);
+            if (!fresh) continue;
+            // LuaComponent needs its dynamic typeName re-applied
+            // before Deserialize (the fallback factory used the
+            // typeName but the payload's "type" key is what the
+            // scene loader's outer envelope owns -- here we copy
+            // it onto the fresh instance directly).
+            if (auto* lc =
+                    dynamic_cast<SceneEditor::LuaComponent*>(fresh.get())) {
+                lc->SetTypeName(typeName);
+            }
+            fresh->Deserialize(payload);
+            dst->components.push_back(std::move(fresh));
+        }
+        // Recurse children. Each child becomes a child of the new
+        // copy (not the original parent).
+        for (SceneEditor::EntityId childId : srcChildren) {
+            DuplicateEntityRecursive(childId, copy, /*topLevel*/ false);
+        }
+        return copy;
+    }
+
     void DrawHierarchyNode(SceneEditor::EntityId id) {
         SceneEditor::Entity* e = m_scene.Get(id);
         if (!e) return;
@@ -7657,6 +7726,15 @@ private:
             if (ImGui::MenuItem("Add Child")) {
                 UndoSnapshot();
                 m_scene.CreateEntity("Entity", id);
+                UpdateWindowTitle();
+            }
+            if (ImGui::MenuItem("Duplicate")) {
+                UndoSnapshot();
+                const SceneEditor::EntityId copy =
+                    DuplicateEntityRecursive(id, e->parent);
+                if (copy != SceneEditor::kInvalidEntityId) {
+                    m_selection = copy;
+                }
                 UpdateWindowTitle();
             }
             if (ImGui::MenuItem("Delete")) {
@@ -9212,8 +9290,11 @@ private:
     }
 
     // Asset Inspector: shown when the user clicks a file in the Project
-    // panel and no entity is selected. M2c3 ships the Texture variant;
-    // other asset types fall through to a stub for now.
+    // panel and no entity is selected. Texture / Audio have full
+    // import-settings editors (M2c3 / M8c6); M11c5 adds quick-glance
+    // metadata + "Open in editor" buttons for tileset / autotile /
+    // animation / controller / script / scene + a file-size readout
+    // for unrecognised types so every asset shows something useful.
     void DrawAssetInspector() {
         SceneEditor::AssetEntry* entry =
             m_assetDb.FindByGuidMutable(m_selectedAsset);
@@ -9224,14 +9305,164 @@ private:
         ImGui::Text("Asset:  %s", entry->relPath.c_str());
         ImGui::Text("Type:   %s", entry->typeName.c_str());
         ImGui::TextDisabled("guid %s", entry->guid.ToString().c_str());
+        // On-disk size readout. Cheap + useful for every type --
+        // a quick way to spot the giant texture in the project.
+        {
+            std::error_code ec;
+            const std::string abs =
+                m_assetDb.AssetsRoot() + "/" + entry->relPath;
+            const auto sz = std::filesystem::file_size(abs, ec);
+            if (!ec) {
+                if (sz < 1024) {
+                    ImGui::TextDisabled("Size:   %llu B",
+                        static_cast<unsigned long long>(sz));
+                } else if (sz < 1024 * 1024) {
+                    ImGui::TextDisabled("Size:   %.1f KB",
+                        double(sz) / 1024.0);
+                } else {
+                    ImGui::TextDisabled("Size:   %.2f MB",
+                        double(sz) / (1024.0 * 1024.0));
+                }
+            }
+        }
         ImGui::Separator();
         if (entry->typeName == "Texture") {
             DrawTextureImportEditor(*entry);
         } else if (entry->typeName == "Audio") {
             DrawAudioImportEditor(*entry);
+        } else if (entry->typeName == "Tileset") {
+            DrawTilesetAssetInspector(*entry);
+        } else if (entry->typeName == "Autotile") {
+            DrawAutotileAssetInspector(*entry);
+        } else if (entry->typeName == "Animation") {
+            DrawAnimationAssetInspector(*entry);
+        } else if (entry->typeName == "AnimatorController") {
+            DrawControllerAssetInspector(*entry);
+        } else if (entry->typeName == "Script") {
+            DrawScriptAssetInspector(*entry);
+        } else if (entry->typeName == "Scene") {
+            DrawSceneAssetInspector(*entry);
         } else {
-            ImGui::TextDisabled("(no import settings editor for %s yet)",
+            ImGui::TextDisabled("(no inspector for %s yet)",
                                 entry->typeName.c_str());
+        }
+    }
+
+    // M11c5 lightweight per-type asset inspectors. Each one shows a
+    // few headline stats + an "Open in <X> Editor" button that
+    // routes through the existing open-* helpers. The dedicated
+    // editor windows are still the place to actually edit; this is
+    // a quick-glance view + an explicit way to jump in.
+    void DrawTilesetAssetInspector(SceneEditor::AssetEntry& entry) {
+        if (auto* ts = m_assetDb.GetTileset(entry.guid)) {
+            ImGui::Text("Cell:   %d x %d px",
+                ts->cellPixelW, ts->cellPixelH);
+            ImGui::Text("Tiles:  %zu defined", ts->tiles.size());
+            ImGui::TextDisabled("Source texture: %s",
+                ts->texture.IsValid()
+                    ? ts->texture.ToString().c_str() : "(unset)");
+        } else {
+            ImGui::TextDisabled("(failed to load tileset)");
+        }
+        if (ImGui::Button("Open in Tileset Editor")) {
+            OpenTilesetEditor(entry.guid);
+        }
+    }
+
+    void DrawAutotileAssetInspector(SceneEditor::AssetEntry& entry) {
+        if (auto* at = m_assetDb.GetAutotile(entry.guid)) {
+            ImGui::Text("Mode:  %s",
+                at->mode == SceneEditor::AutotileAsset::Mode::Cardinal
+                    ? "Cardinal (4-bit)" : "Blob (8-bit)");
+            ImGui::Text("Cell:  %d x %d px",
+                at->cellPixelW, at->cellPixelH);
+            ImGui::Text("Tiles: %zu unique", at->tileSet.size());
+            ImGui::TextDisabled("Source texture: %s",
+                at->texture.IsValid()
+                    ? at->texture.ToString().c_str() : "(unset)");
+        } else {
+            ImGui::TextDisabled("(failed to load autotile)");
+        }
+        if (ImGui::Button("Open in Autotile Editor")) {
+            OpenAutotileEditor(entry.guid);
+        }
+    }
+
+    void DrawAnimationAssetInspector(SceneEditor::AssetEntry& entry) {
+        if (auto* an = m_assetDb.GetAnimation(entry.guid)) {
+            ImGui::Text("Frames: %zu", an->frames.size());
+            ImGui::Text("Loop:   %s", an->loop ? "yes" : "no");
+            ImGui::Text("Events: %zu", an->events.size());
+            ImGui::TextDisabled("Total: %.2f s",
+                double(an->TotalDuration()));
+            if (!an->texture.IsValid()) {
+                ImGui::TextDisabled("(no source texture set)");
+            }
+        } else {
+            ImGui::TextDisabled("(failed to load animation)");
+        }
+        if (ImGui::Button("Open in Animation Editor")) {
+            OpenAnimationEditor(entry.guid);
+        }
+    }
+
+    void DrawControllerAssetInspector(SceneEditor::AssetEntry& entry) {
+        if (auto* ctrl = m_assetDb.GetAnimatorController(entry.guid)) {
+            ImGui::Text("States:      %zu", ctrl->states.size());
+            ImGui::Text("Transitions: %zu", ctrl->transitions.size());
+            ImGui::Text("Parameters:  %zu", ctrl->parameters.size());
+            if (ctrl->defaultState >= 0 &&
+                size_t(ctrl->defaultState) < ctrl->states.size()) {
+                ImGui::TextDisabled("Default state: %s",
+                    ctrl->states[size_t(ctrl->defaultState)]
+                        .name.c_str());
+            }
+        } else {
+            ImGui::TextDisabled("(failed to load controller)");
+        }
+        if (ImGui::Button("Open in Controller Editor")) {
+            OpenControllerEditor(entry.guid);
+        }
+    }
+
+    void DrawScriptAssetInspector(SceneEditor::AssetEntry& entry) {
+        // No deep parse -- the script editor handles that. We do
+        // show the first non-blank line so the inspector hints at
+        // the script's purpose without round-tripping into the
+        // editor window.
+        const std::string abs =
+            m_assetDb.AssetsRoot() + "/" + entry.relPath;
+        std::ifstream in(abs);
+        std::string firstLine;
+        while (in && firstLine.empty()) {
+            if (!std::getline(in, firstLine)) break;
+            // Trim leading whitespace.
+            size_t i = 0;
+            while (i < firstLine.size() &&
+                   (firstLine[i] == ' ' || firstLine[i] == '\t')) ++i;
+            firstLine.erase(0, i);
+        }
+        if (firstLine.empty()) firstLine = "(empty)";
+        ImGui::TextWrapped("First line: %s", firstLine.c_str());
+        if (ImGui::Button("Open in Script Editor")) {
+            OpenScriptEditor(abs, entry.relPath);
+        }
+    }
+
+    void DrawSceneAssetInspector(SceneEditor::AssetEntry& entry) {
+        ImGui::TextDisabled(
+            "Scene files open via File > Open Scene...");
+        if (ImGui::Button("Load this scene")) {
+            // Same path the menu uses; warns if dirty, etc.
+            const std::string abs =
+                m_assetDb.AssetsRoot() + "/" + entry.relPath;
+            NotifyAllScriptsForDestroy();
+            if (m_scene.Load(abs)) {
+                m_currentScenePath = abs;
+                m_selection = SceneEditor::kInvalidEntityId;
+                UndoClear();
+                UpdateWindowTitle();
+            }
         }
     }
 
