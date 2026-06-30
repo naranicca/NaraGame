@@ -2254,6 +2254,18 @@ private:
         m_assetWatchAccum += dt;
         if (m_assetWatchAccum < kAssetWatchInterval) return;
         m_assetWatchAccum = 0.0f;
+        // M11c4 structural-change check. If the on-disk file count
+        // changed since the last poll, run a Rescan first -- the
+        // per-entry mtime loop below only sees files already in
+        // m_assetDb.Entries(), so a newly-dropped texture would
+        // otherwise stay invisible until the user clicks Refresh.
+        const size_t diskCount = m_assetDb.CountAssetFilesOnDisk();
+        if (diskCount != m_assetWatchLastCount) {
+            m_assetWatchLastCount = diskCount;
+            m_assetDb.Rescan();
+            m_scriptHost.AppendLine(
+                "[watcher] Assets/ structural change -> rescan");
+        }
         for (const SceneEditor::AssetEntry& a : m_assetDb.Entries()) {
             if (!IsHotReloadableType(a.typeName)) continue;
             const std::string abs =
@@ -3320,6 +3332,7 @@ private:
         m_project.Close();
         m_assetDb.Close();
         m_assetMTimes.clear();
+        m_assetWatchLastCount = 0;
         m_scene = SceneEditor::Scene();
         m_currentScenePath.clear();
         m_selection = SceneEditor::kInvalidEntityId;
@@ -12519,6 +12532,11 @@ private:
     // mtime bookkeeping so the cache stays bounded.
     float                    m_assetWatchAccum   = 0.0f;
     static constexpr float   kAssetWatchInterval = 1.0f;
+    // M11c4 structural-change watcher. The on-disk file count from
+    // the last poll. A mismatch on the next poll triggers a Rescan
+    // so freshly-dropped files become visible in the Project panel
+    // + inspector list without a manual refresh.
+    size_t                   m_assetWatchLastCount = 0;
     std::unordered_map<std::string, std::filesystem::file_time_type>
                              m_assetMTimes;
 

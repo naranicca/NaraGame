@@ -86,6 +86,25 @@ void AssetDatabase::Close() {
     m_controllerCache.clear();
 }
 
+// M11c4 cheap file-count helper. Walks Assets/ recursively + counts
+// non-.meta regular files. The editor watcher polls this every tick
+// and compares against the last value to spot new files / deletions.
+size_t AssetDatabase::CountAssetFilesOnDisk() const {
+    if (m_assetsRoot.empty()) return 0;
+    std::error_code ec;
+    if (!fs::exists(m_assetsRoot, ec)) return 0;
+    size_t n = 0;
+    for (auto it = fs::recursive_directory_iterator(m_assetsRoot, ec);
+         !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string p = ToGeneric(it->path());
+        if (EndsWith(p, kMetaSuffix)) continue;
+        ++n;
+    }
+    return n;
+}
+
 NaraGame::RHITexture* AssetDatabase::GetTexture(NaraGame::RHIDevice& device,
                                                 const AssetGuid& guid) {
     if (!guid.IsValid()) return nullptr;

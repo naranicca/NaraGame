@@ -52,9 +52,20 @@ public:
     void Close();
     bool IsOpen() const { return !m_assetsRoot.empty(); }
 
-    // Re-walk Assets/ and rebuild the tree + lookup tables. Cheap to
-    // call manually; future commits will route this to a file watcher.
+    // Re-walk Assets/ and rebuild the tree + lookup tables. M11c4
+    // also fires this from EditorApp::TickAssetFileWatcher when a
+    // file add / delete is detected (mtime check on the existing
+    // entry list catches modifications; Rescan covers structural
+    // change).
     void Rescan();
+
+    // M11c4 count helper for the watcher. Cheap recursive walk over
+    // Assets/ that just counts non-meta regular files. The editor's
+    // watcher compares this to its previous tick's count to decide
+    // whether a Rescan is needed -- a delta means a file dropped in
+    // or got removed, both of which need the entry table rebuilt
+    // before the next per-entry mtime check runs.
+    size_t CountAssetFilesOnDisk() const;
 
     const std::vector<AssetEntry>& Entries() const { return m_entries; }
     const AssetTreeNode*           RootNode() const { return m_root.get(); }
