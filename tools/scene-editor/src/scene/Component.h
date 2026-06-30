@@ -32,6 +32,14 @@ public:
 class ComponentRegistry {
 public:
     using Factory = std::function<std::unique_ptr<Component>()>;
+    // M11c3 fallback used when Create() can't find a built-in
+    // factory. ScriptHost installs one that mints a LuaComponent
+    // seeded with the component.register defaults so a Lua-side
+    // custom type round-trips through the same code path as the
+    // built-ins. Returns null when the typeName is also unknown
+    // to the fallback (matches the legacy "unknown type" path).
+    using TypedFactory =
+        std::function<std::unique_ptr<Component>(const std::string&)>;
 
     static ComponentRegistry& Get();
 
@@ -40,8 +48,16 @@ public:
     bool Has(const std::string& typeName) const;
     std::vector<std::string> TypeNames() const;
 
+    // M11c3 install / clear the fallback factory. Idempotent; a
+    // subsequent call overwrites the previous fallback. Pass an
+    // empty function to clear.
+    void SetFallback(TypedFactory fallback) {
+        m_fallback = std::move(fallback);
+    }
+
 private:
     std::unordered_map<std::string, Factory> m_factories;
+    TypedFactory                              m_fallback;
 };
 
 void RegisterBuiltinComponents();

@@ -30,8 +30,12 @@ void ComponentRegistry::Register(std::string typeName, Factory factory) {
 
 std::unique_ptr<Component> ComponentRegistry::Create(const std::string& typeName) const {
     auto it = m_factories.find(typeName);
-    if (it == m_factories.end()) return nullptr;
-    return (it->second)();
+    if (it != m_factories.end()) return (it->second)();
+    // M11c3 give a typed fallback (Lua-side custom types) a
+    // chance before reporting "unknown". The fallback returns
+    // null when it doesn't know the typeName either.
+    if (m_fallback) return m_fallback(typeName);
+    return nullptr;
 }
 
 bool ComponentRegistry::Has(const std::string& typeName) const {

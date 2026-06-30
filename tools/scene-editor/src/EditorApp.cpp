@@ -30,6 +30,7 @@
 #include "scene/Rigidbody2DComponent.h"
 #include "scene/Scene.h"
 #include "scene/ScriptComponent.h"
+#include "scene/LuaComponent.h"
 #include "scene/SplashScreenComponent.h"
 #include "scene/SpriteRendererComponent.h"
 #include "scene/TilemapComponent.h"
@@ -7776,8 +7777,77 @@ private:
             DrawCameraEditor(entity, *cm);
         } else if (auto* sp = dynamic_cast<SceneEditor::SplashScreenComponent*>(comp)) {
             DrawSplashScreenEditor(entity, *sp);
+        } else if (auto* lc = dynamic_cast<SceneEditor::LuaComponent*>(comp)) {
+            DrawLuaComponentEditor(entity, *lc);
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
+        }
+    }
+
+    // M11c3 generic inspector for Lua-defined components. Top-level
+    // string / number / bool fields get inline editors; nested
+    // objects + arrays render as JSON-style read-only previews
+    // (scripts mutate those via component.get / component.set, not
+    // the editor). Edits write straight back to the field table,
+    // so the next scene save persists them.
+    void DrawLuaComponentEditor(SceneEditor::Entity& /*entity*/,
+                                 SceneEditor::LuaComponent& lc) {
+        ImGui::TextDisabled("Custom type: %s", lc.Type().c_str());
+        auto& fields = lc.Fields();
+        if (!fields.IsObject() || fields.objectKeys.empty()) {
+            ImGui::TextDisabled("(no fields)");
+            return;
+        }
+        for (size_t i = 0; i < fields.objectKeys.size(); ++i) {
+            const std::string& key = fields.objectKeys[i];
+            NaraGame::MiniJson::Value& v = fields.objectValues[i];
+            ImGui::PushID(int(i));
+            if (v.IsNumber()) {
+                float fv = float(v.numberValue);
+                if (ImGui::DragFloat(key.c_str(), &fv, 0.1f)) {
+                    UndoSnapshot();
+                    v.numberValue = double(fv);
+                    m_scene.MarkDirty();
+                }
+            } else if (v.IsBool()) {
+                bool bv = v.boolValue;
+                if (ImGui::Checkbox(key.c_str(), &bv)) {
+                    UndoSnapshot();
+                    v.boolValue = bv;
+                    m_scene.MarkDirty();
+                }
+            } else if (v.IsString()) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf), "%s",
+                               v.stringValue.c_str());
+                if (ImGui::InputText(key.c_str(), buf, sizeof(buf))) {
+                    UndoSnapshot();
+                    v.stringValue = buf;
+                    m_scene.MarkDirty();
+                }
+            } else {
+                // Object / array / null -- show a compact label so
+                // the user knows the field exists. Editing is
+                // script-side only for these.
+                const char* tag = v.IsObject() ? "{object}"
+                                : v.IsArray()  ? "[array]"
+                                                : "(null)";
+                ImGui::Text("%s = %s", key.c_str(), tag);
+            }
+            ImGui::PopID();
+        }
+        ImGui::Spacing();
+        if (ImGui::SmallButton("Remove##luacomp")) {
+            UndoSnapshot();
+            // Erase by raw pointer comparison like the other inspectors.
+            for (auto it = m_scene.Get(m_selection)->components.begin();
+                 it != m_scene.Get(m_selection)->components.end(); ++it) {
+                if (it->get() == &lc) {
+                    m_scene.Get(m_selection)->components.erase(it);
+                    break;
+                }
+            }
+            m_scene.MarkDirty();
         }
     }
 

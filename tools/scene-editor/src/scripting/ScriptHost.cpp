@@ -8,6 +8,7 @@
 #include "../scene/CircleColliderComponent.h"
 #include "../scene/Component.h"
 #include "../scene/CameraComponent.h"
+#include "../scene/LuaComponent.h"
 #include "../scene/ParticleSystemComponent.h"
 #include "../scene/Rigidbody2DComponent.h"
 #include "../scene/Entity.h"
@@ -182,6 +183,112 @@ ActionBindings() {
 const std::unordered_map<std::string, std::string>&
 ActionBindingsConst() {
     return ActionBindings();
+}
+
+// Forward declarations -- LuaToJson + JsonToLua live further down
+// in this file (next to the savegame implementations) but the
+// component.* bindings need them up here.
+static NaraGame::MiniJson::Value LuaToJson(
+        lua_State* L, int idx,
+        std::unordered_set<const void*>& visited);
+static void JsonToLua(lua_State* L,
+                       const NaraGame::MiniJson::Value& v);
+
+// M11c3 custom-component default-fields table. Lua's
+// component.register(name, defaults) writes the defaults here +
+// the ComponentRegistry fallback installed at ScriptHost init
+// reads them back to seed a fresh LuaComponent. Persistent across
+// scene swaps; cleared only at ScriptHost teardown.
+static std::unordered_map<std::string, NaraGame::MiniJson::Value>&
+CustomComponentDefaults() {
+    static std::unordered_map<std::string, NaraGame::MiniJson::Value> map;
+    return map;
+}
+
+// component.register(name, defaults) -> nil. Registers a custom
+// component type. `defaults` is a Lua table whose keys become the
+// component's field names; values are copied as the initial JSON
+// payload when scene.add_component(entity, name) fires. Re-
+// registering a name overwrites the defaults (useful during
+// hot-reload). Empty table = component with no fields.
+static int LuaComponentRegister(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    if (!name || !*name) return 0;
+    if (lua_gettop(L) < 2 || lua_isnil(L, 2)) {
+        CustomComponentDefaults()[name] = NaraGame::MiniJson::Value::MakeObject();
+        return 0;
+    }
+    luaL_checktype(L, 2, LUA_TTABLE);
+    std::unordered_set<const void*> visited;
+    NaraGame::MiniJson::Value def = LuaToJson(L, 2, visited);
+    if (!def.IsObject()) def = NaraGame::MiniJson::Value::MakeObject();
+    CustomComponentDefaults()[name] = std::move(def);
+    return 0;
+}
+
+// component.get(entity, type) -> table or nil. Returns a copy of
+// the LuaComponent's fields as a fresh Lua table. Mutating the
+// returned table does NOT write back -- pair with component.set.
+static int LuaComponentGet(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) { lua_pushnil(L); return 1; }
+    const char* entityName = luaL_checkstring(L, 1);
+    const char* typeName   = luaL_checkstring(L, 2);
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) { lua_pushnil(L); return 1; }
+    for (const auto& c : e->components) {
+        if (!c || std::strcmp(c->TypeName(), typeName) != 0) continue;
+        if (auto* lc = dynamic_cast<LuaComponent*>(c.get())) {
+            JsonToLua(L, lc->Fields());
+            return 1;
+        }
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
+// component.set(entity, type, table) -> bool. Replaces the
+// LuaComponent's field table with the supplied one. Returns true
+// when the component existed + was updated, false otherwise.
+static int LuaComponentSet(lua_State* L) {
+    ScriptHost* host = HostFromUpvalue(L);
+    if (!host || !host->BoundScene()) { lua_pushboolean(L, 0); return 1; }
+    const char* entityName = luaL_checkstring(L, 1);
+    const char* typeName   = luaL_checkstring(L, 2);
+    luaL_checktype(L, 3, LUA_TTABLE);
+    Entity* e = host->BoundScene()->FindByName(entityName);
+    if (!e) { lua_pushboolean(L, 0); return 1; }
+    for (const auto& c : e->components) {
+        if (!c || std::strcmp(c->TypeName(), typeName) != 0) continue;
+        if (auto* lc = dynamic_cast<LuaComponent*>(c.get())) {
+            std::unordered_set<const void*> visited;
+            NaraGame::MiniJson::Value v = LuaToJson(L, 3, visited);
+            if (!v.IsObject()) v = NaraGame::MiniJson::Value::MakeObject();
+            lc->Fields() = std::move(v);
+            lua_pushboolean(L, 1);
+            return 1;
+        }
+    }
+    lua_pushboolean(L, 0);
+    return 1;
+}
+
+// component.types() -> table. Returns the sorted list of names
+// currently registered via component.register. Useful for an
+// in-game "add a custom component" picker UI written in Lua.
+static int LuaComponentTypes(lua_State* L) {
+    std::vector<std::string> names;
+    names.reserve(CustomComponentDefaults().size());
+    for (const auto& kv : CustomComponentDefaults()) {
+        names.push_back(kv.first);
+    }
+    std::sort(names.begin(), names.end());
+    lua_createtable(L, int(names.size()), 0);
+    for (size_t i = 0; i < names.size(); ++i) {
+        lua_pushlstring(L, names[i].data(), names[i].size());
+        lua_rawseti(L, -2, int(i + 1));
+    }
+    return 1;
 }
 
 // M10c5 dialog.* table. A polling-based dialog box surface
@@ -3052,6 +3159,49 @@ ScriptHost::ScriptHost() {
     lua_pushlightuserdata(L, this);
     luaL_setfuncs(L, kSettingsApi, 1);
     lua_setglobal(L, "settings");
+    // M11c3 custom component registry. Lua-side custom types
+    // live next to the built-in ComponentRegistry via a fallback
+    // factory installed below (see ComponentRegistry::SetFallback).
+    // The `component.*` table is the script-visible surface that
+    // registers types + reads / writes their fields.
+    static const luaL_Reg kComponentApi[] = {
+        {"register", LuaComponentRegister},
+        {"get",      LuaComponentGet},
+        {"set",      LuaComponentSet},
+        {"types",    LuaComponentTypes},
+        {nullptr,    nullptr},
+    };
+    lua_newtable(L);
+    lua_pushlightuserdata(L, this);
+    luaL_setfuncs(L, kComponentApi, 1);
+    lua_setglobal(L, "component");
+
+    // Install the fallback that ComponentRegistry::Create calls
+    // when the requested typeName isn't built-in. We mint a
+    // LuaComponent with that typeName + seed it with whichever
+    // defaults `component.register` recorded (empty object if
+    // the type was never registered -- the scene loader may
+    // populate fields itself if it's deserialising a saved
+    // custom component). The lambda captures by value so
+    // teardown ordering doesn't matter.
+    ComponentRegistry::Get().SetFallback(
+        [](const std::string& typeName) -> std::unique_ptr<Component> {
+            auto& defaults = CustomComponentDefaults();
+            auto it = defaults.find(typeName);
+            if (it == defaults.end()) {
+                // Unknown to both built-in registry + custom
+                // table; keep returning null so callers that
+                // expect a "create failed" signal still get it.
+                // The scene loader treats a missing custom type
+                // as a recoverable warning -- the component is
+                // dropped but the rest of the entity loads.
+                return nullptr;
+            }
+            auto lc = std::make_unique<LuaComponent>(typeName);
+            lc->Fields() = it->second;
+            return lc;
+        });
+
     // M10c5 dialog overlay. EditorApp::DrawDialogPanel polls
     // IsDialogVisible() + reads text + choices each frame; the
     // panel writes the picked button index back into the host
