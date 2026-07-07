@@ -82,6 +82,114 @@ constexpr uint32_t kWindowW = 1600;
 constexpr uint32_t kWindowH = 900;
 constexpr const char* kBaseTitle = "NaraGame Scene Editor";
 
+// OS-default UI font search paths. First existing file in each list
+// wins. `Latin` handles ASCII + European glyphs at 16 px; `Cjk` is
+// merged on top and expected to cover Korean (GetGlyphRangesKorean).
+// Missing files silently skip -- if neither list has a hit we fall
+// back to ImGui's built-in ProggyClean bitmap font. Keeping this a
+// candidate list rather than a hard-coded path avoids taking on
+// fontconfig on Linux while still working across common distros.
+#if defined(_WIN32)
+constexpr const char* kEditorLatinFontCandidates[] = {
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/tahoma.ttf",
+    "C:/Windows/Fonts/verdana.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    nullptr,
+};
+constexpr const char* kEditorCjkFontCandidates[] = {
+    "C:/Windows/Fonts/malgun.ttf",   // Malgun Gothic (Korean)
+    "C:/Windows/Fonts/msyh.ttc",     // Microsoft YaHei (broad CJK)
+    nullptr,
+};
+#elif defined(__APPLE__)
+constexpr const char* kEditorLatinFontCandidates[] = {
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/System/Library/Fonts/HelveticaNeue.ttc",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    nullptr,
+};
+constexpr const char* kEditorCjkFontCandidates[] = {
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    nullptr,
+};
+#else
+constexpr const char* kEditorLatinFontCandidates[] = {
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    nullptr,
+};
+constexpr const char* kEditorCjkFontCandidates[] = {
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansKR-Regular.otf",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    nullptr,
+};
+#endif
+
+const char* FirstExistingFontFile(const char* const* candidates) {
+    std::error_code ec;
+    for (const char* const* p = candidates; *p; ++p) {
+        if (std::filesystem::exists(*p, ec)) return *p;
+    }
+    return nullptr;
+}
+
+// System UI scale factor (1.0 at 96 DPI). Windows 10 1607+ has
+// GetDpiForWindow; other platforms fall back to 1.0 for now.
+float DetectUiScale(void* nativeHandle) {
+#if defined(_WIN32)
+    HWND hwnd = reinterpret_cast<HWND>(nativeHandle);
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (dpi == 0) dpi = 96;
+    return float(dpi) / 96.0f;
+#else
+    (void)nativeHandle;
+    return 1.0f;
+#endif
+}
+
+// Load the editor UI font stack. Latin base + CJK merge. Sized around
+// 16 px * uiScale so 4K monitors don't render the whole editor at
+// postage-stamp size. Called from OnStart before the first ImGui
+// frame; the D3D11 backend uploads the atlas on demand.
+void LoadEditorFonts(ImGuiIO& io, float uiScale) {
+    io.Fonts->Clear();
+    const float baseSize = 16.0f * uiScale;
+
+    ImFontConfig latinCfg;
+    latinCfg.OversampleH = 3;
+    latinCfg.OversampleV = 1;
+    latinCfg.PixelSnapH  = false;
+
+    ImFont* latin = nullptr;
+    if (const char* latinPath = FirstExistingFontFile(kEditorLatinFontCandidates)) {
+        latin = io.Fonts->AddFontFromFileTTF(latinPath, baseSize, &latinCfg);
+        NARAGAME_INFO("scene-editor: loaded UI font '%s' @ %.1f px",
+                      latinPath, baseSize);
+    }
+
+    if (latin) {
+        if (const char* cjkPath = FirstExistingFontFile(kEditorCjkFontCandidates)) {
+            ImFontConfig mergeCfg;
+            mergeCfg.MergeMode   = true;
+            mergeCfg.OversampleH = 2;
+            mergeCfg.OversampleV = 1;
+            mergeCfg.PixelSnapH  = false;
+            io.Fonts->AddFontFromFileTTF(cjkPath, baseSize, &mergeCfg,
+                                         io.Fonts->GetGlyphRangesKorean());
+            NARAGAME_INFO("scene-editor: merged CJK font '%s'", cjkPath);
+        }
+    } else {
+        NARAGAME_WARN("scene-editor: no OS UI font found; using ImGui default");
+        io.Fonts->AddFontDefault();
+    }
+}
+
 // Hook routed through Window::SetMessageHook. Always feeds ImGui first
 // so its IO stays in sync; returns false so the engine's WM_SIZE /
 // WM_CLOSE bookkeeping still runs.
@@ -243,6 +351,14 @@ public:
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.IniFilename = "scene-editor.ini";
         ImGui::StyleColorsDark();
+
+        // OS-default UI font stack. Latin + CJK merged, scaled to the
+        // system DPI so per-pixel work at 4K looks the same as at 1080p.
+        // Must run before the DX11 backend init because the backend
+        // uploads the font atlas texture the first time it sees one.
+        const float uiScale = DetectUiScale(hwnd);
+        LoadEditorFonts(io, uiScale);
+        ImGui::GetStyle().ScaleAllSizes(uiScale);
 
         ImGui_ImplWin32_Init(hwnd);
         ImGui_ImplDX11_Init(dev, ctx);
