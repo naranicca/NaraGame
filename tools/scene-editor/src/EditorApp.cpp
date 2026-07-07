@@ -153,34 +153,74 @@ float DetectUiScale(void* nativeHandle) {
 #endif
 }
 
-// Persist editor-wide UI preferences (currently just uiScale) in a
-// tiny JSON file next to the ImGui .ini. Not tied to any project so
-// the same laptop uses the same scale regardless of which game the
-// user is editing. Silent no-op on I/O failure.
+// Persist editor-wide UI preferences (uiScale + theme) in a tiny JSON
+// file next to the ImGui .ini. Not tied to any project so the same
+// laptop uses the same look regardless of which game the user is
+// editing. Silent no-op on I/O failure.
 constexpr const char* kEditorPrefsPath = "editor.prefs.json";
 
-float LoadUiScalePreference(float fallback) {
+enum class EditorTheme { Dark, Light };
+
+const char* EditorThemeToStr(EditorTheme t) {
+    return (t == EditorTheme::Light) ? "light" : "dark";
+}
+
+EditorTheme EditorThemeFromStr(const std::string& s) {
+    return (s == "light") ? EditorTheme::Light : EditorTheme::Dark;
+}
+
+// Rebuild the ImGui style from scratch: clear whatever previous
+// ScaleAllSizes calls have compounded, drop the requested palette on
+// top, then rescale to the current UI scale. Runs on start, on every
+// preferences change, and inside the font-atlas rebuild path.
+void ApplyEditorTheme(EditorTheme theme, float uiScale) {
+    ImGui::GetStyle() = ImGuiStyle();
+    switch (theme) {
+        case EditorTheme::Light: ImGui::StyleColorsLight(); break;
+        case EditorTheme::Dark:
+        default:                 ImGui::StyleColorsDark();  break;
+    }
+    ImGui::GetStyle().ScaleAllSizes(uiScale);
+}
+
+struct EditorPrefs {
+    float       uiScale = 1.0f;
+    EditorTheme theme   = EditorTheme::Dark;
+};
+
+EditorPrefs LoadEditorPrefs(float scaleFallback) {
+    EditorPrefs out;
+    out.uiScale = scaleFallback;
+    out.theme   = EditorTheme::Dark;
+
     std::ifstream in(kEditorPrefsPath, std::ios::binary);
-    if (!in) return fallback;
+    if (!in) return out;
     std::ostringstream ss; ss << in.rdbuf();
     std::string err;
     const auto root = NaraGame::MiniJson::Parse(ss.str(), &err);
-    if (!root.IsObject()) return fallback;
+    if (!root.IsObject()) return out;
+
     for (size_t i = 0; i < root.objectKeys.size(); ++i) {
-        if (root.objectKeys[i] == "uiScale" &&
-            root.objectValues[i].IsNumber()) {
-            float v = float(root.objectValues[i].numberValue);
-            if (v < 0.5f)  v = 0.5f;
-            if (v > 4.0f)  v = 4.0f;
-            return v;
+        const std::string& k = root.objectKeys[i];
+        const auto& v = root.objectValues[i];
+        if (k == "uiScale" && v.IsNumber()) {
+            float x = float(v.numberValue);
+            if (x < 0.5f) x = 0.5f;
+            if (x > 4.0f) x = 4.0f;
+            out.uiScale = x;
+        } else if (k == "theme" && v.IsString()) {
+            out.theme = EditorThemeFromStr(v.stringValue);
         }
     }
-    return fallback;
+    return out;
 }
 
-void SaveUiScalePreference(float uiScale) {
+void SaveEditorPrefs(const EditorPrefs& p) {
     NaraGame::MiniJson::Value root = NaraGame::MiniJson::Value::MakeObject();
-    root.Add("uiScale", NaraGame::MiniJson::Value::MakeNumber(uiScale));
+    root.Add("uiScale",
+             NaraGame::MiniJson::Value::MakeNumber(p.uiScale));
+    root.Add("theme",
+             NaraGame::MiniJson::Value::MakeString(EditorThemeToStr(p.theme)));
     const std::string text = NaraGame::MiniJson::Write(root);
     std::ofstream out(kEditorPrefsPath, std::ios::binary);
     if (out) out << text;
@@ -383,17 +423,18 @@ public:
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.IniFilename = "scene-editor.ini";
-        ImGui::StyleColorsDark();
 
         // OS-default UI font stack. Latin + CJK merged, scaled to the
         // system DPI so per-pixel work at 4K looks the same as at 1080p.
         // Must run before the DX11 backend init because the backend
         // uploads the font atlas texture the first time it sees one.
-        // A user-saved scale in editor.prefs.json overrides the DPI
-        // default so power users can tune it to taste.
-        m_uiScale = LoadUiScalePreference(DetectUiScale(hwnd));
+        // User-saved scale + theme in editor.prefs.json override the
+        // DPI/dark defaults.
+        const EditorPrefs prefs = LoadEditorPrefs(DetectUiScale(hwnd));
+        m_uiScale = prefs.uiScale;
+        m_theme   = prefs.theme;
         LoadEditorFonts(io, m_uiScale);
-        ImGui::GetStyle().ScaleAllSizes(m_uiScale);
+        ApplyEditorTheme(m_theme, m_uiScale);
 
         ImGui_ImplWin32_Init(hwnd);
         ImGui_ImplDX11_Init(dev, ctx);
@@ -456,16 +497,18 @@ public:
         // scale, reset the style so ScaleAllSizes doesn't accumulate,
         // then let the backend re-upload on the next NewFrame. All of
         // this must happen BEFORE ImGui_ImplDX11_NewFrame or the frame
-        // draws with the stale font.
+        // draws with the stale font. A theme-only change reuses the
+        // style reset without touching the atlas.
         if (m_pendingFontRebuild) {
             ImGui_ImplDX11_InvalidateDeviceObjects();
-            ImGuiIO& io = ImGui::GetIO();
-            LoadEditorFonts(io, m_uiScale);
-            ImGui::GetStyle() = ImGuiStyle();
-            ImGui::StyleColorsDark();
-            ImGui::GetStyle().ScaleAllSizes(m_uiScale);
+            LoadEditorFonts(ImGui::GetIO(), m_uiScale);
+            ApplyEditorTheme(m_theme, m_uiScale);
             ImGui_ImplDX11_CreateDeviceObjects();
-            m_pendingFontRebuild = false;
+            m_pendingFontRebuild  = false;
+            m_pendingThemeRefresh = false;
+        } else if (m_pendingThemeRefresh) {
+            ApplyEditorTheme(m_theme, m_uiScale);
+            m_pendingThemeRefresh = false;
         }
 
         ImGui_ImplDX11_NewFrame();
@@ -7405,11 +7448,12 @@ private:
         ImGui::EndPopup();
     }
 
-    // Window > Editor Preferences. Currently just the UI scale slider;
-    // more editor-wide toggles (theme, autosave interval, etc.) can
-    // land in the same modal without touching menu wiring. Changes to
-    // uiScale trip m_pendingFontRebuild so the atlas re-uploads on the
-    // next OnRender, and Save writes editor.prefs.json.
+    // Window > Editor Preferences. Currently UI scale + theme.
+    // Changes apply live via m_pendingFontRebuild / m_pendingTheme
+    // Refresh; Save persists them to editor.prefs.json so the next
+    // launch matches. More editor-wide toggles (autosave interval,
+    // font file, etc.) can land in the same modal without touching
+    // menu wiring.
     void DrawEditorPreferencesModal() {
         if (m_openEditorPrefsModal) {
             ImGui::OpenPopup("Editor Preferences");
@@ -7419,10 +7463,26 @@ private:
                                     ImGuiWindowFlags_AlwaysAutoResize)) {
             return;
         }
+
+        // --- Theme ---
+        ImGui::TextUnformatted("Theme");
+        int themeIdx = (m_theme == EditorTheme::Light) ? 1 : 0;
+        if (ImGui::RadioButton("Dark",  themeIdx == 0)) {
+            m_theme = EditorTheme::Dark;
+            m_pendingThemeRefresh = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Light", themeIdx == 1)) {
+            m_theme = EditorTheme::Light;
+            m_pendingThemeRefresh = true;
+        }
+
+        ImGui::Separator();
+
+        // --- UI Scale ---
         ImGui::TextUnformatted(
             "UI scale multiplies font size and every ImGui padding /\n"
             "spacing constant. Applies live -- no restart needed.");
-        ImGui::Separator();
 
         float scale = m_uiScale;
         ImGui::SetNextItemWidth(240.0f);
@@ -7441,7 +7501,10 @@ private:
 
         ImGui::Separator();
         if (ImGui::Button("Save & Close")) {
-            SaveUiScalePreference(m_uiScale);
+            EditorPrefs p;
+            p.uiScale = m_uiScale;
+            p.theme   = m_theme;
+            SaveEditorPrefs(p);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -12826,6 +12889,13 @@ private:
     // shows up on the very next frame without a restart.
     float               m_uiScale            = 1.0f;
     bool                m_pendingFontRebuild = false;
+    // Editor color theme. Persisted alongside uiScale. Radio in the
+    // Editor Preferences modal writes into this and flips
+    // m_pendingThemeRefresh so the next OnRender re-applies the
+    // palette. A dedicated flag (rather than reusing the font one)
+    // lets the theme change without paying the atlas rebuild cost.
+    EditorTheme         m_theme                = EditorTheme::Dark;
+    bool                m_pendingThemeRefresh  = false;
     // M10c1 settings overlay rebind capture. Empty when no rebind
     // is in progress; set to the action name when the user clicks
     // "Rebind" + cleared on the next key press (which writes the
