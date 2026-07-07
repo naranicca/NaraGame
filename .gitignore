@@ -41,9 +41,11 @@ DerivedData/
 *.stackdump
 
 # Scene editor runtime state written next to the running exe.
-# ImGui docking layout + per-machine UI preferences (font scale).
+# ImGui docking layout + per-machine UI preferences (font scale) +
+# always-on file log dumped by Log::Write.
 scene-editor.ini
 editor.prefs.json
+nara-log.txt
 
 # Citybuilder runtime save file (written next to the running exe).
 # Packaged demo saves in assets/ are *not* ignored — see demo.save.

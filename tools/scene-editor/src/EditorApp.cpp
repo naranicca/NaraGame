@@ -278,7 +278,17 @@ bool ImGuiMessageHook(void* nativeHandle, unsigned int msg,
 
 // Open the Win32 folder picker (IFileOpenDialog with FOS_PICKFOLDERS).
 // Returns "" if the user cancels or anything fails. UTF-8 out.
+//
+// The `owner` argument is deliberately IGNORED and Show is called with
+// nullptr instead. IFileOpenDialog::Show(hwnd) hangs on some Windows
+// 11 setups when a shell extension or cloud-provider handler deadlocks
+// against the owner window's message pump -- the picker never actually
+// appears and the app title bar goes "Not Responding". Hosting the
+// picker under the desktop bypasses that path. Trade-off: no native
+// modality (the picker doesn't disable our window). Blender / Godot
+// make the same trade.
 std::string PickFolderDialog(HWND owner, const wchar_t* title) {
+    (void)owner;
     IFileOpenDialog* dlg = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL,
                                   IID_PPV_ARGS(&dlg));
@@ -287,7 +297,7 @@ std::string PickFolderDialog(HWND owner, const wchar_t* title) {
     dlg->GetOptions(&opts);
     dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
     if (title) dlg->SetTitle(title);
-    hr = dlg->Show(owner);
+    hr = dlg->Show(nullptr);
     if (FAILED(hr)) { dlg->Release(); return {}; }
     IShellItem* item = nullptr;
     if (FAILED(dlg->GetResult(&item)) || !item) { dlg->Release(); return {}; }
@@ -363,7 +373,10 @@ std::string PickFileDialog(HWND owner, REFCLSID clsid,
             }
         }
     }
-    hr = dlg->Show(owner);
+    // Same nullptr-owner rationale as PickFolderDialog: bypass the
+    // owner-thread message-pump deadlock some Windows 11 setups hit.
+    (void)owner;
+    hr = dlg->Show(nullptr);
     if (FAILED(hr)) { dlg->Release(); return {}; }
     IShellItem* item = nullptr;
     if (FAILED(dlg->GetResult(&item)) || !item) { dlg->Release(); return {}; }
