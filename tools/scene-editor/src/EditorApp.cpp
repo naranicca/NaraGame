@@ -603,6 +603,22 @@ public:
 
         ImGui::Render();
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+        // Deferred native modal dialogs. Any Win32 modal that would
+        // otherwise fire from inside a live BeginPopupModal / Begin
+        // Popup runs here instead, after the ImGui DrawData is
+        // committed to the backbuffer. This keeps the dialog on top
+        // and interactive; see m_pendingBrowseForNewProjectPath.
+        if (m_pendingBrowseForNewProjectPath) {
+            m_pendingBrowseForNewProjectPath = false;
+            const std::string folder =
+                PickFolderDialog(m_hwnd, L"Pick parent folder");
+            if (!folder.empty()) {
+                std::snprintf(m_newProjectPath.data(),
+                              m_newProjectPath.size(),
+                              "%s", folder.c_str());
+            }
+        }
     }
 
 private:
@@ -7814,13 +7830,10 @@ private:
         ImGui::PopItemWidth();
         ImGui::SameLine();
         if (ImGui::Button("Browse...##path")) {
-            const std::string folder =
-                PickFolderDialog(m_hwnd, L"Pick parent folder");
-            if (!folder.empty()) {
-                std::snprintf(m_newProjectPath.data(),
-                              m_newProjectPath.size(),
-                              "%s", folder.c_str());
-            }
+            // See m_pendingBrowseForNewProjectPath comment: firing
+            // IFileOpenDialog from inside BeginPopupModal freezes
+            // the app; defer to OnRender's tail instead.
+            m_pendingBrowseForNewProjectPath = true;
         }
         if (!m_newProjectError.empty()) {
             ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1),
@@ -13141,6 +13154,16 @@ private:
     std::array<char, 256> m_newProjectName{};
     std::array<char, 1024> m_newProjectPath{};
     std::string         m_newProjectError;
+    // Deferred native folder-picker request. Firing IFileOpenDialog
+    // ::Show inside a live BeginPopupModal freezes the app -- the
+    // dialog's own message loop keeps our WM_PAINT servicing the
+    // half-built ImGui frame, and the picker ends up behind the
+    // popup. Instead, the Browse button just sets this flag; the
+    // very end of OnRender (after ImGui has rendered + submitted
+    // its DrawData) fires the picker with the ImGui frame fully
+    // committed to the backbuffer. UX-wise indistinguishable, but
+    // the dialog now lands on top and stays interactive.
+    bool                m_pendingBrowseForNewProjectPath = false;
 
     std::string m_startupProjectPath;
     std::string m_startupScenePath;
