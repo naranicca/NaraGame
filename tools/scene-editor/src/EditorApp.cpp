@@ -430,6 +430,26 @@ public:
         }
         m_hwnd = hwnd;
 
+        // Push our teal-cube icon onto the live window so the title
+        // bar + running-taskbar entry pick it up. Explorer's exe file
+        // icon is served by the same resource via the Windows loader,
+        // but the window class was registered without an hIcon by the
+        // engine (which doesn't know about editor resources), so we
+        // apply it here with WM_SETICON. IDI_APP == 101 -- kept in
+        // sync with res/scene-editor.rc. Load returning null just
+        // means the resource isn't linked in this configuration (e.g.
+        // a hypothetical non-Windows port); leaves the default icon
+        // instead of crashing.
+#if defined(_WIN32)
+        if (HICON hIcon = LoadIconW(GetModuleHandleW(nullptr),
+                                    MAKEINTRESOURCEW(101))) {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG,
+                         reinterpret_cast<LPARAM>(hIcon));
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL,
+                         reinterpret_cast<LPARAM>(hIcon));
+        }
+#endif
+
         IMGUI_CHECKVERSION();
         m_imguiContext = ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();

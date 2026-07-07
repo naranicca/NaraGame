@@ -1,11 +1,15 @@
 // Windows resource script for scene-editor.exe.
 //
-// Ships a single ICON resource so Explorer, the taskbar, Alt-Tab, and
-// the Window's own title bar all pick up the teal cube instead of the
-// default blank .exe icon. The Windows loader chooses "the first ICON
-// resource by name/id" for the exe file icon, so the resource id has
-// to sort before any other icon we might add later -- "IDI_APP" is
-// conventional and stringy IDs sort lexicographically ahead of numeric
-// ones.
+// Ships a single ICON resource. Two consumers pull it in different
+// ways:
+//   1. Explorer / taskbar / Alt-Tab file icon: the Windows loader
+//      picks the ICON resource with the lowest numeric id, so we
+//      define IDI_APP as a small integer.
+//   2. Live window (title bar + running-taskbar entry): EditorApp
+//      does LoadIcon(MAKEINTRESOURCE(IDI_APP)) + WM_SETICON. The
+//      integer id must match this file's -- we keep it a #define
+//      so both TUs read the same value without dragging in a
+//      shared header from the engine side.
 
+#define IDI_APP 101
 IDI_APP ICON "scene-editor.ico"
