@@ -69,6 +69,21 @@ add_executable(scene-editor
 target_include_directories(scene-editor PRIVATE src)
 target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui xaudio2)
 
+# Ship the editor as a Windows GUI-subsystem executable so no console
+# window pops up when it's double-clicked from Explorer. WIN32_EXECUTABLE
+# implies /SUBSYSTEM:WINDOWS, which by default expects WinMain -- point
+# the linker at mainCRTStartup instead so our existing `int main()` in
+# EntryPoint.h remains the entry point. AttachConsole in EntryPoint.h
+# still routes stdio to the parent terminal when the exe is launched
+# from cmd/PowerShell, so `scene-editor.exe --build-game ...` keeps
+# logging as before.
+if(WIN32)
+    set_target_properties(scene-editor PROPERTIES WIN32_EXECUTABLE TRUE)
+    if(MSVC)
+        target_link_options(scene-editor PRIVATE "/ENTRY:mainCRTStartup")
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # Vendored audio decoders (M8c3). third_party/audio/ ships in a similar
 # vendor-pattern to third_party/lua: the build flips a feature flag when the
