@@ -1,0 +1,11 @@
+// Windows resource script for scene-editor.exe.
+//
+// Ships a single ICON resource so Explorer, the taskbar, Alt-Tab, and
+// the Window's own title bar all pick up the teal cube instead of the
+// default blank .exe icon. The Windows loader chooses "the first ICON
+// resource by name/id" for the exe file icon, so the resource id has
+// to sort before any other icon we might add later -- "IDI_APP" is
+// conventional and stringy IDs sort lexicographically ahead of numeric
+// ones.
+
+IDI_APP ICON "scene-editor.ico"

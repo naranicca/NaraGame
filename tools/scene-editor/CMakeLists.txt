@@ -36,6 +36,7 @@ endif()
 
 add_executable(scene-editor
     src/EditorApp.cpp
+    $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/res/scene-editor.rc>
     src/asset/Animation.cpp
     src/asset/AnimatorController.cpp
     src/asset/AssetDatabase.cpp
