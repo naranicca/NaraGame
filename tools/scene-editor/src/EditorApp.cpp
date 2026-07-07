@@ -153,6 +153,39 @@ float DetectUiScale(void* nativeHandle) {
 #endif
 }
 
+// Persist editor-wide UI preferences (currently just uiScale) in a
+// tiny JSON file next to the ImGui .ini. Not tied to any project so
+// the same laptop uses the same scale regardless of which game the
+// user is editing. Silent no-op on I/O failure.
+constexpr const char* kEditorPrefsPath = "editor.prefs.json";
+
+float LoadUiScalePreference(float fallback) {
+    std::ifstream in(kEditorPrefsPath, std::ios::binary);
+    if (!in) return fallback;
+    std::ostringstream ss; ss << in.rdbuf();
+    std::string err;
+    const auto root = NaraGame::MiniJson::Parse(ss.str(), &err);
+    if (!root.IsObject()) return fallback;
+    for (size_t i = 0; i < root.objectKeys.size(); ++i) {
+        if (root.objectKeys[i] == "uiScale" &&
+            root.objectValues[i].IsNumber()) {
+            float v = float(root.objectValues[i].numberValue);
+            if (v < 0.5f)  v = 0.5f;
+            if (v > 4.0f)  v = 4.0f;
+            return v;
+        }
+    }
+    return fallback;
+}
+
+void SaveUiScalePreference(float uiScale) {
+    NaraGame::MiniJson::Value root = NaraGame::MiniJson::Value::MakeObject();
+    root.Add("uiScale", NaraGame::MiniJson::Value::MakeNumber(uiScale));
+    const std::string text = NaraGame::MiniJson::Write(root);
+    std::ofstream out(kEditorPrefsPath, std::ios::binary);
+    if (out) out << text;
+}
+
 // Load the editor UI font stack. Latin base + CJK merge. Sized around
 // 16 px * uiScale so 4K monitors don't render the whole editor at
 // postage-stamp size. Called from OnStart before the first ImGui
@@ -356,9 +389,11 @@ public:
         // system DPI so per-pixel work at 4K looks the same as at 1080p.
         // Must run before the DX11 backend init because the backend
         // uploads the font atlas texture the first time it sees one.
-        const float uiScale = DetectUiScale(hwnd);
-        LoadEditorFonts(io, uiScale);
-        ImGui::GetStyle().ScaleAllSizes(uiScale);
+        // A user-saved scale in editor.prefs.json overrides the DPI
+        // default so power users can tune it to taste.
+        m_uiScale = LoadUiScalePreference(DetectUiScale(hwnd));
+        LoadEditorFonts(io, m_uiScale);
+        ImGui::GetStyle().ScaleAllSizes(m_uiScale);
 
         ImGui_ImplWin32_Init(hwnd);
         ImGui_ImplDX11_Init(dev, ctx);
@@ -414,6 +449,24 @@ public:
 
     void OnRender() override {
         GetDevice().Clear(Color(0.10f, 0.11f, 0.13f, 1.0f));
+
+        // Live font rebuild triggered by the Editor Preferences slider.
+        // ImGui doesn't hot-swap the atlas on its own -- we tear down
+        // the DX11 backend's font texture, rebuild the atlas at the new
+        // scale, reset the style so ScaleAllSizes doesn't accumulate,
+        // then let the backend re-upload on the next NewFrame. All of
+        // this must happen BEFORE ImGui_ImplDX11_NewFrame or the frame
+        // draws with the stale font.
+        if (m_pendingFontRebuild) {
+            ImGui_ImplDX11_InvalidateDeviceObjects();
+            ImGuiIO& io = ImGui::GetIO();
+            LoadEditorFonts(io, m_uiScale);
+            ImGui::GetStyle() = ImGuiStyle();
+            ImGui::StyleColorsDark();
+            ImGui::GetStyle().ScaleAllSizes(m_uiScale);
+            ImGui_ImplDX11_CreateDeviceObjects();
+            m_pendingFontRebuild = false;
+        }
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -494,6 +547,7 @@ public:
         DrawSortingLayersModal();
         DrawCollisionMatrixModal();
         DrawAudioMixerModal();
+        DrawEditorPreferencesModal();
         DrawSettingsPanel();
         DrawDialogPanel();
         DrawSpriteEditorWindow();
@@ -3780,6 +3834,10 @@ private:
             if (ImGui::MenuItem("Audio Mixer...", nullptr, false,
                                 m_project.IsOpen())) {
                 m_openAudioMixerModal = true;
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Editor Preferences...")) {
+                m_openEditorPrefsModal = true;
             }
             ImGui::EndMenu();
         }
@@ -7344,6 +7402,52 @@ private:
         }
         ImGui::SameLine();
         if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    // Window > Editor Preferences. Currently just the UI scale slider;
+    // more editor-wide toggles (theme, autosave interval, etc.) can
+    // land in the same modal without touching menu wiring. Changes to
+    // uiScale trip m_pendingFontRebuild so the atlas re-uploads on the
+    // next OnRender, and Save writes editor.prefs.json.
+    void DrawEditorPreferencesModal() {
+        if (m_openEditorPrefsModal) {
+            ImGui::OpenPopup("Editor Preferences");
+            m_openEditorPrefsModal = false;
+        }
+        if (!ImGui::BeginPopupModal("Editor Preferences", nullptr,
+                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            return;
+        }
+        ImGui::TextUnformatted(
+            "UI scale multiplies font size and every ImGui padding /\n"
+            "spacing constant. Applies live -- no restart needed.");
+        ImGui::Separator();
+
+        float scale = m_uiScale;
+        ImGui::SetNextItemWidth(240.0f);
+        if (ImGui::SliderFloat("UI Scale", &scale, 0.75f, 3.0f,
+                               "%.2fx")) {
+            m_uiScale = scale;
+            m_pendingFontRebuild = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset to DPI")) {
+            m_uiScale = DetectUiScale(m_hwnd);
+            m_pendingFontRebuild = true;
+        }
+        ImGui::TextDisabled("System DPI: %.2fx",
+                            DetectUiScale(m_hwnd));
+
+        ImGui::Separator();
+        if (ImGui::Button("Save & Close")) {
+            SaveUiScalePreference(m_uiScale);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close (don't save)")) {
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::EndPopup();
     }
 
@@ -12712,6 +12816,16 @@ private:
     bool                m_openLayersModal = false;
     bool                m_openCollisionMatrixModal = false;
     bool                m_openAudioMixerModal = false;
+    bool                m_openEditorPrefsModal = false;
+
+    // UI scale (fonts + padding). Seeded from DetectUiScale on start
+    // and overridden by editor.prefs.json if the file exists. The
+    // slider in the Editor Preferences modal writes into this field
+    // and flips m_pendingFontRebuild; the next OnRender wipes the
+    // font atlas + re-uploads it before ImGui::NewFrame so the change
+    // shows up on the very next frame without a restart.
+    float               m_uiScale            = 1.0f;
+    bool                m_pendingFontRebuild = false;
     // M10c1 settings overlay rebind capture. Empty when no rebind
     // is in progress; set to the action name when the user clicks
     // "Rebind" + cleared on the next key press (which writes the
