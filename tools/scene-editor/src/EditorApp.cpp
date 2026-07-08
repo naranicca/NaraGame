@@ -7044,6 +7044,44 @@ private:
             }
         }
 
+        // Hover tooltip: cycling collider shapes on click is easy to
+        // lose track of, so surface the current state as a tooltip on
+        // the hovered cell. Reads TilesetTile from ts->tiles; a cell
+        // with no entry is "Empty". Kept as a static local helper so
+        // both hover + potential future readouts share one name table.
+        auto shapeLabel = [](const SceneEditor::TilesetTile* t) -> const char* {
+            using Shape = SceneEditor::TileColliderShape;
+            if (!t || (!t->collides && !t->isTrigger)) return "Empty";
+            if (t->isTrigger)                          return "Trigger";
+            switch (t->shape) {
+                case Shape::Box:            return "Box";
+                case Shape::OneWay:         return "OneWay";
+                case Shape::SlopeRight:     return "Slope Right 45";
+                case Shape::SlopeLeft:      return "Slope Left 45";
+                case Shape::SlopeRightHalf: return "Slope Right 22.5 (low)";
+                case Shape::SlopeLeftHalf:  return "Slope Left 22.5 (low)";
+                case Shape::SlopeRightHigh: return "Slope Right 22.5 (high)";
+                case Shape::SlopeLeftHigh:  return "Slope Left 22.5 (high)";
+            }
+            return "Empty";
+        };
+
+        if (ImGui::IsItemHovered()) {
+            const ImVec2 mp = ImGui::GetMousePos();
+            const int px = int((mp.x - imgMin.x) / scale);
+            const int py = int((mp.y - imgMin.y) / scale);
+            const int col = px / ts->cellPixelW;
+            const int row = py / ts->cellPixelH;
+            if (col >= 0 && col < texCols && row >= 0 && row < texRows) {
+                const int idx = row * texCols + col;
+                auto it = ts->tiles.find(idx);
+                const SceneEditor::TilesetTile* tPtr =
+                    (it == ts->tiles.end()) ? nullptr : &it->second;
+                ImGui::SetTooltip("Tile (%d, %d)  #%d\nCollider: %s",
+                                  col, row, idx, shapeLabel(tPtr));
+            }
+        }
+
         if (clicked) {
             const ImVec2 mp = ImGui::GetMousePos();
             const int px = int((mp.x - imgMin.x) / scale);
