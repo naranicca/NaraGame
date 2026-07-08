@@ -624,6 +624,7 @@ public:
         DrawCollisionMatrixModal();
         DrawAudioMixerModal();
         DrawEditorPreferencesModal();
+        DrawRenameSceneModal();
         DrawSettingsPanel();
         DrawDialogPanel();
         DrawSpriteEditorWindow();
@@ -3838,6 +3839,167 @@ private:
         return abs;
     }
 
+    // Rename the current scene on disk + in the JSON's sceneName field.
+    // Called from the Rename Scene modal after the user types a new stem
+    // (extension is fixed at .nscene). Returns false + writes an error
+    // string into m_renameSceneError when validation or filesystem work
+    // fails; the modal displays the message and keeps the input open.
+    //
+    // Sequence matters:
+    //   1. fs::rename moves (or case-adjusts) the file atomically.
+    //   2. If it succeeded, we retarget m_currentScenePath, update the
+    //      in-memory scene name, and re-Save so the JSON's sceneName
+    //      matches the new stem on the next read.
+    //   3. If the project's mainScene pointed at the old relative path,
+    //      rewrite + persist project.json so Build Game / standalone
+    //      launch keeps finding the same file.
+    //   4. Rescan the AssetDatabase so the Project panel picks up the
+    //      new name immediately.
+    bool DoRenameCurrentScene(const std::string& rawName) {
+        namespace fs = std::filesystem;
+        auto isSpace = [](unsigned char c) { return c == ' ' || c == '\t'; };
+        size_t i = 0, j = rawName.size();
+        while (i < j && isSpace(static_cast<unsigned char>(rawName[i]))) ++i;
+        while (j > i && isSpace(static_cast<unsigned char>(rawName[j - 1]))) --j;
+        std::string stem = rawName.substr(i, j - i);
+
+        if (stem.empty()) {
+            m_renameSceneError = "Name cannot be empty.";
+            return false;
+        }
+        if (stem.find_first_of("<>:\"/\\|?*") != std::string::npos) {
+            m_renameSceneError =
+                "Name cannot contain any of: < > : \" / \\ | ? *";
+            return false;
+        }
+        if (m_currentScenePath.empty()) {
+            m_renameSceneError = "No scene to rename.";
+            return false;
+        }
+
+        const std::string oldPath = m_currentScenePath;
+        const size_t slash = oldPath.find_last_of("/\\");
+        const std::string dir = (slash == std::string::npos)
+            ? std::string{} : oldPath.substr(0, slash);
+        const std::string newPath = dir.empty()
+            ? (stem + ".nscene")
+            : (dir + "/" + stem + ".nscene");
+
+        if (newPath == oldPath) {
+            // Nothing to do -- treat as a benign no-op so the modal
+            // closes without a scary error.
+            m_renameSceneError.clear();
+            return true;
+        }
+
+        std::error_code ec;
+        // A rename that changes only the case of the file name resolves
+        // to the same inode on Windows' case-insensitive volumes.
+        // fs::rename still adjusts the on-disk casing in that case, but
+        // fs::exists(newPath) will return true because the underlying
+        // file is the same one -- we must not treat that as a conflict.
+        if (fs::exists(newPath, ec)) {
+            std::error_code eqEc;
+            const bool sameFile = fs::equivalent(oldPath, newPath, eqEc);
+            if (eqEc || !sameFile) {
+                m_renameSceneError =
+                    "A file with that name already exists in the folder.";
+                return false;
+            }
+        }
+
+        ec.clear();
+        fs::rename(oldPath, newPath, ec);
+        if (ec) {
+            m_renameSceneError = "Rename failed: " + ec.message();
+            return false;
+        }
+
+        const std::string oldRel = RelToAssets(oldPath);
+        const std::string newRel = RelToAssets(newPath);
+        if (m_project.MainScenePath() == oldRel) {
+            m_project.SetMainScenePath(newRel);
+            m_project.Save();
+        }
+
+        m_currentScenePath = newPath;
+        m_scene.SetName(stem);
+        // Re-serialize so the JSON's sceneName field matches the new
+        // stem. Without this, the next load would show the old name in
+        // the title bar until the user manually saves again.
+        m_scene.Save(newPath);
+        m_scene.ClearDirty();
+
+        // Drop the mtime entry for the vanished path -- the watcher
+        // otherwise carries a stale key around forever. Rescan picks
+        // up the new file so the Project panel refreshes on the next
+        // frame.
+        m_assetMTimes.erase(oldPath);
+        m_assetDb.Rescan();
+        m_assetWatchLastCount = m_assetDb.CountAssetFilesOnDisk();
+
+        UpdateWindowTitle();
+        NARAGAME_INFO("scene-editor: renamed scene %s -> %s",
+                      oldRel.c_str(), newRel.c_str());
+        m_renameSceneError.clear();
+        return true;
+    }
+
+    // File > Rename Scene... modal. Text input pre-filled with the
+    // current file stem so the common "rename Untitled -> MyScene" flow
+    // is one keystroke sequence. Enter or the Rename button commits;
+    // Esc / Cancel close without touching the disk.
+    void DrawRenameSceneModal() {
+        if (m_openRenameSceneModal) {
+            m_openRenameSceneModal = false;
+            m_renameSceneError.clear();
+            std::string stem;
+            const size_t slash = m_currentScenePath.find_last_of("/\\");
+            stem = (slash == std::string::npos)
+                ? m_currentScenePath
+                : m_currentScenePath.substr(slash + 1);
+            const size_t dot = stem.rfind('.');
+            if (dot != std::string::npos) stem.resize(dot);
+            std::snprintf(m_renameSceneBuffer.data(),
+                          m_renameSceneBuffer.size(),
+                          "%s", stem.c_str());
+            ImGui::OpenPopup("Rename Scene");
+        }
+        if (!ImGui::BeginPopupModal("Rename Scene", nullptr,
+                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            return;
+        }
+
+        ImGui::TextDisabled("File: %s", m_currentScenePath.c_str());
+        ImGui::TextUnformatted("New name (extension .nscene is added automatically):");
+        ImGui::SetNextItemWidth(360.0f);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool submitted =
+            ImGui::InputText("##rename_scene_name",
+                             m_renameSceneBuffer.data(),
+                             m_renameSceneBuffer.size(),
+                             ImGuiInputTextFlags_EnterReturnsTrue |
+                             ImGuiInputTextFlags_AutoSelectAll);
+
+        if (!m_renameSceneError.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "%s",
+                               m_renameSceneError.c_str());
+        }
+
+        ImGui::Separator();
+        const bool clicked = ImGui::Button("Rename");
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        if (submitted || clicked) {
+            if (DoRenameCurrentScene(m_renameSceneBuffer.data())) {
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndPopup();
+    }
+
     void DoSaveSceneAs() {
         const std::string path = PickFileDialog(
             m_hwnd, CLSID_FileSaveDialog, L"Save Scene As",
@@ -3878,6 +4040,9 @@ private:
                 DoSaveScene();
             if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S", false, projOpen))
                 DoSaveSceneAs();
+            if (ImGui::MenuItem("Rename Scene...", nullptr, false,
+                                projOpen && !m_currentScenePath.empty()))
+                m_openRenameSceneModal = true;
             ImGui::Separator();
             if (ImGui::MenuItem("New Tileset...", nullptr, false, projOpen))
                 DoNewTileset();
@@ -12926,6 +13091,13 @@ private:
     bool                m_openCollisionMatrixModal = false;
     bool                m_openAudioMixerModal = false;
     bool                m_openEditorPrefsModal = false;
+    bool                m_openRenameSceneModal = false;
+    // Buffer + last-error slot for the Rename Scene modal. The modal
+    // seeds the buffer with the current file stem on open, and writes
+    // any validation / fs failure into the error string so the modal
+    // can keep itself open with a visible message.
+    std::array<char, 256> m_renameSceneBuffer{};
+    std::string         m_renameSceneError;
 
     // UI scale (fonts + padding). Seeded from DetectUiScale on start
     // and overridden by editor.prefs.json if the file exists. The
