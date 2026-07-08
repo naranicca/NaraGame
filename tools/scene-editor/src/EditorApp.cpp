@@ -52,6 +52,7 @@
 
 #include <d3d11.h>
 #include <shobjidl.h>          // IFileOpenDialog
+#include <shellapi.h>          // DragAcceptFiles / WM_DROPFILES
 #include <combaseapi.h>
 
 #include <algorithm>
@@ -263,15 +264,49 @@ void LoadEditorFonts(ImGuiIO& io, float uiScale) {
     }
 }
 
+// Forward declaration -- defined below alongside PickFolderDialog. The
+// WM_DROPFILES branch in ImGuiMessageHook needs to convert the wide
+// paths that DragQueryFileW hands out, and both live in this anonymous
+// namespace so no linker export is involved.
+std::string WideToUtf8(PCWSTR ws);
+
+// Explorer drag-and-drop staging area. WM_DROPFILES fires from the
+// window's message pump on the main thread, and the editor drains this
+// vector during the next OnRender (also main thread), so it needs no
+// synchronization. Kept at namespace scope because the hook is a free
+// function and can't touch EditorApp members directly.
+std::vector<std::string> g_pendingDropPaths;
+
 // Hook routed through Window::SetMessageHook. Always feeds ImGui first
 // so its IO stays in sync; returns false so the engine's WM_SIZE /
 // WM_CLOSE bookkeeping still runs.
+//
+// WM_DROPFILES is captured here (Explorer -> editor drag / drop): we
+// pull every path out of the HDROP and stash it in g_pendingDropPaths
+// for the app to process at frame boundary. Running the file copies /
+// AssetDatabase Rescan directly from the WndProc would recurse into
+// ImGui state mid-frame and stall the message pump on large drops.
 bool ImGuiMessageHook(void* nativeHandle, unsigned int msg,
                       unsigned long long wparam,
                       long long lparam) {
     HWND hwnd  = reinterpret_cast<HWND>(nativeHandle);
     WPARAM wp  = static_cast<WPARAM>(wparam);
     LPARAM lp  = static_cast<LPARAM>(lparam);
+    if (msg == WM_DROPFILES) {
+        HDROP hDrop = reinterpret_cast<HDROP>(wp);
+        const UINT count = DragQueryFileW(hDrop, 0xFFFFFFFFu, nullptr, 0);
+        for (UINT i = 0; i < count; ++i) {
+            const UINT len = DragQueryFileW(hDrop, i, nullptr, 0);
+            if (len == 0) continue;
+            std::wstring wpath(size_t(len) + 1, L'\0');
+            DragQueryFileW(hDrop, i, wpath.data(), len + 1);
+            wpath.resize(len);
+            std::string utf8 = WideToUtf8(wpath.c_str());
+            if (!utf8.empty()) g_pendingDropPaths.push_back(std::move(utf8));
+        }
+        DragFinish(hDrop);
+        return true;
+    }
     ImGui_ImplWin32_WndProcHandler(hwnd, static_cast<UINT>(msg), wp, lp);
     return false;
 }
@@ -474,6 +509,14 @@ public:
 
         GetWindow().SetMessageHook(&ImGuiMessageHook);
 
+        // Accept Explorer drag-and-drop. WM_DROPFILES lands in the
+        // hook above; ConsumePendingFileDrops() drains the queue at
+        // the top of every OnRender so a dropped .png / .ntileset
+        // gets imported into Assets/Tilesets/ automatically.
+#if defined(_WIN32)
+        DragAcceptFiles(hwnd, TRUE);
+#endif
+
         // Register the built-in component factories before anything tries
         // to deserialize a scene.
         SceneEditor::RegisterBuiltinComponents();
@@ -593,6 +636,7 @@ public:
 
         DrawMainMenuBar();
         HandleGlobalShortcuts();
+        ConsumePendingFileDrops();
         TickAssetFileWatcher(ImGui::GetIO().DeltaTime);
         TickScripts (ImGui::GetIO().DeltaTime);
         TickPhysics (ImGui::GetIO().DeltaTime);
@@ -3690,6 +3734,168 @@ private:
         if (const auto* entry = m_assetDb.FindByPath(RelToAssets(path))) {
             OpenAnimationEditor(entry->guid);
         }
+    }
+
+    // Drain files that WM_DROPFILES stashed in g_pendingDropPaths and
+    // hand each one to HandleDroppedFile. Called once per frame from
+    // OnRender so we never touch AssetDatabase / disk from inside a
+    // WndProc callback.
+    void ConsumePendingFileDrops() {
+        if (g_pendingDropPaths.empty()) return;
+        std::vector<std::string> drops;
+        drops.swap(g_pendingDropPaths);
+        if (!m_project.IsOpen()) {
+            NARAGAME_WARN(
+                "scene-editor: %zu dropped file(s) ignored -- no "
+                "project is open. Create or open a project first.",
+                drops.size());
+            return;
+        }
+        for (const std::string& p : drops) HandleDroppedFile(p);
+    }
+
+    // What kind of import a dropped file triggers. Anything that
+    // AssetDatabase already classifies as a Texture (.png / .jpg /
+    // .jpeg / .bmp / .tga) is treated as tileset source imagery: the
+    // image lands in Assets/Tilesets/, and a matching .ntileset is
+    // written next to it referencing the new texture's GUID. A dropped
+    // .ntileset is imported as-is (portability across projects).
+    // Everything else is logged and skipped.
+    bool HandleDroppedFile(const std::string& absSrc) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        if (!fs::is_regular_file(absSrc, ec)) {
+            NARAGAME_WARN("scene-editor: drop skipped (not a file): %s",
+                          absSrc.c_str());
+            return false;
+        }
+
+        // Lower-case extension for the classifier.
+        std::string ext;
+        {
+            const size_t dot = absSrc.rfind('.');
+            if (dot != std::string::npos) {
+                ext = absSrc.substr(dot);
+                for (char& c : ext) {
+                    c = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(c)));
+                }
+            }
+        }
+
+        const bool isImage =
+            ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+            ext == ".bmp" || ext == ".tga";
+        const bool isTileset = ext == ".ntileset";
+        if (!isImage && !isTileset) {
+            NARAGAME_WARN(
+                "scene-editor: drop ignored -- unsupported extension "
+                "\"%s\" (accept: .png .jpg .jpeg .bmp .tga .ntileset). "
+                "File: %s",
+                ext.c_str(), absSrc.c_str());
+            return false;
+        }
+
+        const std::string tilesetsDir =
+            m_project.AssetsDir() + "/Tilesets";
+        fs::create_directories(tilesetsDir, ec);
+
+        // Split source into stem + extension so we can build "name_2"
+        // / "name_3" fallback names when the target already exists.
+        const std::string srcStem = fs::path(absSrc).stem().string();
+
+        auto composePaths = [&](const std::string& stem,
+                                std::string& outImage,
+                                std::string& outTileset) {
+            if (isImage) {
+                outImage   = tilesetsDir + "/" + stem + ext;
+                outTileset = tilesetsDir + "/" + stem + ".ntileset";
+            } else {
+                outImage.clear();
+                outTileset = tilesetsDir + "/" + stem + ".ntileset";
+            }
+        };
+
+        std::string destImage, destTileset;
+        composePaths(srcStem, destImage, destTileset);
+        int n = 2;
+        while ((!destImage.empty() && fs::exists(destImage, ec)) ||
+               fs::exists(destTileset, ec)) {
+            composePaths(srcStem + "_" + std::to_string(n),
+                         destImage, destTileset);
+            ++n;
+            if (n > 999) {
+                NARAGAME_WARN(
+                    "scene-editor: giving up placing dropped file, "
+                    "too many collisions: %s", absSrc.c_str());
+                return false;
+            }
+        }
+
+        if (isTileset) {
+            // Copy the .ntileset verbatim. The embedded texture GUID
+            // won't line up with anything in the destination project
+            // unless the referenced texture is imported separately;
+            // the user can retarget it in the tileset editor.
+            fs::copy_file(absSrc, destTileset, ec);
+            if (ec) {
+                NARAGAME_WARN("scene-editor: copy failed (%s): %s",
+                              ec.message().c_str(), absSrc.c_str());
+                return false;
+            }
+            m_assetDb.Rescan();
+            m_assetWatchLastCount = m_assetDb.CountAssetFilesOnDisk();
+            if (const auto* entry =
+                    m_assetDb.FindByPath(RelToAssets(destTileset))) {
+                OpenTilesetEditor(entry->guid);
+            }
+            NARAGAME_INFO("scene-editor: imported tileset %s -> %s",
+                          absSrc.c_str(), destTileset.c_str());
+            return true;
+        }
+
+        // Image drop: copy the image first so a Rescan gives it a
+        // stable GUID via its auto-generated .meta sidecar. Then
+        // write a fresh .ntileset that points at that GUID and
+        // Rescan again so the Project panel + tileset editor pick
+        // both up on the next frame.
+        fs::copy_file(absSrc, destImage, ec);
+        if (ec) {
+            NARAGAME_WARN("scene-editor: copy failed (%s): %s",
+                          ec.message().c_str(), absSrc.c_str());
+            return false;
+        }
+        m_assetDb.Rescan();
+
+        const std::string relImage = RelToAssets(destImage);
+        const SceneEditor::AssetEntry* imgEntry =
+            m_assetDb.FindByPath(relImage);
+        if (!imgEntry) {
+            NARAGAME_WARN(
+                "scene-editor: copied image but AssetDatabase did not "
+                "surface it: %s", destImage.c_str());
+            return false;
+        }
+
+        SceneEditor::TilesetAsset ts;
+        ts.texture = imgEntry->guid;
+        if (!ts.SaveToFile(destTileset)) {
+            NARAGAME_WARN(
+                "scene-editor: could not write tileset asset: %s",
+                destTileset.c_str());
+            return false;
+        }
+        m_assetDb.Rescan();
+        m_assetWatchLastCount = m_assetDb.CountAssetFilesOnDisk();
+
+        if (const auto* tsEntry =
+                m_assetDb.FindByPath(RelToAssets(destTileset))) {
+            OpenTilesetEditor(tsEntry->guid);
+        }
+        NARAGAME_INFO(
+            "scene-editor: imported %s as tileset -> %s (texture=%s)",
+            absSrc.c_str(), destTileset.c_str(), relImage.c_str());
+        return true;
     }
 
     void DoNewTileset() {
