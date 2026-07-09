@@ -6935,9 +6935,8 @@ private:
         }
         const int texCols = int(tex->Width())  / ts->cellPixelW;
         const int texRows = int(tex->Height()) / ts->cellPixelH;
-        ImGui::TextDisabled("%d x %d tiles  -- click cycles "
-                            "blank -> Box -> OneWay -> SlopeR/L "
-                            "(45/22.5) -> Trigger -> blank",
+        ImGui::TextDisabled("%d x %d tiles  --  left: cycle collider, "
+                            "drag: copy across cells, right: erase",
                             texCols, texRows);
 
         // Preview area.
@@ -7178,6 +7177,34 @@ private:
             m_tilePaintOriginIdx   = -1;
             m_tilePaintLastCell    = -1;
             m_tilePaintDragStarted = false;
+        }
+
+        // Right-click erase, decoupled from the left-button state
+        // machine above -- the InvisibleButton is left-only so ImGui's
+        // active/deactivated hooks don't help here. We latch a stroke
+        // when a right-press starts while hovering the preview, then
+        // erase every unique cell the cursor visits until the right
+        // button releases. Dragging outside and back is fine; the
+        // stroke stays live because we key on IsMouseDown, not
+        // IsItemHovered. Erase is idempotent, so we don't need the
+        // press-vs-release distinction the left-button flow uses.
+        if (ImGui::IsItemHovered() &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            m_tileEraseActive   = true;
+            m_tileEraseLastCell = -1;
+        }
+        if (m_tileEraseActive) {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                m_tileEraseActive   = false;
+                m_tileEraseLastCell = -1;
+            } else if (inRange && hoveredIdx != m_tileEraseLastCell) {
+                auto tgt = ts->tiles.find(hoveredIdx);
+                if (tgt != ts->tiles.end()) {
+                    ts->tiles.erase(tgt);
+                    dirty = true;
+                }
+                m_tileEraseLastCell = hoveredIdx;
+            }
         }
 
         if (dirty) m_assetDb.SaveTileset(m_tilesetEditorAsset);
@@ -13450,6 +13477,11 @@ private:
     int                       m_tilePaintLastCell   = -1;
     bool                      m_tilePaintDragStarted = false;
     SceneEditor::TilesetTile  m_tilePaintBrush{};
+    // Right-click erase stroke. Latched on right-press-while-hovered,
+    // stays live until the right button releases so a user can drag
+    // outside and back without losing the stroke.
+    bool                      m_tileEraseActive     = false;
+    int                       m_tileEraseLastCell   = -1;
     // Autotile Editor mirrors the Sprite / Tileset pattern. The active
     // slot is the 0..15 mask index the user has selected for editing;
     // clicking a tile in the preview writes that index into the
