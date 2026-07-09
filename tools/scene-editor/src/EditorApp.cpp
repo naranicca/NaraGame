@@ -7088,79 +7088,96 @@ private:
                               shapeLabel(tPtr));
         }
 
+        // Press: capture origin + its current collider as the drag
+        // brush. Nothing else -- the actual state change waits for
+        // release (cycle) or the first cell-crossing move (paint).
         if (clicked && inRange) {
-            // M7c22: 10-state cycle blank -> Box -> OneWay ->
-            // SlopeRight -> SlopeLeft -> {half low, high} slope
-            // variants -> Trigger -> blank. The runtime branches on
-            // the composed flags (collides + isTrigger + shape)
-            // without per-cell branching outside this helper.
+            m_tilePaintOriginIdx = hoveredIdx;
+            m_tilePaintLastCell  = hoveredIdx;
+            m_tilePaintDragStarted = false;
             auto it = ts->tiles.find(hoveredIdx);
-            using Shape = SceneEditor::TileColliderShape;
-            if (it == ts->tiles.end()) {
-                SceneEditor::TilesetTile t;
-                t.collides  = true;
-                t.isTrigger = false;
-                t.shape     = Shape::Box;
-                ts->tiles[hoveredIdx] = t;
-            } else if (!it->second.isTrigger &&
-                       it->second.shape == Shape::Box) {
-                it->second.shape = Shape::OneWay;
-            } else if (!it->second.isTrigger &&
-                       it->second.shape == Shape::OneWay) {
-                it->second.shape = Shape::SlopeRight;
-            } else if (!it->second.isTrigger &&
-                       it->second.shape == Shape::SlopeRight) {
-                it->second.shape = Shape::SlopeLeft;
-            } else if (!it->second.isTrigger &&
-                       it->second.shape == Shape::SlopeLeft) {
-                it->second.shape = Shape::SlopeRightHalf;
-            } else if (!it->second.isTrigger &&
-                       it->second.shape == Shape::SlopeRightHalf) {
-                it->second.shape = Shape::SlopeLeftHalf;
-            } else if (!it->second.isTrigger &&
-                       it->second.shape == Shape::SlopeLeftHalf) {
-                it->second.shape = Shape::SlopeRightHigh;
-            } else if (!it->second.isTrigger &&
-                       it->second.shape == Shape::SlopeRightHigh) {
-                it->second.shape = Shape::SlopeLeftHigh;
-            } else if (!it->second.isTrigger) {
-                // SlopeLeftHigh -> Trigger (Box trigger).
-                it->second.isTrigger = true;
-                it->second.shape = Shape::Box;
-            } else {
-                ts->tiles.erase(it);
-            }
-            dirty = true;
-
-            // Capture the post-cycle state as the drag brush. Missing
-            // entry (i.e. the click erased a Trigger back to blank)
-            // means an "Empty" brush that erases as it paints.
-            auto brushIt = ts->tiles.find(hoveredIdx);
-            m_tilePaintBrush = (brushIt == ts->tiles.end())
+            m_tilePaintBrush = (it == ts->tiles.end())
                 ? SceneEditor::TilesetTile{}
-                : brushIt->second;
-            m_tilePaintLastCell = hoveredIdx;
-        } else if (ImGui::IsItemActive() && !clicked && inRange &&
-                   hoveredIdx != m_tilePaintLastCell) {
-            // Drag paint: same brush as the origin cell, no cycling.
-            // An Empty brush erases the target so a user can drag
-            // across a region to wipe it.
-            const bool brushEmpty =
-                !m_tilePaintBrush.collides && !m_tilePaintBrush.isTrigger;
-            if (brushEmpty) {
-                auto tgt = ts->tiles.find(hoveredIdx);
-                if (tgt != ts->tiles.end()) {
-                    ts->tiles.erase(tgt);
+                : it->second;
+        }
+        // Held: once the cursor enters a different cell, this stroke
+        // is a drag -- lock the intent + paint every fresh cell with
+        // the brush. In-cell wiggles don't flip the flag, so a jittery
+        // click still cycles on release.
+        else if (ImGui::IsItemActive()) {
+            if (inRange && hoveredIdx != m_tilePaintOriginIdx) {
+                m_tilePaintDragStarted = true;
+            }
+            if (m_tilePaintDragStarted && inRange &&
+                hoveredIdx != m_tilePaintLastCell) {
+                const bool brushEmpty =
+                    !m_tilePaintBrush.collides && !m_tilePaintBrush.isTrigger;
+                if (brushEmpty) {
+                    auto tgt = ts->tiles.find(hoveredIdx);
+                    if (tgt != ts->tiles.end()) {
+                        ts->tiles.erase(tgt);
+                        dirty = true;
+                    }
+                } else {
+                    ts->tiles[hoveredIdx] = m_tilePaintBrush;
                     dirty = true;
                 }
-            } else {
-                ts->tiles[hoveredIdx] = m_tilePaintBrush;
+                m_tilePaintLastCell = hoveredIdx;
+            }
+        }
+        // Release: a clean click (no drag) advances the origin cell
+        // through the 10-state cycle. A drag release does nothing --
+        // the paint already happened while the button was held.
+        if (ImGui::IsItemDeactivated()) {
+            if (!m_tilePaintDragStarted && m_tilePaintOriginIdx >= 0) {
+                // M7c22: 10-state cycle blank -> Box -> OneWay ->
+                // SlopeRight -> SlopeLeft -> {half low, high} slope
+                // variants -> Trigger -> blank. The runtime branches
+                // on the composed flags (collides + isTrigger +
+                // shape) without per-cell branching outside this
+                // helper.
+                const int idx = m_tilePaintOriginIdx;
+                auto it = ts->tiles.find(idx);
+                using Shape = SceneEditor::TileColliderShape;
+                if (it == ts->tiles.end()) {
+                    SceneEditor::TilesetTile t;
+                    t.collides  = true;
+                    t.isTrigger = false;
+                    t.shape     = Shape::Box;
+                    ts->tiles[idx] = t;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::Box) {
+                    it->second.shape = Shape::OneWay;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::OneWay) {
+                    it->second.shape = Shape::SlopeRight;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeRight) {
+                    it->second.shape = Shape::SlopeLeft;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeLeft) {
+                    it->second.shape = Shape::SlopeRightHalf;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeRightHalf) {
+                    it->second.shape = Shape::SlopeLeftHalf;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeLeftHalf) {
+                    it->second.shape = Shape::SlopeRightHigh;
+                } else if (!it->second.isTrigger &&
+                           it->second.shape == Shape::SlopeRightHigh) {
+                    it->second.shape = Shape::SlopeLeftHigh;
+                } else if (!it->second.isTrigger) {
+                    // SlopeLeftHigh -> Trigger (Box trigger).
+                    it->second.isTrigger = true;
+                    it->second.shape = Shape::Box;
+                } else {
+                    ts->tiles.erase(it);
+                }
                 dirty = true;
             }
-            m_tilePaintLastCell = hoveredIdx;
-        }
-        if (!ImGui::IsItemActive()) {
-            m_tilePaintLastCell = -1;
+            m_tilePaintOriginIdx   = -1;
+            m_tilePaintLastCell    = -1;
+            m_tilePaintDragStarted = false;
         }
 
         if (dirty) m_assetDb.SaveTileset(m_tilesetEditorAsset);
@@ -13418,14 +13435,20 @@ private:
     bool                m_tilesetEditorOpen     = false;
     bool                m_tilesetEditorActivate = false;
     SceneEditor::AssetGuid m_tilesetEditorAsset;
-    // Drag-paint state. The initial click cycles the origin cell to
-    // its next collider shape, m_tilePaintBrush captures that resulting
-    // state, and every subsequent cell the mouse drags over gets set
-    // to the same brush (not cycled). m_tilePaintLastCell throttles
-    // the paint to once per unique cell so we don't rewrite + save on
-    // every frame while the cursor idles on one tile. Reset to -1 on
-    // mouse release.
-    int                       m_tilePaintLastCell = -1;
+    // Press-hold-release paint state. Mouse-down alone does not touch
+    // any tile -- the user might be starting a drag. m_tilePaintOrigin
+    // Idx records where the press landed and m_tilePaintBrush captures
+    // that cell's collider AT PRESS TIME (this is the copy brush a
+    // subsequent drag paints with). m_tilePaintDragStarted flips once
+    // the cursor crosses into a different cell while the button is
+    // still held: from then on the release is treated as a paint
+    // stroke and the cycle is skipped. m_tilePaintLastCell throttles
+    // paint writes to once per unique cell so we don't rewrite + save
+    // every frame while the cursor idles on one tile. All four reset
+    // to defaults on mouse release (IsItemDeactivated frame).
+    int                       m_tilePaintOriginIdx  = -1;
+    int                       m_tilePaintLastCell   = -1;
+    bool                      m_tilePaintDragStarted = false;
     SceneEditor::TilesetTile  m_tilePaintBrush{};
     // Autotile Editor mirrors the Sprite / Tileset pattern. The active
     // slot is the 0..15 mask index the user has selected for editing;
