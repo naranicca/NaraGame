@@ -1,10 +1,11 @@
-"""Extract the teal cube from Desktop/n.png and produce scene-editor.ico.
+"""Extract the blue "N" cube from n-cube.png and produce scene-editor.ico.
 
-The source PNG has a checkerboard-pattern transparent-indicator background
-(alternating white / light-grey squares). Flood-filling from the four corners
-peels that away without touching the white "N" glyph, which is enclosed by
-the cube's outline. We then tight-crop to the cube's bounding box, resample
-to a set of ICO sizes (16 / 32 / 48 / 64 / 128 / 256), and write the .ico.
+The vendored source PNG (n-cube.png, sitting next to this script) is a
+blue isometric cube with a white "N" cutout on a plain white background.
+Flood-filling from the four corners peels the white background off
+without touching the "N" glyph, which is landlocked inside the cube's
+outline. We then tight-crop to the cube's bounding box, resample to a
+set of ICO sizes (16 / 32 / 48 / 64 / 128 / 256), and write the .ico.
 
 Also emits scene-editor-icon.png (256x256) alongside the .ico for anyone
 who wants the loose PNG for docs / About boxes.
@@ -18,8 +19,8 @@ from collections import deque
 
 # ---------------------------------------------------------------------------
 # Paths
-SRC = Path.home() / "Desktop" / "n.png"
 OUT_DIR = Path(__file__).resolve().parent
+SRC = OUT_DIR / "n-cube.png"
 OUT_ICO = OUT_DIR / "scene-editor.ico"
 OUT_PNG = OUT_DIR / "scene-editor-icon.png"
 
