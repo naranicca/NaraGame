@@ -8644,6 +8644,10 @@ private:
         const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen |
                                          ImGuiTreeNodeFlags_Framed;
         if (!ImGui::CollapsingHeader(comp->TypeName(), flags)) return;
+        // CollapsingHeader (unlike TreeNode) doesn't auto-indent its
+        // children -- push the default IndentSpacing (21 px * uiScale)
+        // by hand so component fields visually nest under the header.
+        ImGui::Indent();
         // Type-specific editor. New component types add a case here (or
         // grow a virtual DrawInspector once the surface stabilises).
         if (auto* t = dynamic_cast<SceneEditor::TransformComponent*>(comp)) {
@@ -8683,6 +8687,7 @@ private:
         } else {
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
         }
+        ImGui::Unindent();
     }
 
     // M11c3 generic inspector for Lua-defined components. Top-level
