@@ -8840,8 +8840,20 @@ private:
         ImGui::Separator();
 
         // --- Components -------------------------------------------------
-        for (auto& comp : e->components) {
-            DrawComponentEditor(*e, comp.get());
+        // DrawComponentEditor returns true when the user clicks the
+        // header X button. Defer the actual erase to after the loop
+        // so we don't invalidate the vector iterators mid-iteration.
+        size_t removeCompIdx = SIZE_MAX;
+        for (size_t i = 0; i < e->components.size(); ++i) {
+            if (DrawComponentEditor(*e, e->components[i].get())) {
+                removeCompIdx = i;
+            }
+        }
+        if (removeCompIdx != SIZE_MAX) {
+            UndoSnapshot();
+            e->components.erase(e->components.begin() + removeCompIdx);
+            m_scene.MarkDirty();
+            UpdateWindowTitle();
         }
         // Add Component button. Lists every registered factory we don't
         // already have on this entity (Transform always present, so it
@@ -8871,12 +8883,67 @@ private:
         ImGui::End();
     }
 
-    void DrawComponentEditor(SceneEditor::Entity& entity,
+    // Returns true when the user clicked the header X to remove this
+    // component this frame; the caller defers the actual erase to
+    // after its iteration is done.
+    bool DrawComponentEditor(SceneEditor::Entity& entity,
                              SceneEditor::Component* comp) {
-        if (!comp) return;
+        if (!comp) return false;
+        const bool isTransform =
+            dynamic_cast<SceneEditor::TransformComponent*>(comp) != nullptr;
+        ImGui::PushID(comp);
         const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen |
-                                         ImGuiTreeNodeFlags_Framed;
-        if (!ImGui::CollapsingHeader(comp->TypeName(), flags)) return;
+                                         ImGuiTreeNodeFlags_Framed |
+                                         ImGuiTreeNodeFlags_AllowOverlap;
+        const bool open = ImGui::CollapsingHeader(comp->TypeName(), flags);
+        // Overlay a small X on the header's right edge so users can
+        // remove the component without opening a submenu. Transform
+        // is always required + never removed, so it doesn't get one.
+        bool wantRemove = false;
+        if (!isTransform) {
+            const ImVec2 hMin = ImGui::GetItemRectMin();
+            const ImVec2 hMax = ImGui::GetItemRectMax();
+            const float  headerH = hMax.y - hMin.y;
+            const float  btnSize = std::max(12.0f, headerH - 4.0f);
+            const float  padR    = 4.0f;
+            const ImVec2 saved   = ImGui::GetCursorScreenPos();
+            const ImVec2 pos(hMax.x - btnSize - padR,
+                             hMin.y + (headerH - btnSize) * 0.5f);
+            ImGui::SetCursorScreenPos(pos);
+            // Hand-drawn cross via InvisibleButton + drawlist, so the
+            // glyph is a true square instead of following the font's
+            // "X" aspect ratio (which reads as tall / narrow next to
+            // the framed header).
+            ImGui::InvisibleButton("##remove", ImVec2(btnSize, btnSize));
+            const bool hovered = ImGui::IsItemHovered();
+            const bool active  = ImGui::IsItemActive();
+            if (ImGui::IsItemClicked()) wantRemove = true;
+            ImDrawList*  dl = ImGui::GetWindowDrawList();
+            const float  rnd = ImGui::GetStyle().FrameRounding;
+            if (hovered || active) {
+                const ImU32 bg = active
+                    ? IM_COL32(160, 50, 50, 230)
+                    : IM_COL32(200, 80, 80, 200);
+                dl->AddRectFilled(pos,
+                    ImVec2(pos.x + btnSize, pos.y + btnSize), bg, rnd);
+            }
+            const ImU32 cFg = ImGui::GetColorU32(ImGuiCol_Text);
+            // ~28 % inset gives a compact cross that visually matches
+            // the spinner triangles + doesn't crowd the header edge.
+            const float m = std::floor(btnSize * 0.28f);
+            const float th = std::max(1.5f, btnSize * 0.10f);
+            dl->AddLine(ImVec2(pos.x + m,           pos.y + m),
+                        ImVec2(pos.x + btnSize - m, pos.y + btnSize - m),
+                        cFg, th);
+            dl->AddLine(ImVec2(pos.x + btnSize - m, pos.y + m),
+                        ImVec2(pos.x + m,           pos.y + btnSize - m),
+                        cFg, th);
+            ImGui::SetCursorScreenPos(saved);
+        }
+        if (!open) {
+            ImGui::PopID();
+            return wantRemove;
+        }
         // CollapsingHeader (unlike TreeNode) doesn't auto-indent its
         // children -- push the default IndentSpacing (21 px * uiScale)
         // by hand so component fields visually nest under the header.
@@ -8921,6 +8988,8 @@ private:
             ImGui::TextDisabled("(no inspector yet for %s)", comp->TypeName());
         }
         ImGui::Unindent();
+        ImGui::PopID();
+        return wantRemove;
     }
 
     // M11c3 generic inspector for Lua-defined components. Top-level
@@ -8973,19 +9042,6 @@ private:
                 ImGui::Text("%s = %s", key.c_str(), tag);
             }
             ImGui::PopID();
-        }
-        ImGui::Spacing();
-        if (ImGui::SmallButton("Remove##luacomp")) {
-            UndoSnapshot();
-            // Erase by raw pointer comparison like the other inspectors.
-            for (auto it = m_scene.Get(m_selection)->components.begin();
-                 it != m_scene.Get(m_selection)->components.end(); ++it) {
-                if (it->get() == &lc) {
-                    m_scene.Get(m_selection)->components.erase(it);
-                    break;
-                }
-            }
-            m_scene.MarkDirty();
         }
     }
 
@@ -10614,7 +10670,7 @@ private:
         }
     }
 
-    void DrawSpriteRendererEditor(SceneEditor::Entity& entity,
+    void DrawSpriteRendererEditor(SceneEditor::Entity& /*entity*/,
                                   SceneEditor::SpriteRendererComponent& s) {
         bool changed = false;
         // Sprite picker -- dropdown over every Texture asset in the
@@ -10775,15 +10831,6 @@ private:
         }
         if (SpinDragInt("Order in Layer", &s.orderInLayer, 0.2f,
                         -1000, 1000)) {
-            changed = true;
-        }
-        if (ImGui::SmallButton("Remove##sprite")) {
-            UndoSnapshot();
-            // Lazy remove: find and erase by raw pointer comparison.
-            for (auto it = entity.components.begin();
-                 it != entity.components.end(); ++it) {
-                if (it->get() == &s) { entity.components.erase(it); break; }
-            }
             changed = true;
         }
         if (changed) {
