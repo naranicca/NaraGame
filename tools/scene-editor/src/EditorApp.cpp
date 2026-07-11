@@ -8566,6 +8566,239 @@ private:
         }
     }
 
+    // Two stacked half-height ▲▼ buttons drawn immediately after the
+    // caller's cursor. Returns +1 if the up button was clicked this
+    // frame, -1 for the down button, 0 otherwise. Consumes (btnW,
+    // frameH) of horizontal + vertical space. Callers wrap the drag
+    // widget + this helper inside their own PushID so multiple
+    // spinners on one row don't collide.
+    static int DrawSpinArrows(const char* id, float btnW, float frameH) {
+        const float halfH = std::floor(frameH * 0.5f);
+        ImDrawList*  dl   = ImGui::GetWindowDrawList();
+        const float  rnd  = ImGui::GetStyle().FrameRounding;
+        const ImU32  cFg  = ImGui::GetColorU32(ImGuiCol_Text);
+        int result = 0;
+        ImGui::PushID(id);
+        ImGui::BeginGroup();
+        // Kill the vertical ItemSpacing so the two half-height buttons
+        // stack flush -- otherwise ImGui's default 4 px row gap makes
+        // the down-arrow drop below the field.
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                            ImVec2(ImGui::GetStyle().ItemSpacing.x, 0.0f));
+        auto drawHalf = [&](const char* subId, bool isUp, int& out) {
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton(subId, ImVec2(btnW, halfH));
+            const ImU32 c = ImGui::IsItemActive()
+                ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
+                : (ImGui::IsItemHovered()
+                    ? ImGui::GetColorU32(ImGuiCol_ButtonHovered)
+                    : ImGui::GetColorU32(ImGuiCol_Button));
+            if (ImGui::IsItemClicked()) out = isUp ? 1 : -1;
+            dl->AddRectFilled(p, ImVec2(p.x + btnW, p.y + halfH), c, rnd);
+            const float cx = p.x + btnW * 0.5f;
+            const float cy = p.y + halfH * 0.5f;
+            const float a  = std::max(2.0f, btnW * 0.22f);
+            if (isUp) {
+                dl->AddTriangleFilled(
+                    ImVec2(cx - a, cy + a * 0.55f),
+                    ImVec2(cx + a, cy + a * 0.55f),
+                    ImVec2(cx,     cy - a * 0.55f), cFg);
+            } else {
+                dl->AddTriangleFilled(
+                    ImVec2(cx - a, cy - a * 0.55f),
+                    ImVec2(cx + a, cy - a * 0.55f),
+                    ImVec2(cx,     cy + a * 0.55f), cFg);
+            }
+        };
+        drawHalf("up", true, result);
+        drawHalf("dn", false, result);
+        ImGui::PopStyleVar();
+        ImGui::EndGroup();
+        ImGui::PopID();
+        return result;
+    }
+
+    // DragFloat + ▲▼ spinner. Behaves like ImGui::DragFloat: same
+    // drag-to-scrub, ctrl-click to type. Adds a stacked spinner on
+    // the right that clicks the value up/down by `step` (defaults
+    // to `speed`). Undo snapshot fires once on drag-start or on
+    // each spin click so the caller no longer needs the
+    // `if (IsItemActivated) UndoSnapshot()` companion line.
+    bool SpinDragFloat(const char* label, float* v, float speed,
+                       float lo = 0.0f, float hi = 0.0f,
+                       const char* fmt = "%.3f",
+                       ImGuiSliderFlags flags = 0,
+                       float step = 0.0f) {
+        if (step <= 0.0f) step = speed > 0.0f ? speed : 0.1f;
+        const ImGuiStyle& s = ImGui::GetStyle();
+        const float frameH = ImGui::GetFrameHeight();
+        const float spinW  = std::max(10.0f, frameH * 0.6f);
+        ImGui::PushID(label);
+        ImGui::BeginGroup();
+        const float itemW = ImGui::CalcItemWidth();
+        ImGui::SetNextItemWidth(std::max(1.0f,
+            itemW - spinW - s.ItemInnerSpacing.x));
+        bool changed = ImGui::DragFloat("##v", v, speed, lo, hi, fmt, flags);
+        if (ImGui::IsItemActivated()) UndoSnapshot();
+        ImGui::SameLine(0, s.ItemInnerSpacing.x);
+        const int dir = DrawSpinArrows("s", spinW, frameH);
+        if (dir != 0) {
+            UndoSnapshot();
+            float nv = *v + float(dir) * step;
+            if (lo < hi) nv = std::clamp(nv, lo, hi);
+            *v = nv;
+            changed = true;
+        }
+        if (label && label[0] && !(label[0] == '#' && label[1] == '#')) {
+            ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            ImGui::TextUnformatted(label);
+        }
+        ImGui::EndGroup();
+        ImGui::PopID();
+        return changed;
+    }
+
+    // Vec2 / Vec3 spin-drags. Each component gets its own drag +
+    // spinner; the label sits at the far right, matching ImGui's
+    // DragFloatN convention.
+    bool SpinDragFloatN(const char* label, float* v, int n,
+                        float speed, float lo, float hi,
+                        const char* fmt, ImGuiSliderFlags flags,
+                        float step) {
+        if (step <= 0.0f) step = speed > 0.0f ? speed : 0.1f;
+        const ImGuiStyle& s = ImGui::GetStyle();
+        const float frameH = ImGui::GetFrameHeight();
+        const float spinW  = std::max(10.0f, frameH * 0.5f);
+        ImGui::PushID(label);
+        ImGui::BeginGroup();
+        const float itemW = ImGui::CalcItemWidth();
+        const float perComp = std::max(1.0f,
+            (itemW - float(n - 1) * s.ItemInnerSpacing.x) / float(n));
+        const float perDrag = std::max(16.0f,
+            perComp - spinW - s.ItemInnerSpacing.x);
+        bool changed = false;
+        for (int i = 0; i < n; ++i) {
+            if (i > 0) ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            ImGui::PushID(i);
+            ImGui::SetNextItemWidth(perDrag);
+            if (ImGui::DragFloat("##v", &v[i], speed, lo, hi, fmt, flags))
+                changed = true;
+            if (ImGui::IsItemActivated()) UndoSnapshot();
+            ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            const int dir = DrawSpinArrows("s", spinW, frameH);
+            if (dir != 0) {
+                UndoSnapshot();
+                float nv = v[i] + float(dir) * step;
+                if (lo < hi) nv = std::clamp(nv, lo, hi);
+                v[i] = nv;
+                changed = true;
+            }
+            ImGui::PopID();
+        }
+        if (label && label[0] && !(label[0] == '#' && label[1] == '#')) {
+            ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            ImGui::TextUnformatted(label);
+        }
+        ImGui::EndGroup();
+        ImGui::PopID();
+        return changed;
+    }
+
+    bool SpinDragFloat2(const char* label, float v[2], float speed,
+                        float lo = 0.0f, float hi = 0.0f,
+                        const char* fmt = "%.3f",
+                        ImGuiSliderFlags flags = 0,
+                        float step = 0.0f) {
+        return SpinDragFloatN(label, v, 2, speed, lo, hi, fmt, flags, step);
+    }
+    bool SpinDragFloat3(const char* label, float v[3], float speed,
+                        float lo = 0.0f, float hi = 0.0f,
+                        const char* fmt = "%.3f",
+                        ImGuiSliderFlags flags = 0,
+                        float step = 0.0f) {
+        return SpinDragFloatN(label, v, 3, speed, lo, hi, fmt, flags, step);
+    }
+
+    // DragInt + ▲▼ spinner. `speed` matches ImGui::DragInt (fractional
+    // pixels-per-unit is fine); `step` defaults to 1.
+    bool SpinDragInt(const char* label, int* v, float speed,
+                     int lo = 0, int hi = 0,
+                     const char* fmt = "%d",
+                     ImGuiSliderFlags flags = 0,
+                     int step = 1) {
+        if (step <= 0) step = 1;
+        const ImGuiStyle& s = ImGui::GetStyle();
+        const float frameH = ImGui::GetFrameHeight();
+        const float spinW  = std::max(10.0f, frameH * 0.6f);
+        ImGui::PushID(label);
+        ImGui::BeginGroup();
+        const float itemW = ImGui::CalcItemWidth();
+        ImGui::SetNextItemWidth(std::max(1.0f,
+            itemW - spinW - s.ItemInnerSpacing.x));
+        bool changed = ImGui::DragInt("##v", v, speed, lo, hi, fmt, flags);
+        if (ImGui::IsItemActivated()) UndoSnapshot();
+        ImGui::SameLine(0, s.ItemInnerSpacing.x);
+        const int dir = DrawSpinArrows("s", spinW, frameH);
+        if (dir != 0) {
+            UndoSnapshot();
+            int nv = *v + dir * step;
+            if (lo < hi) nv = std::clamp(nv, lo, hi);
+            *v = nv;
+            changed = true;
+        }
+        if (label && label[0] && !(label[0] == '#' && label[1] == '#')) {
+            ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            ImGui::TextUnformatted(label);
+        }
+        ImGui::EndGroup();
+        ImGui::PopID();
+        return changed;
+    }
+
+    bool SpinDragInt2(const char* label, int v[2], float speed,
+                      int lo = 0, int hi = 0,
+                      const char* fmt = "%d",
+                      ImGuiSliderFlags flags = 0,
+                      int step = 1) {
+        if (step <= 0) step = 1;
+        const ImGuiStyle& s = ImGui::GetStyle();
+        const float frameH = ImGui::GetFrameHeight();
+        const float spinW  = std::max(10.0f, frameH * 0.5f);
+        ImGui::PushID(label);
+        ImGui::BeginGroup();
+        const float itemW = ImGui::CalcItemWidth();
+        const float perComp = std::max(1.0f,
+            (itemW - s.ItemInnerSpacing.x) * 0.5f);
+        const float perDrag = std::max(16.0f,
+            perComp - spinW - s.ItemInnerSpacing.x);
+        bool changed = false;
+        for (int i = 0; i < 2; ++i) {
+            if (i > 0) ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            ImGui::PushID(i);
+            ImGui::SetNextItemWidth(perDrag);
+            if (ImGui::DragInt("##v", &v[i], speed, lo, hi, fmt, flags))
+                changed = true;
+            if (ImGui::IsItemActivated()) UndoSnapshot();
+            ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            const int dir = DrawSpinArrows("s", spinW, frameH);
+            if (dir != 0) {
+                UndoSnapshot();
+                int nv = v[i] + dir * step;
+                if (lo < hi) nv = std::clamp(nv, lo, hi);
+                v[i] = nv;
+                changed = true;
+            }
+            ImGui::PopID();
+        }
+        if (label && label[0] && !(label[0] == '#' && label[1] == '#')) {
+            ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            ImGui::TextUnformatted(label);
+        }
+        ImGui::EndGroup();
+        ImGui::PopID();
+        return changed;
+    }
+
     void DrawInspectorPanel() {
         ImGui::Begin("Inspector");
         if (!m_project.IsOpen()) {
@@ -8710,8 +8943,7 @@ private:
             ImGui::PushID(int(i));
             if (v.IsNumber()) {
                 float fv = float(v.numberValue);
-                if (ImGui::DragFloat(key.c_str(), &fv, 0.1f)) {
-                    UndoSnapshot();
+                if (SpinDragFloat(key.c_str(), &fv, 0.1f)) {
                     v.numberValue = double(fv);
                     m_scene.MarkDirty();
                 }
@@ -8809,14 +9041,14 @@ private:
                 "Path or GUID handed to scene.load when the\n"
                 "splash timeline completes. Empty = stay here.");
         }
-        if (ImGui::DragFloat("Fade in",  &sp.fadeIn,  0.01f,
-                              0.0f, 30.0f, "%.2f s"))  { UndoSnapshot(); }
-        if (ImGui::DragFloat("Hold",     &sp.hold,    0.01f,
-                              0.0f, 30.0f, "%.2f s"))  { UndoSnapshot(); }
-        if (ImGui::DragFloat("Fade out", &sp.fadeOut, 0.01f,
-                              0.0f, 30.0f, "%.2f s"))  { UndoSnapshot(); }
-        if (ImGui::DragInt   ("Priority", &sp.priority,
-                              1.0f, -1024, 1024))      { UndoSnapshot(); }
+        SpinDragFloat("Fade in",  &sp.fadeIn,  0.01f,
+                      0.0f, 30.0f, "%.2f s");
+        SpinDragFloat("Hold",     &sp.hold,    0.01f,
+                      0.0f, 30.0f, "%.2f s");
+        SpinDragFloat("Fade out", &sp.fadeOut, 0.01f,
+                      0.0f, 30.0f, "%.2f s");
+        SpinDragInt  ("Priority", &sp.priority,
+                      1.0f, -1024, 1024);
         ImGui::ColorEdit4("Background", &sp.background.r);
         ImGui::ColorEdit4("Tint",       &sp.tint.r);
         ImGui::TextDisabled("Total: %.2f s", sp.TotalDuration());
@@ -8829,9 +9061,8 @@ private:
     // immediate.
     void DrawCameraEditor(SceneEditor::Entity& /*entity*/,
                            SceneEditor::CameraComponent& cm) {
-        if (ImGui::DragFloat("Zoom (px/unit)", &cm.zoom,
-                              0.5f, 1.0f, 1024.0f, "%.1f")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Zoom (px/unit)", &cm.zoom,
+                          0.5f, 1.0f, 1024.0f, "%.1f")) {
             if (cm.zoom < 0.01f) cm.zoom = 0.01f;
         }
         if (ImGui::IsItemHovered()) {
@@ -8841,10 +9072,7 @@ private:
                 "this directly. Higher = closer / bigger\n"
                 "objects on screen.");
         }
-        if (ImGui::DragInt("Priority", &cm.priority,
-                            1.0f, -1024, 1024)) {
-            UndoSnapshot();
-        }
+        SpinDragInt("Priority", &cm.priority, 1.0f, -1024, 1024);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
                 "When multiple enabled CameraComponents exist,\n"
@@ -8894,37 +9122,32 @@ private:
         }
 
         int mp = ps.maxParticles;
-        if (ImGui::DragInt("Max Particles", &mp, 1.0f, 1, 4096)) {
-            UndoSnapshot();
+        if (SpinDragInt("Max Particles", &mp, 1.0f, 1, 4096)) {
             if (mp < 1) mp = 1;
             if (mp > 4096) mp = 4096;
             ps.maxParticles = mp;
         }
-        if (ImGui::DragFloat("Emission Rate", &ps.emissionRate,
-                              0.5f, 0.0f, 0.0f, "%.1f /sec")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Emission Rate", &ps.emissionRate,
+                          0.5f, 0.0f, 0.0f, "%.1f /sec")) {
             if (ps.emissionRate < 0.0f) ps.emissionRate = 0.0f;
         }
 
         float lt[2] = { ps.lifetimeMin, ps.lifetimeMax };
-        if (ImGui::DragFloat2("Lifetime (min/max)", lt, 0.02f,
-                               0.0f, 0.0f, "%.2f s")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Lifetime (min/max)", lt, 0.02f,
+                           0.0f, 0.0f, "%.2f s")) {
             if (lt[0] < 0.01f) lt[0] = 0.01f;
             if (lt[1] < lt[0]) lt[1] = lt[0];
             ps.lifetimeMin = lt[0]; ps.lifetimeMax = lt[1];
         }
         float sp[2] = { ps.startSpeedMin, ps.startSpeedMax };
-        if (ImGui::DragFloat2("Start Speed (min/max)", sp, 0.05f,
-                               0.0f, 0.0f, "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Start Speed (min/max)", sp, 0.05f,
+                           0.0f, 0.0f, "%.2f")) {
             if (sp[1] < sp[0]) sp[1] = sp[0];
             ps.startSpeedMin = sp[0]; ps.startSpeedMax = sp[1];
         }
         float sz[2] = { ps.startSizeMin, ps.startSizeMax };
-        if (ImGui::DragFloat2("Start Size (min/max)", sz, 0.01f,
-                               0.001f, 0.0f, "%.3f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Start Size (min/max)", sz, 0.01f,
+                           0.001f, 0.0f, "%.3f")) {
             if (sz[0] < 0.001f) sz[0] = 0.001f;
             if (sz[1] < sz[0])  sz[1] = sz[0];
             ps.startSizeMin = sz[0]; ps.startSizeMax = sz[1];
@@ -8952,18 +9175,16 @@ private:
         }
         if (sizeLerp) {
             float ez[2] = { ps.endSizeMin, ps.endSizeMax };
-            if (ImGui::DragFloat2("End Size (min/max)", ez,
-                                   0.01f, 0.0f, 0.0f, "%.3f")) {
-                UndoSnapshot();
+            if (SpinDragFloat2("End Size (min/max)", ez,
+                               0.01f, 0.0f, 0.0f, "%.3f")) {
                 if (ez[0] < 0.0f) ez[0] = 0.0f;
                 if (ez[1] < ez[0]) ez[1] = ez[0];
                 ps.endSizeMin = ez[0]; ps.endSizeMax = ez[1];
             }
         }
         float ang[2] = { ps.dirAngleMinDeg, ps.dirAngleMaxDeg };
-        if (ImGui::DragFloat2("Direction (deg, min/max)", ang,
-                               1.0f, -360.0f, 720.0f, "%.0f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Direction (deg, min/max)", ang,
+                           1.0f, -360.0f, 720.0f, "%.0f")) {
             if (ang[1] < ang[0]) ang[1] = ang[0];
             ps.dirAngleMinDeg = ang[0]; ps.dirAngleMaxDeg = ang[1];
         }
@@ -8988,9 +9209,7 @@ private:
         }
 
         float gv[2] = { ps.gravity.x, ps.gravity.y };
-        if (ImGui::DragFloat2("Gravity", gv, 0.05f, 0.0f, 0.0f,
-                               "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Gravity", gv, 0.05f, 0.0f, 0.0f, "%.2f")) {
             ps.gravity = { gv[0], gv[1] };
         }
 
@@ -9011,26 +9230,23 @@ private:
         }
         if (ps.shape == Sh::CircleEdge ||
             ps.shape == Sh::CircleVolume) {
-            if (ImGui::DragFloat("Radius", &ps.shapeRadius,
-                                  0.02f, 0.0f, 0.0f, "%.2f")) {
-                UndoSnapshot();
+            if (SpinDragFloat("Radius", &ps.shapeRadius,
+                              0.02f, 0.0f, 0.0f, "%.2f")) {
                 if (ps.shapeRadius < 0.0f) ps.shapeRadius = 0.0f;
             }
         } else if (ps.shape == Sh::BoxEdge ||
                     ps.shape == Sh::BoxVolume) {
             float bs[2] = { ps.shapeBoxSize.x, ps.shapeBoxSize.y };
-            if (ImGui::DragFloat2("Box Size (w/h)", bs,
-                                   0.02f, 0.0f, 0.0f, "%.2f")) {
-                UndoSnapshot();
+            if (SpinDragFloat2("Box Size (w/h)", bs,
+                               0.02f, 0.0f, 0.0f, "%.2f")) {
                 if (bs[0] < 0.0f) bs[0] = 0.0f;
                 if (bs[1] < 0.0f) bs[1] = 0.0f;
                 ps.shapeBoxSize = { bs[0], bs[1] };
             }
         } else if (ps.shape == Sh::Line) {
             float le[2] = { ps.shapeLineEnd.x, ps.shapeLineEnd.y };
-            if (ImGui::DragFloat2("Line End (offset)", le,
-                                   0.05f, 0.0f, 0.0f, "%.2f")) {
-                UndoSnapshot();
+            if (SpinDragFloat2("Line End (offset)", le,
+                               0.05f, 0.0f, 0.0f, "%.2f")) {
                 ps.shapeLineEnd = { le[0], le[1] };
             }
         }
@@ -9042,20 +9258,16 @@ private:
         // don't affect what the user sees on screen.
         float rotRange[2] = { ps.startRotationMinDeg,
                               ps.startRotationMaxDeg };
-        if (ImGui::DragFloat2("Start Rotation (deg, min/max)",
-                               rotRange, 1.0f, -720.0f, 720.0f,
-                               "%.0f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Start Rotation (deg, min/max)",
+                           rotRange, 1.0f, -720.0f, 720.0f, "%.0f")) {
             if (rotRange[1] < rotRange[0]) rotRange[1] = rotRange[0];
             ps.startRotationMinDeg = rotRange[0];
             ps.startRotationMaxDeg = rotRange[1];
         }
         float spinRange[2] = { ps.angularSpeedMinDeg,
                                 ps.angularSpeedMaxDeg };
-        if (ImGui::DragFloat2("Angular Speed (deg/s, min/max)",
-                               spinRange, 2.0f, -3600.0f, 3600.0f,
-                               "%.0f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Angular Speed (deg/s, min/max)",
+                           spinRange, 2.0f, -3600.0f, 3600.0f, "%.0f")) {
             if (spinRange[1] < spinRange[0]) spinRange[1] = spinRange[0];
             ps.angularSpeedMinDeg = spinRange[0];
             ps.angularSpeedMaxDeg = spinRange[1];
@@ -9215,9 +9427,8 @@ private:
                     ps.animFrames.begin() + removeAt);
             }
             if (!ps.animFrames.empty()) {
-                if (ImGui::DragFloat("Anim FPS", &ps.animFps,
-                                      0.5f, 0.0f, 0.0f, "%.1f")) {
-                    UndoSnapshot();
+                if (SpinDragFloat("Anim FPS", &ps.animFps,
+                                  0.5f, 0.0f, 0.0f, "%.1f")) {
                     if (ps.animFps < 0.0f) ps.animFps = 0.0f;
                 }
                 if (ImGui::Checkbox("Anim Loop", &ps.animLoop)) {
@@ -9242,9 +9453,8 @@ private:
         // when Loop is on the emitter wraps at duration + re-
         // fires the bursts. Order in the list is the order
         // they fire -- sort by time for predictable results.
-        if (ImGui::DragFloat("Duration (s)", &ps.duration,
-                              0.05f, 0.0f, 0.0f, "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Duration (s)", &ps.duration,
+                          0.05f, 0.0f, 0.0f, "%.2f")) {
             if (ps.duration < 0.0f) ps.duration = 0.0f;
         }
         if (ImGui::IsItemHovered()) {
@@ -9277,16 +9487,13 @@ private:
             ImGui::PushID(10000 + i);
             auto& b = ps.bursts[size_t(i)];
             ImGui::SetNextItemWidth(80.0f);
-            if (ImGui::DragFloat("##bt", &b.time, 0.02f,
-                                  0.0f, 0.0f, "t=%.2f")) {
-                UndoSnapshot();
+            if (SpinDragFloat("##bt", &b.time, 0.02f,
+                              0.0f, 0.0f, "t=%.2f")) {
                 if (b.time < 0.0f) b.time = 0.0f;
             }
             ImGui::SameLine();
             ImGui::SetNextItemWidth(80.0f);
-            if (ImGui::DragInt("##bc", &b.count, 0.5f,
-                                0, 4096, "n=%d")) {
-                UndoSnapshot();
+            if (SpinDragInt("##bc", &b.count, 0.5f, 0, 4096, "n=%d")) {
                 if (b.count < 0) b.count = 0;
             }
             ImGui::SameLine();
@@ -9304,20 +9511,14 @@ private:
     void DrawRigidbody2DEditor(SceneEditor::Entity& /*entity*/,
                                 SceneEditor::Rigidbody2DComponent& rb) {
         float v[2] = { rb.velocity.x, rb.velocity.y };
-        if (ImGui::DragFloat2("Velocity", v, 0.05f, 0.0f, 0.0f,
-                               "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Velocity", v, 0.05f, 0.0f, 0.0f, "%.2f")) {
             rb.velocity = { v[0], v[1] };
         }
         float g[2] = { rb.gravity.x, rb.gravity.y };
-        if (ImGui::DragFloat2("Gravity", g, 0.05f, 0.0f, 0.0f,
-                               "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Gravity", g, 0.05f, 0.0f, 0.0f, "%.2f")) {
             rb.gravity = { g[0], g[1] };
         }
-        if (ImGui::DragFloat("Drag", &rb.drag, 0.01f, 0.0f, 0.0f,
-                              "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Drag", &rb.drag, 0.01f, 0.0f, 0.0f, "%.2f")) {
             if (rb.drag < 0.0f) rb.drag = 0.0f;
         }
         if (ImGui::IsItemHovered()) {
@@ -9325,9 +9526,7 @@ private:
                 "Per-frame damping. velocity *= max(0, 1 - drag * dt)\n"
                 "0 = none; ~5 stops a 1 u/s body in ~0.2 s.");
         }
-        if (ImGui::DragFloat("Mass", &rb.mass, 0.05f, 0.01f, 0.0f,
-                              "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Mass", &rb.mass, 0.05f, 0.01f, 0.0f, "%.2f")) {
             if (rb.mass <= 0.0f) rb.mass = 0.01f;
         }
         if (ImGui::IsItemHovered()) {
@@ -9336,9 +9535,8 @@ private:
                 "with mass: a 1-kg ball hitting a 10-kg crate\n"
                 "moves 10x as far as the crate does.");
         }
-        if (ImGui::DragFloat("Restitution", &rb.restitution,
-                              0.01f, 0.0f, 1.0f, "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Restitution", &rb.restitution,
+                          0.01f, 0.0f, 1.0f, "%.2f")) {
             rb.restitution = std::clamp(rb.restitution, 0.0f, 1.0f);
         }
         if (ImGui::IsItemHovered()) {
@@ -9346,9 +9544,8 @@ private:
                 "Bounciness [0..1]. 0 absorbs the inward velocity\n"
                 "(M7c7 default); 1 reflects it perfectly.");
         }
-        if (ImGui::DragFloat("Friction", &rb.friction,
-                              0.01f, 0.0f, 1.0f, "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Friction", &rb.friction,
+                          0.01f, 0.0f, 1.0f, "%.2f")) {
             rb.friction = std::clamp(rb.friction, 0.0f, 1.0f);
         }
         if (ImGui::IsItemHovered()) {
@@ -9367,15 +9564,11 @@ private:
     void DrawBoxColliderEditor(SceneEditor::Entity& /*entity*/,
                                SceneEditor::BoxColliderComponent& bc) {
         float sz[2] = { bc.size.x, bc.size.y };
-        if (ImGui::DragFloat2("Size", sz, 0.05f, 0.0f, 0.0f,
-                               "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Size", sz, 0.05f, 0.0f, 0.0f, "%.2f")) {
             bc.size = { sz[0], sz[1] };
         }
         float off[2] = { bc.offset.x, bc.offset.y };
-        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
-                               "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Offset", off, 0.05f, 0.0f, 0.0f, "%.2f")) {
             bc.offset = { off[0], off[1] };
         }
         bool trig = bc.isTrigger;
@@ -9424,20 +9617,16 @@ private:
     // two end-cap circles (M7c27).
     void DrawCapsuleColliderEditor(SceneEditor::Entity& /*entity*/,
                                    SceneEditor::CapsuleColliderComponent& cc) {
-        if (ImGui::DragFloat("Radius", &cc.radius, 0.05f,
-                              0.0f, 0.0f, "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Radius", &cc.radius, 0.05f,
+                          0.0f, 0.0f, "%.2f")) {
             if (cc.radius < 0.0f) cc.radius = 0.0f;
         }
-        if (ImGui::DragFloat("Half Length", &cc.halfLength, 0.05f,
-                              0.0f, 0.0f, "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Half Length", &cc.halfLength, 0.05f,
+                          0.0f, 0.0f, "%.2f")) {
             if (cc.halfLength < 0.0f) cc.halfLength = 0.0f;
         }
         float off[2] = { cc.offset.x, cc.offset.y };
-        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
-                               "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Offset", off, 0.05f, 0.0f, 0.0f, "%.2f")) {
             cc.offset = { off[0], off[1] };
         }
         bool trig = cc.isTrigger;
@@ -9468,9 +9657,7 @@ private:
         for (size_t i = 0; i < ec.vertices.size(); ++i) {
             ImGui::PushID(int(i));
             float v[2] = { ec.vertices[i].x, ec.vertices[i].y };
-            if (ImGui::DragFloat2("##ev", v, 0.05f, 0.0f, 0.0f,
-                                   "%.2f")) {
-                UndoSnapshot();
+            if (SpinDragFloat2("##ev", v, 0.05f, 0.0f, 0.0f, "%.2f")) {
                 ec.vertices[i] = { v[0], v[1] };
             }
             ImGui::SameLine();
@@ -9489,9 +9676,7 @@ private:
             ec.closed = closed;
         }
         float off[2] = { ec.offset.x, ec.offset.y };
-        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
-                               "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Offset", off, 0.05f, 0.0f, 0.0f, "%.2f")) {
             ec.offset = { off[0], off[1] };
         }
         bool trig = ec.isTrigger;
@@ -9527,9 +9712,7 @@ private:
         for (size_t i = 0; i < pgc.vertices.size(); ++i) {
             ImGui::PushID(int(i));
             float v[2] = { pgc.vertices[i].x, pgc.vertices[i].y };
-            if (ImGui::DragFloat2("##v", v, 0.05f, 0.0f, 0.0f,
-                                   "%.2f")) {
-                UndoSnapshot();
+            if (SpinDragFloat2("##v", v, 0.05f, 0.0f, 0.0f, "%.2f")) {
                 pgc.vertices[i] = { v[0], v[1] };
             }
             ImGui::SameLine();
@@ -9543,9 +9726,7 @@ private:
             pgc.vertices.erase(pgc.vertices.begin() + removeIdx);
         }
         float off[2] = { pgc.offset.x, pgc.offset.y };
-        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
-                               "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Offset", off, 0.05f, 0.0f, 0.0f, "%.2f")) {
             pgc.offset = { off[0], off[1] };
         }
         bool trig = pgc.isTrigger;
@@ -9625,14 +9806,12 @@ private:
             as.is3D = is3D;
         }
         if (as.is3D) {
-            if (ImGui::DragFloat("Min Distance", &as.minDistance,
-                                  0.05f, 0.0f, 0.0f, "%.2f")) {
-                UndoSnapshot();
+            if (SpinDragFloat("Min Distance", &as.minDistance,
+                              0.05f, 0.0f, 0.0f, "%.2f")) {
                 if (as.minDistance < 0.0f) as.minDistance = 0.0f;
             }
-            if (ImGui::DragFloat("Max Distance", &as.maxDistance,
-                                  0.05f, 0.0f, 0.0f, "%.2f")) {
-                UndoSnapshot();
+            if (SpinDragFloat("Max Distance", &as.maxDistance,
+                              0.05f, 0.0f, 0.0f, "%.2f")) {
                 if (as.maxDistance < as.minDistance + 0.01f) {
                     as.maxDistance = as.minDistance + 0.01f;
                 }
@@ -9647,15 +9826,12 @@ private:
     // radius DragFloat instead of a Vec2 size.
     void DrawCircleColliderEditor(SceneEditor::Entity& /*entity*/,
                                   SceneEditor::CircleColliderComponent& cc) {
-        if (ImGui::DragFloat("Radius", &cc.radius, 0.05f,
-                              0.0f, 0.0f, "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat("Radius", &cc.radius, 0.05f,
+                          0.0f, 0.0f, "%.2f")) {
             if (cc.radius < 0.0f) cc.radius = 0.0f;
         }
         float off[2] = { cc.offset.x, cc.offset.y };
-        if (ImGui::DragFloat2("Offset", off, 0.05f, 0.0f, 0.0f,
-                               "%.2f")) {
-            UndoSnapshot();
+        if (SpinDragFloat2("Offset", off, 0.05f, 0.0f, 0.0f, "%.2f")) {
             cc.offset = { off[0], off[1] };
         }
         bool trig = cc.isTrigger;
@@ -9879,8 +10055,7 @@ private:
                             float v = p.defaultFloat;
                             auto it = an.paramFloats.find(p.name);
                             if (it != an.paramFloats.end()) v = it->second;
-                            if (ImGui::DragFloat(p.name.c_str(), &v, 0.05f)) {
-                                UndoSnapshot();
+                            if (SpinDragFloat(p.name.c_str(), &v, 0.05f)) {
                                 an.paramFloats[p.name] = v;
                                 changed = true;
                             }
@@ -9888,8 +10063,7 @@ private:
                             int v = p.defaultInt;
                             auto it = an.paramInts.find(p.name);
                             if (it != an.paramInts.end()) v = it->second;
-                            if (ImGui::DragInt(p.name.c_str(), &v)) {
-                                UndoSnapshot();
+                            if (SpinDragInt(p.name.c_str(), &v, 1.0f)) {
                                 an.paramInts[p.name] = v;
                                 changed = true;
                             }
@@ -9915,8 +10089,7 @@ private:
                             auto it = an.paramVec2.find(p.name);
                             if (it != an.paramVec2.end()) vv = it->second;
                             float v2[2] = { vv.x, vv.y };
-                            if (ImGui::DragFloat2(p.name.c_str(), v2, 0.05f)) {
-                                UndoSnapshot();
+                            if (SpinDragFloat2(p.name.c_str(), v2, 0.05f)) {
                                 an.paramVec2[p.name] = { v2[0], v2[1] };
                                 changed = true;
                             }
@@ -10035,13 +10208,12 @@ private:
             m_assetDb.FindByGuid(tm.tileset)->typeName == "Tileset";
         if (tilesetOwnedCells) ImGui::BeginDisabled();
         int sz[2] = { tm.cellPixelW, tm.cellPixelH };
-        if (ImGui::DragInt2("Cell Pixels (W,H)", sz, 0.2f, 1, 4096)) {
+        if (SpinDragInt2("Cell Pixels (W,H)", sz, 0.2f, 1, 4096)) {
             tm.cellPixelW = std::max(1, sz[0]);
             tm.cellPixelH = std::max(1, sz[1]);
             changed = true;
         }
         if (tilesetOwnedCells) ImGui::EndDisabled();
-        if (ImGui::IsItemActivated()) UndoSnapshot();
 
         // Sorting layer + order, mirroring the SpriteRenderer inspector
         // so the unified sort pass can place tilemaps anywhere in the
@@ -10067,11 +10239,10 @@ private:
             }
             ImGui::EndCombo();
         }
-        if (ImGui::DragInt("Order in Layer", &tm.orderInLayer, 0.2f,
-                           -1000, 1000)) {
+        if (SpinDragInt("Order in Layer", &tm.orderInLayer, 0.2f,
+                        -1000, 1000)) {
             changed = true;
         }
-        if (ImGui::IsItemActivated()) UndoSnapshot();
         // M7c20: collision layer for the M7c18 per-tile collider
         // synthesis pass. Combo mirrors the BoxCollider /
         // CircleCollider layer picker; the runtime feeds the
@@ -10425,21 +10596,18 @@ private:
         // BEFORE the first delta is applied -- the right place to
         // snapshot for undo. The same pattern is repeated for every
         // drag widget in the inspector.
-        if (ImGui::DragFloat3("Position", pos, 0.05f)) {
+        if (SpinDragFloat3("Position", pos, 0.05f)) {
             t.position = { pos[0], pos[1], pos[2] };
             changed = true;
         }
-        if (ImGui::IsItemActivated()) UndoSnapshot();
-        if (ImGui::DragFloat("Rotation Z", &t.rotation, 0.5f,
-                             -3600.0f, 3600.0f, "%.2f deg")) {
+        if (SpinDragFloat("Rotation Z", &t.rotation, 0.5f,
+                          -3600.0f, 3600.0f, "%.2f deg")) {
             changed = true;
         }
-        if (ImGui::IsItemActivated()) UndoSnapshot();
-        if (ImGui::DragFloat3("Scale", scale, 0.01f, -1000.0f, 1000.0f)) {
+        if (SpinDragFloat3("Scale", scale, 0.01f, -1000.0f, 1000.0f)) {
             t.scale = { scale[0], scale[1], scale[2] };
             changed = true;
         }
-        if (ImGui::IsItemActivated()) UndoSnapshot();
         if (changed) {
             m_scene.MarkDirty();
             UpdateWindowTitle();
@@ -10605,11 +10773,10 @@ private:
             }
             ImGui::EndCombo();
         }
-        if (ImGui::DragInt("Order in Layer", &s.orderInLayer, 0.2f,
-                           -1000, 1000)) {
+        if (SpinDragInt("Order in Layer", &s.orderInLayer, 0.2f,
+                        -1000, 1000)) {
             changed = true;
         }
-        if (ImGui::IsItemActivated()) UndoSnapshot();
         if (ImGui::SmallButton("Remove##sprite")) {
             UndoSnapshot();
             // Lazy remove: find and erase by raw pointer comparison.
