@@ -8572,12 +8572,19 @@ private:
     // frameH) of horizontal + vertical space. Callers wrap the drag
     // widget + this helper inside their own PushID so multiple
     // spinners on one row don't collide.
-    static int DrawSpinArrows(const char* id, float btnW, float frameH) {
+    // Result of a spin-arrow click. `dir` = +1 / -1 / 0 (value delta);
+    // `initial` = true only on the frame the mouse first went down
+    // (not on button-repeat ticks) so callers can UndoSnapshot once
+    // per drag instead of every repeat frame.
+    struct SpinArrowClick { int dir; bool initial; };
+
+    static SpinArrowClick DrawSpinArrows(const char* id,
+                                          float btnW, float frameH) {
         const float halfH = std::floor(frameH * 0.5f);
         ImDrawList*  dl   = ImGui::GetWindowDrawList();
         const float  rnd  = ImGui::GetStyle().FrameRounding;
         const ImU32  cFg  = ImGui::GetColorU32(ImGuiCol_Text);
-        int result = 0;
+        SpinArrowClick result{0, false};
         ImGui::PushID(id);
         ImGui::BeginGroup();
         // Kill the vertical ItemSpacing so the two half-height buttons
@@ -8585,12 +8592,13 @@ private:
         // the down-arrow drop below the field.
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
                             ImVec2(ImGui::GetStyle().ItemSpacing.x, 0.0f));
-        // ButtonRepeat makes IsItemClicked fire on the initial press +
-        // again at io.KeyRepeatDelay / io.KeyRepeatRate cadence while
-        // the mouse stays held, so holding a spinner scrubs the value
-        // continuously instead of only tick-per-press.
+        // ButtonRepeat makes InvisibleButton return true on the initial
+        // press + again at io.KeyRepeatDelay / io.KeyRepeatRate cadence
+        // while the mouse stays held, so holding a spinner scrubs the
+        // value continuously instead of only tick-per-press.
         ImGui::PushButtonRepeat(true);
-        auto drawHalf = [&](const char* subId, bool isUp, int& out) {
+        auto drawHalf = [&](const char* subId, bool isUp,
+                            SpinArrowClick& out) {
             ImVec2 p = ImGui::GetCursorScreenPos();
             // InvisibleButton's return value respects PushButtonRepeat --
             // IsItemClicked() does not, so read `pressed` directly.
@@ -8601,7 +8609,13 @@ private:
                 : (ImGui::IsItemHovered()
                     ? ImGui::GetColorU32(ImGuiCol_ButtonHovered)
                     : ImGui::GetColorU32(ImGuiCol_Button));
-            if (pressed) out = isUp ? 1 : -1;
+            if (pressed) {
+                out.dir     = isUp ? 1 : -1;
+                // IsItemActivated fires only on the frame the button
+                // first went active; repeat ticks land while it's
+                // already active, so this flag distinguishes them.
+                out.initial = ImGui::IsItemActivated();
+            }
             dl->AddRectFilled(p, ImVec2(p.x + btnW, p.y + halfH), c, rnd);
             const float cx = p.x + btnW * 0.5f;
             const float cy = p.y + halfH * 0.5f;
@@ -8650,10 +8664,12 @@ private:
         bool changed = ImGui::DragFloat("##v", v, speed, lo, hi, fmt, flags);
         if (ImGui::IsItemActivated()) UndoSnapshot();
         ImGui::SameLine(0, s.ItemInnerSpacing.x);
-        const int dir = DrawSpinArrows("s", spinW, frameH);
-        if (dir != 0) {
-            UndoSnapshot();
-            float nv = *v + float(dir) * step;
+        const SpinArrowClick sp = DrawSpinArrows("s", spinW, frameH);
+        if (sp.dir != 0) {
+            // Only snapshot on the first tick of a hold; button-repeat
+            // ticks skip so a long hold doesn't spam the undo stack.
+            if (sp.initial) UndoSnapshot();
+            float nv = *v + float(sp.dir) * step;
             if (lo < hi) nv = std::clamp(nv, lo, hi);
             *v = nv;
             changed = true;
@@ -8694,10 +8710,10 @@ private:
                 changed = true;
             if (ImGui::IsItemActivated()) UndoSnapshot();
             ImGui::SameLine(0, s.ItemInnerSpacing.x);
-            const int dir = DrawSpinArrows("s", spinW, frameH);
-            if (dir != 0) {
-                UndoSnapshot();
-                float nv = v[i] + float(dir) * step;
+            const SpinArrowClick sp = DrawSpinArrows("s", spinW, frameH);
+            if (sp.dir != 0) {
+                if (sp.initial) UndoSnapshot();
+                float nv = v[i] + float(sp.dir) * step;
                 if (lo < hi) nv = std::clamp(nv, lo, hi);
                 v[i] = nv;
                 changed = true;
@@ -8747,10 +8763,10 @@ private:
         bool changed = ImGui::DragInt("##v", v, speed, lo, hi, fmt, flags);
         if (ImGui::IsItemActivated()) UndoSnapshot();
         ImGui::SameLine(0, s.ItemInnerSpacing.x);
-        const int dir = DrawSpinArrows("s", spinW, frameH);
-        if (dir != 0) {
-            UndoSnapshot();
-            int nv = *v + dir * step;
+        const SpinArrowClick sp = DrawSpinArrows("s", spinW, frameH);
+        if (sp.dir != 0) {
+            if (sp.initial) UndoSnapshot();
+            int nv = *v + sp.dir * step;
             if (lo < hi) nv = std::clamp(nv, lo, hi);
             *v = nv;
             changed = true;
@@ -8789,10 +8805,10 @@ private:
                 changed = true;
             if (ImGui::IsItemActivated()) UndoSnapshot();
             ImGui::SameLine(0, s.ItemInnerSpacing.x);
-            const int dir = DrawSpinArrows("s", spinW, frameH);
-            if (dir != 0) {
-                UndoSnapshot();
-                int nv = v[i] + dir * step;
+            const SpinArrowClick sp = DrawSpinArrows("s", spinW, frameH);
+            if (sp.dir != 0) {
+                if (sp.initial) UndoSnapshot();
+                int nv = v[i] + sp.dir * step;
                 if (lo < hi) nv = std::clamp(nv, lo, hi);
                 v[i] = nv;
                 changed = true;
