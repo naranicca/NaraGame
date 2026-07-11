@@ -8585,15 +8585,23 @@ private:
         // the down-arrow drop below the field.
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
                             ImVec2(ImGui::GetStyle().ItemSpacing.x, 0.0f));
+        // ButtonRepeat makes IsItemClicked fire on the initial press +
+        // again at io.KeyRepeatDelay / io.KeyRepeatRate cadence while
+        // the mouse stays held, so holding a spinner scrubs the value
+        // continuously instead of only tick-per-press.
+        ImGui::PushButtonRepeat(true);
         auto drawHalf = [&](const char* subId, bool isUp, int& out) {
             ImVec2 p = ImGui::GetCursorScreenPos();
-            ImGui::InvisibleButton(subId, ImVec2(btnW, halfH));
+            // InvisibleButton's return value respects PushButtonRepeat --
+            // IsItemClicked() does not, so read `pressed` directly.
+            const bool pressed = ImGui::InvisibleButton(subId,
+                                                        ImVec2(btnW, halfH));
             const ImU32 c = ImGui::IsItemActive()
                 ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
                 : (ImGui::IsItemHovered()
                     ? ImGui::GetColorU32(ImGuiCol_ButtonHovered)
                     : ImGui::GetColorU32(ImGuiCol_Button));
-            if (ImGui::IsItemClicked()) out = isUp ? 1 : -1;
+            if (pressed) out = isUp ? 1 : -1;
             dl->AddRectFilled(p, ImVec2(p.x + btnW, p.y + halfH), c, rnd);
             const float cx = p.x + btnW * 0.5f;
             const float cy = p.y + halfH * 0.5f;
@@ -8612,6 +8620,7 @@ private:
         };
         drawHalf("up", true, result);
         drawHalf("dn", false, result);
+        ImGui::PopButtonRepeat();
         ImGui::PopStyleVar();
         ImGui::EndGroup();
         ImGui::PopID();
