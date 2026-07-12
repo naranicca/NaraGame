@@ -909,7 +909,20 @@ private:
     // (Update, raycast, overlap) still see the full dt as
     // "this frame".
     static constexpr int kPhysicsSubSteps = 4;
+    // Cap on a single physics tick's dt. ImGui reports the full wall-
+    // clock elapsed on the first render after a heavy OnStart (asset
+    // scan, script compile, texture upload -- easily hundreds of
+    // milliseconds) + on any frame the app was paused by a debugger,
+    // alt-tab, or GC-style hitch. Feeding that raw into semi-implicit
+    // Euler would let gravity accumulate a delta big enough to tunnel
+    // a body straight through a thin collider even after sub-stepping
+    // (which was the Player-falls-through-ground bug on auto-load).
+    // 1/30 s is enough headroom to hide small stutters + tight enough
+    // to keep the biggest single-step displacement below a typical
+    // sprite thickness at the gravity magnitudes we see in practice.
+    static constexpr float kPhysicsMaxDt = 1.0f / 30.0f;
     void TickPhysics(float dt) {
+        if (dt > kPhysicsMaxDt) dt = kPhysicsMaxDt;
         const float subDt = dt / float(kPhysicsSubSteps);
         for (int i = 0; i < kPhysicsSubSteps; ++i) {
             TickRigidbodies(subDt);
