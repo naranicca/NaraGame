@@ -225,6 +225,7 @@ void Project::Close() {
     m_audioReverbWet    = 0.0f;
     m_mainScenePath.clear();
     m_lastOpenedScenePath.clear();
+    m_editorPlayState = true;
 }
 
 bool Project::EnsureFolderTree() const {
@@ -285,6 +286,7 @@ bool Project::WriteProjectJson() const {
     if (!m_lastOpenedScenePath.empty()) {
         root.Add("lastScene", Value::MakeString(m_lastOpenedScenePath));
     }
+    root.Add("editorPlayState", Value::MakeBool(m_editorPlayState));
     const std::string out = NaraGame::MiniJson::Write(root);
     if (!WriteFileText(ProjectJsonPath(), out)) {
         NARAGAME_ERROR("Project: cannot write '%s'", ProjectJsonPath().c_str());
@@ -348,6 +350,7 @@ bool Project::ReadProjectJson() {
     }
     m_mainScenePath       = root.GetString("mainScene", "");
     m_lastOpenedScenePath = root.GetString("lastScene", "");
+    m_editorPlayState     = root.GetBool  ("editorPlayState", true);
     m_collisionMatrixOff.clear();
     const NaraGame::MiniJson::Value* cmatrix = root.Find("collisionMatrixOff");
     if (cmatrix && cmatrix->IsArray()) {

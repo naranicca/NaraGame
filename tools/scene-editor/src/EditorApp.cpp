@@ -187,6 +187,12 @@ void ApplyEditorTheme(EditorTheme theme, float uiScale) {
 struct EditorPrefs {
     float       uiScale = 1.0f;
     EditorTheme theme   = EditorTheme::Dark;
+    // Most-recently-opened project folders. Freshest entry at
+    // index 0. Capped so a heavy user's editor.prefs.json doesn't
+    // grow without bound + so the File > Recent Projects submenu
+    // stays scannable.
+    std::vector<std::string> recentProjects;
+    static constexpr size_t  kRecentProjectsMax = 10;
 };
 
 EditorPrefs LoadEditorPrefs(float scaleFallback) {
@@ -211,6 +217,13 @@ EditorPrefs LoadEditorPrefs(float scaleFallback) {
             out.uiScale = x;
         } else if (k == "theme" && v.IsString()) {
             out.theme = EditorThemeFromStr(v.stringValue);
+        } else if (k == "recentProjects" && v.IsArray()) {
+            for (const auto& item : v.arrayValue) {
+                if (!item.IsString()) continue;
+                out.recentProjects.push_back(item.stringValue);
+                if (out.recentProjects.size() >=
+                    EditorPrefs::kRecentProjectsMax) break;
+            }
         }
     }
     return out;
@@ -222,6 +235,12 @@ void SaveEditorPrefs(const EditorPrefs& p) {
              NaraGame::MiniJson::Value::MakeNumber(p.uiScale));
     root.Add("theme",
              NaraGame::MiniJson::Value::MakeString(EditorThemeToStr(p.theme)));
+    NaraGame::MiniJson::Value arr =
+        NaraGame::MiniJson::Value::MakeArray();
+    for (const std::string& s : p.recentProjects) {
+        arr.Push(NaraGame::MiniJson::Value::MakeString(s));
+    }
+    root.Add("recentProjects", std::move(arr));
     const std::string text = NaraGame::MiniJson::Write(root);
     std::ofstream out(kEditorPrefsPath, std::ios::binary);
     if (out) out << text;
@@ -498,9 +517,20 @@ public:
         // uploads the font atlas texture the first time it sees one.
         // User-saved scale + theme in editor.prefs.json override the
         // DPI/dark defaults.
-        const EditorPrefs prefs = LoadEditorPrefs(DetectUiScale(hwnd));
-        m_uiScale = prefs.uiScale;
-        m_theme   = prefs.theme;
+        m_prefs = LoadEditorPrefs(DetectUiScale(hwnd));
+        m_uiScale = m_prefs.uiScale;
+        m_theme   = m_prefs.theme;
+        // Prune paths whose folder no longer exists so a menu that
+        // survived a rename / delete doesn't offer dead entries.
+        {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            auto& r = m_prefs.recentProjects;
+            r.erase(std::remove_if(r.begin(), r.end(),
+                [&](const std::string& p) {
+                    return !fs::is_directory(p, ec);
+                }), r.end());
+        }
         LoadEditorFonts(io, m_uiScale);
         ApplyEditorTheme(m_theme, m_uiScale);
 
@@ -537,6 +567,7 @@ public:
                 m_assetDb.Open(m_project);
                 ApplyProjectAudioMixer();
                 ReloadAllScripts();
+                PushRecentProject(m_startupProjectPath);
                 UpdateWindowTitle();
             }
         }
@@ -551,6 +582,12 @@ public:
             // has moved.
             AutoLoadLastScene();
             UpdateWindowTitle();
+        }
+        // Restore the Play toggle to whatever the project.json last
+        // saw. Default is `true`, so a legacy project with no field
+        // in JSON keeps the historical "boots into Play" behaviour.
+        if (m_project.IsOpen()) {
+            m_animPlaying = m_project.EditorPlayState();
         }
         // M9c1 standalone: force Play on after the scene is loaded
         // so the user gets a running game immediately. The same
@@ -3597,8 +3634,16 @@ private:
         const std::string folder =
             PickFolderDialog(m_hwnd, L"Open NaraGame Project");
         if (folder.empty()) return;
+        OpenProjectFromPath(folder);
+    }
+
+    // Open path shared by the folder-picker menu, the File > Recent
+    // Projects submenu, and any future project-URL handler. Returns
+    // false + leaves the current project in place if the folder
+    // doesn't contain a project.json.
+    bool OpenProjectFromPath(const std::string& folder) {
         SceneEditor::Project p;
-        if (!p.Open(folder)) return;
+        if (!p.Open(folder)) return false;
         // Drop the previous project's scene state so AutoLoadLastScene
         // isn't skipped by the "already have a path" guard + the empty
         // fallback below shows the new project's default state instead
@@ -3613,7 +3658,10 @@ private:
         ApplyProjectAudioMixer();
         ReloadAllScripts();
         AutoLoadLastScene();
+        m_animPlaying = m_project.EditorPlayState();
+        PushRecentProject(folder);
         UpdateWindowTitle();
+        return true;
     }
 
     // Re-open the scene the user was last editing in this project.
@@ -4103,6 +4151,28 @@ private:
         return abs;
     }
 
+    // Move `path` to the front of the MRU list, dropping any prior
+    // occurrence and capping to kRecentProjectsMax. Persists to
+    // editor.prefs.json. Called from every project-open path so a
+    // project shows up in File > Recent Projects the moment it's
+    // opened.
+    void PushRecentProject(const std::string& path) {
+        if (path.empty()) return;
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        // Normalise so `./PlatformerTest` and the absolute form
+        // dedupe against each other + look consistent in the menu.
+        const fs::path abs = fs::absolute(path, ec);
+        const std::string canon = ec ? path : abs.generic_string();
+        auto& r = m_prefs.recentProjects;
+        r.erase(std::remove(r.begin(), r.end(), canon), r.end());
+        r.insert(r.begin(), canon);
+        if (r.size() > EditorPrefs::kRecentProjectsMax) {
+            r.resize(EditorPrefs::kRecentProjectsMax);
+        }
+        SaveEditorPrefs(m_prefs);
+    }
+
     // Central point for updating which scene the editor is currently
     // working on. Beyond assigning m_currentScenePath, this stamps the
     // project's LastOpenedScenePath + persists it, so the next launch
@@ -4306,6 +4376,35 @@ private:
                 StartNewProjectFlow();
             if (ImGui::MenuItem("Open Project...", "Ctrl+Shift+O"))
                 DoOpenProject();
+            // Recent projects submenu -- most-recently opened first,
+            // capped by kRecentProjectsMax. The stored paths are
+            // absolute; show only the folder's stem in the menu label
+            // so long paths don't stretch the menu bar, keep the full
+            // path as a hover tooltip. Defer the actual Open call
+            // until the menu block has closed so we don't mutate
+            // m_prefs.recentProjects mid-iteration.
+            std::string pickedRecent;
+            const bool anyRecent = !m_prefs.recentProjects.empty();
+            if (ImGui::BeginMenu("Recent Projects", anyRecent)) {
+                namespace fs = std::filesystem;
+                for (const std::string& p : m_prefs.recentProjects) {
+                    const std::string label =
+                        fs::path(p).filename().string();
+                    if (ImGui::MenuItem(label.c_str())) {
+                        pickedRecent = p;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s", p.c_str());
+                    }
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Clear Recent")) {
+                    m_prefs.recentProjects.clear();
+                    SaveEditorPrefs(m_prefs);
+                }
+                ImGui::EndMenu();
+            }
+            if (!pickedRecent.empty()) OpenProjectFromPath(pickedRecent);
             if (ImGui::MenuItem("Close Project", nullptr, false, m_project.IsOpen()))
                 DoCloseProject();
             ImGui::Separator();
@@ -8103,10 +8202,9 @@ private:
 
         ImGui::Separator();
         if (ImGui::Button("Save & Close")) {
-            EditorPrefs p;
-            p.uiScale = m_uiScale;
-            p.theme   = m_theme;
-            SaveEditorPrefs(p);
+            m_prefs.uiScale = m_uiScale;
+            m_prefs.theme   = m_theme;
+            SaveEditorPrefs(m_prefs);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -8441,6 +8539,7 @@ private:
                 m_assetDb.Open(m_project);
                 ApplyProjectAudioMixer();
                 ReloadAllScripts();
+                PushRecentProject(root);
                 UpdateWindowTitle();
                 ImGui::CloseCurrentPopup();
             } else {
@@ -11054,7 +11153,18 @@ private:
             ImGui::Begin("##StandaloneViewport", nullptr, flags);
             ImGui::PopStyleVar(2);
         } else {
+            // Shrink the panel's top / bottom WindowPadding for the
+            // Viewport specifically so the toolbar row sits closer to
+            // the tab bar + the viewport grid. The default (~8 px)
+            // + the ItemSpacing gap below the row made the toolbar
+            // feel like it had a fat top margin; matching both sides
+            // to ItemSpacing.y gives a compact, symmetric strip.
+            const float tightPadY = ImGui::GetStyle().ItemSpacing.y;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                                ImVec2(ImGui::GetStyle().WindowPadding.x,
+                                        tightPadY));
             ImGui::Begin("Viewport");
+            ImGui::PopStyleVar();
 
             // Toolbar row: zoom / camera controls at a glance.
             ImGui::Text("Zoom %.0f px/u  |  Centre (%.2f, %.2f)",
@@ -11070,7 +11180,28 @@ private:
                 }
             }
             ImGui::SameLine();
-            ImGui::Checkbox("Play", &m_animPlaying);
+            // Match the height of the neighbouring SmallButtons +
+            // the "Zoom ... Centre ..." text on the same row.
+            // ImGui::Checkbox picks its box size from `FramePadding.y`
+            // (defaults to ~4 px), which made it visibly taller than
+            // SmallButton (which pushes FramePadding.y = 0 internally).
+            // Push the same override for the toggle so all four items
+            // on the row share one baseline.
+            const ImVec2 fp = ImGui::GetStyle().FramePadding;
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                                ImVec2(fp.x, 0.0f));
+            if (ImGui::Checkbox("Play", &m_animPlaying)) {
+                // Persist the toggle into the project so the next
+                // open lands in the same state. Only when the toggle
+                // truly moved, and only when a project is loaded
+                // (no-op on the "no project open" splash screen).
+                if (m_project.IsOpen() &&
+                    m_project.EditorPlayState() != m_animPlaying) {
+                    m_project.SetEditorPlayState(m_animPlaying);
+                    m_project.Save();
+                }
+            }
+            ImGui::PopStyleVar();
         }
 
         const ImVec2 panelMin  = ImGui::GetCursorScreenPos();
@@ -13746,6 +13877,11 @@ private:
     // lets the theme change without paying the atlas rebuild cost.
     EditorTheme         m_theme                = EditorTheme::Dark;
     bool                m_pendingThemeRefresh  = false;
+    // Cached editor preferences (loaded in OnStart, saved by the
+    // Preferences modal + PushRecentProject). Keeps
+    // recentProjects around so a Save & Close doesn't wipe the
+    // MRU list built up by scene-editor sessions.
+    EditorPrefs         m_prefs;
     // M10c1 settings overlay rebind capture. Empty when no rebind
     // is in progress; set to the action name when the user clicks
     // "Rebind" + cleared on the next key press (which writes the

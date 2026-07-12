@@ -114,6 +114,14 @@ public:
     // stable "boot scene" for standalone builds.
     const std::string& LastOpenedScenePath() const { return m_lastOpenedScenePath; }
     void SetLastOpenedScenePath(std::string p)     { m_lastOpenedScenePath = std::move(p); }
+
+    // Editor Play-mode toggle at last save. Restored on project open
+    // so the user comes back to the same simulate / paused state they
+    // left in. Defaults to true (unchanged from the pre-persistence
+    // behaviour), so a legacy project.json with no `editorPlayState`
+    // block boots exactly as it did before.
+    bool EditorPlayState() const { return m_editorPlayState; }
+    void SetEditorPlayState(bool on) { m_editorPlayState = on; }
     void  SetAudioMasterVolume(float v);
     void  SetAudioSfxVolume(float v);
     void  SetAudioMusicVolume(float v);
@@ -141,6 +149,7 @@ private:
     float m_audioReverbWet    = 0.0f;
     std::string m_mainScenePath;
     std::string m_lastOpenedScenePath;
+    bool m_editorPlayState = true;
 };
 
 } // namespace SceneEditor
