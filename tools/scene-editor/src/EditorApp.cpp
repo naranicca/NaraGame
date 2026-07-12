@@ -181,7 +181,17 @@ void ApplyEditorTheme(EditorTheme theme, float uiScale) {
         case EditorTheme::Dark:
         default:                 ImGui::StyleColorsDark();  break;
     }
-    ImGui::GetStyle().ScaleAllSizes(uiScale);
+    // Rounded-rectangle affordances for buttons + input frames. Set
+    // BEFORE ScaleAllSizes so the corner radius is expressed in
+    // 1x units + then scales with the rest of the UI. GrabRounding
+    // matches so slider grabs read consistently with buttons; Popup
+    // + WindowRounding stay 0 so docked panels keep sharp edges.
+    ImGuiStyle& style     = ImGui::GetStyle();
+    style.FrameRounding   = 4.0f;
+    style.GrabRounding    = 4.0f;
+    style.TabRounding     = 4.0f;
+    style.PopupRounding   = 4.0f;
+    style.ScaleAllSizes(uiScale);
 }
 
 struct EditorPrefs {
@@ -8755,6 +8765,7 @@ private:
 
     void DrawHierarchyPanel() {
         ImGui::Begin("Hierarchy");
+        ShrinkPanelCollapseIcon();
         if (!m_project.IsOpen()) {
             ImGui::TextDisabled("No project open.");
             ImGui::End();
@@ -8937,21 +8948,27 @@ private:
     // triangle. Called AFTER an ImGui::BeginCombo / ImGui::Combo so
     // GetItemRectMin/Max return the combo's frame + we can identify
     // the arrow-button chip on the right.
-    static void ShrinkComboArrow() {
-        // BeginCombo's ItemAdd stores the preview-frame rect (label
-        // excluded) in NavRect, and the total rect (preview + label)
-        // in Rect. GetItemRectMax lands past the trailing label, so
-        // NavRect is what we want to anchor the arrow chip on.
-        const ImRect& navBB   = ImGui::GetCurrentContext()->LastItemData.NavRect;
-        const ImVec2 bMin     = navBB.Min;
-        const ImVec2 bMax     = navBB.Max;
+    static void ShrinkComboArrow(ImDrawList* parentDL,
+                                  ImVec2 bMin, ImVec2 bMax) {
+        // Rect is passed in explicitly by the caller (captured before
+        // BeginCombo). Reading LastItemData.NavRect here was unsafe:
+        // when the popup opens, BeginCombo runs Begin() internally to
+        // spawn the popup window + LastItemData ends up reflecting the
+        // popup's own first item instead of the parent combo. That
+        // left the big arrow visible whenever the dropdown was open.
         const float fs        = ImGui::GetFontSize();
         const float chipW     = ImGui::GetFrameHeight();
         if (bMax.x - bMin.x < chipW - 1.0f) return;
         const float chipL     = bMax.x - chipW;
-        const bool hovered    = ImGui::IsItemHovered();
-        const ImU32 btnBg     = ImGui::GetColorU32(
-            hovered ? ImGuiCol_ButtonHovered : ImGuiCol_Button);
+        // Hover state based on mouse position over the pre-computed
+        // rect, because IsItemHovered on the combo returns false once
+        // the popup opens.
+        const bool hovered    = ImGui::IsMouseHoveringRect(bMin, bMax);
+        // Match the combo preview frame's colour (FrameBg / FrameBgHovered)
+        // so the arrow chip visually merges with the value area on the
+        // left instead of reading as a separate button.
+        const ImU32 chipBg    = ImGui::GetColorU32(
+            hovered ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg);
         // Force the base fill fully opaque so the big arrow is
         // completely painted out. WindowBg's alpha is ~94 %, which
         // let the original triangle bleed through in an earlier
@@ -8962,13 +8979,42 @@ private:
             int(wbg.y * 255.0f + 0.5f),
             int(wbg.z * 255.0f + 0.5f), 255);
         const ImU32 textCol   = ImGui::GetColorU32(ImGuiCol_Text);
-        // Cover the whole arrow chip (opaque + button colour), then
+        // Cover the whole arrow chip (opaque + FrameBg colour), then
         // draw a half-scale arrow centred inside it.
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const ImVec2 cMin(chipL + 1.0f, bMin.y + 1.0f);
-        const ImVec2 cMax(bMax.x - 1.0f, bMax.y - 1.0f);
-        dl->AddRectFilled(cMin, cMax, windowBg);
-        dl->AddRectFilled(cMin, cMax, btnBg);
+        // Use the parent's drawlist captured before BeginCombo. If
+        // the popup opened, ImGui::GetWindowDrawList() at this point
+        // would target the popup + the big arrow would stay visible
+        // on the parent combo. Same trick as SmallBeginMenu.
+        ImDrawList* dl = parentDL;
+        // Match the arrow chip's exact shape (rounded right corners
+        // + full extent) so the fill covers every pixel of the
+        // original -- including the arc regions near the top-right
+        // and bottom-right corners, which were leaking through as
+        // faint outlines on my earlier sharp-rect cover. Painting to
+        // the outer edge also overpaints the ImGui FrameBorder stroke
+        // on this half, so we re-draw the top / right / bottom border
+        // ourselves right after (leaving the seam side unstroked so
+        // preview + chip continue to read as one pill).
+        const ImGuiStyle& st = ImGui::GetStyle();
+        const float rnd = st.FrameRounding;
+        const ImVec2 cMin(chipL,  bMin.y);
+        const ImVec2 cMax(bMax.x, bMax.y);
+        dl->AddRectFilled(cMin, cMax, windowBg, rnd,
+                          ImDrawFlags_RoundCornersRight);
+        dl->AddRectFilled(cMin, cMax, chipBg, rnd,
+                          ImDrawFlags_RoundCornersRight);
+        if (st.FrameBorderSize > 0.0f) {
+            const ImU32 borderCol = ImGui::GetColorU32(ImGuiCol_Border);
+            const float th = st.FrameBorderSize;
+            // Trace top -> top-right arc -> right -> bottom-right arc
+            // -> bottom, skipping the seam at chipL so the border
+            // doesn't cut the pill in half.
+            dl->PathLineTo(ImVec2(chipL,          cMin.y));
+            dl->PathArcToFast(ImVec2(cMax.x - rnd, cMin.y + rnd), rnd, 9, 12);
+            dl->PathArcToFast(ImVec2(cMax.x - rnd, cMax.y - rnd), rnd, 0, 3);
+            dl->PathLineTo(ImVec2(chipL,          cMax.y));
+            dl->PathStroke(borderCol, ImDrawFlags_None, th);
+        }
         const float smallScale = 0.5f;
         const float cW = cMax.x - cMin.x;
         const float cH = cMax.y - cMin.y;
@@ -8985,29 +9031,50 @@ private:
     // ShrinkComboArrow() automatically. Call sites keep the exact
     // same shape (bool return, pair with ImGui::EndCombo for the
     // BeginCombo variant), only the qualifier changes.
+    // Capture the parent drawlist + the combo's frame rect BEFORE
+    // BeginCombo, because opening the popup swaps ImGui's current
+    // window (invalidating GetWindowDrawList) and rewrites the
+    // LastItemData that ShrinkComboArrow would otherwise anchor on.
+    struct ComboAnchor {
+        ImDrawList* parentDL;
+        ImVec2      bMin;
+        ImVec2      bMax;
+    };
+    static ComboAnchor CaptureComboAnchor() {
+        ComboAnchor a;
+        a.parentDL = ImGui::GetWindowDrawList();
+        a.bMin     = ImGui::GetCursorScreenPos();
+        const float w      = ImGui::CalcItemWidth();
+        const float frameH = ImGui::GetFrameHeight();
+        a.bMax     = ImVec2(a.bMin.x + w, a.bMin.y + frameH);
+        return a;
+    }
     static bool SmallBeginCombo(const char* label,
                                 const char* preview_value,
                                 ImGuiComboFlags flags = 0) {
+        const ComboAnchor a = CaptureComboAnchor();
         const bool open = ImGui::BeginCombo(label, preview_value, flags);
-        ShrinkComboArrow();
+        ShrinkComboArrow(a.parentDL, a.bMin, a.bMax);
         return open;
     }
     static bool SmallCombo(const char* label, int* current_item,
                            const char* const items[], int items_count,
                            int popup_max_height_in_items = -1) {
+        const ComboAnchor a = CaptureComboAnchor();
         const bool changed = ImGui::Combo(label, current_item, items,
                                            items_count,
                                            popup_max_height_in_items);
-        ShrinkComboArrow();
+        ShrinkComboArrow(a.parentDL, a.bMin, a.bMax);
         return changed;
     }
     static bool SmallCombo(const char* label, int* current_item,
                            const char* items_separated_by_zeros,
                            int popup_max_height_in_items = -1) {
+        const ComboAnchor a = CaptureComboAnchor();
         const bool changed = ImGui::Combo(label, current_item,
                                            items_separated_by_zeros,
                                            popup_max_height_in_items);
-        ShrinkComboArrow();
+        ShrinkComboArrow(a.parentDL, a.bMin, a.bMax);
         return changed;
     }
 
@@ -9070,6 +9137,52 @@ private:
     // the right edge so the user can tell at a glance the button
     // spawns a popup menu. Same behaviour as Button: returns true
     // on click; the caller pairs it with OpenPopup + BeginPopup.
+    // Shrink the docked window's "Hide tab bar" menu button icon to
+    // 80% of its native FontSize footprint. ImGui hardcodes it at
+    // full FontSize via CollapseButton -> RenderArrowDockMenu with no
+    // style override, so we overpaint the button's hitbox with the
+    // title-bar colour + redraw the icon at the smaller scale. Called
+    // AFTER ImGui::Begin() for each docked panel; a no-op for
+    // non-docked windows or when the menu button isn't shown.
+    static void ShrinkPanelCollapseIcon() {
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        if (!w || !w->DockNode) return;
+        ImGuiDockNode* node = w->DockNode;
+        if (!node->HasWindowMenuButton || !node->HostWindow) return;
+        const ImGuiStyle& s = ImGui::GetStyle();
+        const float fs = ImGui::GetFontSize();
+        // Same math ImGui uses in DockNodeCalcTabBarLayout to place
+        // the button on the left edge of the dock's title bar.
+        const ImVec2 btnMin(node->Pos.x + s.WindowBorderSize + s.FramePadding.x,
+                            node->Pos.y + s.FramePadding.y);
+        const ImVec2 btnMax(btnMin.x + fs, btnMin.y + fs);
+        const bool hovered = ImGui::IsMouseHoveringRect(btnMin, btnMax);
+        // Base cover = title-bar colour (matches ImGui's title fill),
+        // then re-add the hover tint on top so the button still lights
+        // up under the cursor.
+        const ImU32 titleBg = ImGui::GetColorU32(node->IsFocused
+            ? ImGuiCol_TitleBgActive : ImGuiCol_TitleBg);
+        // The original CollapseButton is rendered onto the DOCK NODE's
+        // host window drawlist, not the docked child's own. Paint
+        // there or the overpaint lands on the wrong list + doesn't
+        // hide anything.
+        ImDrawList* dl = node->HostWindow->DrawList;
+        dl->AddRectFilled(btnMin, btnMax, titleBg);
+        if (hovered) {
+            dl->AddRectFilled(btnMin, btnMax,
+                ImGui::GetColorU32(ImGuiCol_ButtonHovered));
+        }
+        // Redraw the icon centred. 60 % of FontSize keeps the two-part
+        // glyph legible while pushing it well below the default size.
+        const float scale   = 0.6f;
+        const float smallFs = fs * scale;
+        const float off     = (fs - smallFs) * 0.5f;
+        ImGui::RenderArrowDockMenu(dl,
+            ImVec2(btnMin.x + off, btnMin.y + off),
+            smallFs,
+            ImGui::GetColorU32(ImGuiCol_Text));
+    }
+
     static bool MenuButton(const char* label) {
         const ImGuiStyle& s = ImGui::GetStyle();
         const float frameH = ImGui::GetFrameHeight();
@@ -9121,8 +9234,6 @@ private:
                                           float btnW, float frameH) {
         const float halfH = std::floor(frameH * 0.5f);
         ImDrawList*  dl   = ImGui::GetWindowDrawList();
-        const float  rnd  = ImGui::GetStyle().FrameRounding;
-        const ImU32  cFg  = ImGui::GetColorU32(ImGuiCol_Text);
         SpinArrowClick result{0, false};
         ImGui::PushID(id);
         ImGui::BeginGroup();
@@ -9143,11 +9254,8 @@ private:
             // IsItemClicked() does not, so read `pressed` directly.
             const bool pressed = ImGui::InvisibleButton(subId,
                                                         ImVec2(btnW, halfH));
-            const ImU32 c = ImGui::IsItemActive()
-                ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
-                : (ImGui::IsItemHovered()
-                    ? ImGui::GetColorU32(ImGuiCol_ButtonHovered)
-                    : ImGui::GetColorU32(ImGuiCol_Button));
+            const bool halfActive  = ImGui::IsItemActive();
+            const bool halfHovered = ImGui::IsItemHovered();
             if (pressed) {
                 out.dir     = isUp ? 1 : -1;
                 // IsItemActivated fires only on the frame the button
@@ -9155,7 +9263,16 @@ private:
                 // already active, so this flag distinguishes them.
                 out.initial = ImGui::IsItemActivated();
             }
-            dl->AddRectFilled(p, ImVec2(p.x + btnW, p.y + halfH), c, rnd);
+            // Skip painting a solid background -- the caller already
+            // filled a rounded FrameBg rectangle behind the entire
+            // drag + spinner block. Individual hover / active state
+            // gets communicated through the arrow colour instead so
+            // the pill's silhouette stays intact.
+            const ImU32 cFg = halfActive
+                ? ImGui::GetColorU32(ImGuiCol_Text)
+                : (halfHovered
+                    ? ImGui::GetColorU32(ImGuiCol_ButtonHovered)
+                    : ImGui::GetColorU32(ImGuiCol_TextDisabled));
             const float cx = p.x + btnW * 0.5f;
             const float cy = p.y + halfH * 0.5f;
             const float a  = std::max(2.0f, btnW * 0.22f);
@@ -9204,12 +9321,28 @@ private:
         ImGui::PushID(label);
         ImGui::BeginGroup();
         const float itemW = ImGui::CalcItemWidth();
-        ImGui::SetNextItemWidth(std::max(1.0f,
-            itemW - spinW - s.ItemInnerSpacing.x));
+        // Draw a single rounded FrameBg pill BEHIND drag + spinner
+        // so the whole assembly reads as one control with a shared
+        // outline. DragFloat + DrawSpinArrows are then rendered with
+        // transparent backgrounds so nothing overpaints the pill's
+        // silhouette.
+        const ImVec2 pillMin = ImGui::GetCursorScreenPos();
+        const ImVec2 pillMax(pillMin.x + itemW, pillMin.y + frameH);
+        const bool pillHovered = ImGui::IsMouseHoveringRect(pillMin, pillMax);
+        ImDrawList* pdl = ImGui::GetWindowDrawList();
+        pdl->AddRectFilled(pillMin, pillMax,
+            ImGui::GetColorU32(pillHovered
+                ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg),
+            s.FrameRounding);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  IM_COL32(0,0,0,0));
+        ImGui::SetNextItemWidth(std::max(1.0f, itemW - spinW));
         bool changed = ImGui::DragFloat("##v", v, speed, lo, hi, fmt, flags);
         if (ImGui::IsItemActivated()) UndoSnapshot();
-        ImGui::SameLine(0, s.ItemInnerSpacing.x);
+        ImGui::SameLine(0, 0.0f);
         const SpinArrowClick sp = DrawSpinArrows("s", spinW, frameH);
+        ImGui::PopStyleColor(3);
         if (sp.dir != 0) {
             // Only snapshot on the first tick of a hold; button-repeat
             // ticks skip so a long hold doesn't spam the undo stack.
@@ -9244,18 +9377,34 @@ private:
         const float itemW = ImGui::CalcItemWidth();
         const float perComp = std::max(1.0f,
             (itemW - float(n - 1) * s.ItemInnerSpacing.x) / float(n));
-        const float perDrag = std::max(16.0f,
-            perComp - spinW - s.ItemInnerSpacing.x);
+        // Per-component width = drag + spinner flush together, no
+        // interior gap.
+        const float perDrag = std::max(16.0f, perComp - spinW);
+        ImDrawList* pdl = ImGui::GetWindowDrawList();
         bool changed = false;
         for (int i = 0; i < n; ++i) {
             if (i > 0) ImGui::SameLine(0, s.ItemInnerSpacing.x);
             ImGui::PushID(i);
+            // Shared rounded-pill background for this component's
+            // drag + spinner pair.
+            const ImVec2 pillMin = ImGui::GetCursorScreenPos();
+            const ImVec2 pillMax(pillMin.x + perComp, pillMin.y + frameH);
+            const bool pillHovered =
+                ImGui::IsMouseHoveringRect(pillMin, pillMax);
+            pdl->AddRectFilled(pillMin, pillMax,
+                ImGui::GetColorU32(pillHovered
+                    ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg),
+                s.FrameRounding);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(0,0,0,0));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(0,0,0,0));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  IM_COL32(0,0,0,0));
             ImGui::SetNextItemWidth(perDrag);
             if (ImGui::DragFloat("##v", &v[i], speed, lo, hi, fmt, flags))
                 changed = true;
             if (ImGui::IsItemActivated()) UndoSnapshot();
-            ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            ImGui::SameLine(0, 0.0f);
             const SpinArrowClick sp = DrawSpinArrows("s", spinW, frameH);
+            ImGui::PopStyleColor(3);
             if (sp.dir != 0) {
                 if (sp.initial) UndoSnapshot();
                 float nv = v[i] + float(sp.dir) * step;
@@ -9303,12 +9452,23 @@ private:
         ImGui::PushID(label);
         ImGui::BeginGroup();
         const float itemW = ImGui::CalcItemWidth();
-        ImGui::SetNextItemWidth(std::max(1.0f,
-            itemW - spinW - s.ItemInnerSpacing.x));
+        const ImVec2 pillMin = ImGui::GetCursorScreenPos();
+        const ImVec2 pillMax(pillMin.x + itemW, pillMin.y + frameH);
+        const bool pillHovered = ImGui::IsMouseHoveringRect(pillMin, pillMax);
+        ImDrawList* pdl = ImGui::GetWindowDrawList();
+        pdl->AddRectFilled(pillMin, pillMax,
+            ImGui::GetColorU32(pillHovered
+                ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg),
+            s.FrameRounding);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  IM_COL32(0,0,0,0));
+        ImGui::SetNextItemWidth(std::max(1.0f, itemW - spinW));
         bool changed = ImGui::DragInt("##v", v, speed, lo, hi, fmt, flags);
         if (ImGui::IsItemActivated()) UndoSnapshot();
-        ImGui::SameLine(0, s.ItemInnerSpacing.x);
+        ImGui::SameLine(0, 0.0f);
         const SpinArrowClick sp = DrawSpinArrows("s", spinW, frameH);
+        ImGui::PopStyleColor(3);
         if (sp.dir != 0) {
             if (sp.initial) UndoSnapshot();
             int nv = *v + sp.dir * step;
@@ -9339,18 +9499,30 @@ private:
         const float itemW = ImGui::CalcItemWidth();
         const float perComp = std::max(1.0f,
             (itemW - s.ItemInnerSpacing.x) * 0.5f);
-        const float perDrag = std::max(16.0f,
-            perComp - spinW - s.ItemInnerSpacing.x);
+        const float perDrag = std::max(16.0f, perComp - spinW);
+        ImDrawList* pdl = ImGui::GetWindowDrawList();
         bool changed = false;
         for (int i = 0; i < 2; ++i) {
             if (i > 0) ImGui::SameLine(0, s.ItemInnerSpacing.x);
             ImGui::PushID(i);
+            const ImVec2 pillMin = ImGui::GetCursorScreenPos();
+            const ImVec2 pillMax(pillMin.x + perComp, pillMin.y + frameH);
+            const bool pillHovered =
+                ImGui::IsMouseHoveringRect(pillMin, pillMax);
+            pdl->AddRectFilled(pillMin, pillMax,
+                ImGui::GetColorU32(pillHovered
+                    ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg),
+                s.FrameRounding);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(0,0,0,0));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(0,0,0,0));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  IM_COL32(0,0,0,0));
             ImGui::SetNextItemWidth(perDrag);
             if (ImGui::DragInt("##v", &v[i], speed, lo, hi, fmt, flags))
                 changed = true;
             if (ImGui::IsItemActivated()) UndoSnapshot();
-            ImGui::SameLine(0, s.ItemInnerSpacing.x);
+            ImGui::SameLine(0, 0.0f);
             const SpinArrowClick sp = DrawSpinArrows("s", spinW, frameH);
+            ImGui::PopStyleColor(3);
             if (sp.dir != 0) {
                 if (sp.initial) UndoSnapshot();
                 int nv = v[i] + sp.dir * step;
@@ -9371,6 +9543,7 @@ private:
 
     void DrawInspectorPanel() {
         ImGui::Begin("Inspector");
+        ShrinkPanelCollapseIcon();
         if (!m_project.IsOpen()) {
             ImGui::TextDisabled("No project open.");
             ImGui::End();
@@ -9490,7 +9663,13 @@ private:
                 boostHeaderHover = true;
             }
         }
+        // Component headers stay rectangular even though the rest of
+        // the editor rounds its frames -- the flat edges make the
+        // header + body block read as one unit instead of a stack of
+        // pill-shaped chips.
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
         const bool open = ImGui::CollapsingHeader(comp->TypeName(), flags);
+        ImGui::PopStyleVar();
         if (boostHeaderHover) ImGui::PopStyleColor(1);
         // Shrink the built-in expander arrow. ImGui's framed
         // CollapsingHeader hardcodes RenderArrow at scale 1.0
@@ -11636,6 +11815,7 @@ private:
                                         tightPadY));
             ImGui::Begin("Viewport");
             ImGui::PopStyleVar();
+            ShrinkPanelCollapseIcon();
 
             // Toolbar row: zoom / camera controls at a glance.
             ImGui::Text("Zoom %.0f px/u  |  Centre (%.2f, %.2f)",
@@ -13956,6 +14136,7 @@ private:
 
     void DrawConsolePanel() {
         ImGui::Begin("Console");
+        ShrinkPanelCollapseIcon();
         // Toolbar.
         if (ImGui::SmallButton("Clear##events")) m_eventLog.clear();
         ImGui::SameLine();
@@ -14032,6 +14213,7 @@ private:
             ImGui::End();
             return;
         }
+        ShrinkPanelCollapseIcon();
         // The palette is bound to whichever entity is currently
         // selected; without a Tilemap on that entity there's nothing to
         // paint into.
@@ -14203,6 +14385,7 @@ private:
 
     void DrawProjectPanel() {
         ImGui::Begin("Project");
+        ShrinkPanelCollapseIcon();
         if (!m_project.IsOpen()) {
             ImGui::TextDisabled("No project open.");
             ImGui::Separator();
