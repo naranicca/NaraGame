@@ -6268,7 +6268,8 @@ private:
         ImGui::SameLine();
         if (ImGui::Button("Reload from disk")) ReloadScriptEditor();
         ImGui::SameLine();
-        if (ImGui::Button("Close")) m_scriptEditorOpen = false;
+        if (ImGui::Button("Open in external program"))
+            OpenScriptExternally(m_scriptEditorAbsPath);
         if (m_scriptEditorTruncated) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f),
