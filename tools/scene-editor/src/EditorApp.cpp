@@ -492,15 +492,25 @@ std::string PickFileDialog(HWND owner, REFCLSID clsid,
     if (defaultExt) dlg->SetDefaultExtension(defaultExt);
     if (!initialDir.empty()) {
         // Convert UTF-8 -> wide so SHCreateItemFromParsingName accepts it.
-        const int wlen = MultiByteToWideChar(CP_UTF8, 0, initialDir.c_str(),
-                                             -1, nullptr, 0);
-        if (wlen > 1) {
-            std::wstring wide(size_t(wlen) - 1, L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, initialDir.c_str(), -1,
-                                wide.data(), wlen);
+        // SHCreateItemFromParsingName wants native separators on
+        // Windows -- our project paths carry forward slashes so
+        // fs::path::make_preferred() flips them before we pass through.
+        namespace fs = std::filesystem;
+        const std::wstring wide =
+            fs::path(initialDir).make_preferred().wstring();
+        if (!wide.empty()) {
             IShellItem* folder = nullptr;
             if (SUCCEEDED(SHCreateItemFromParsingName(wide.c_str(), nullptr,
                                                       IID_PPV_ARGS(&folder)))) {
+                // SetFolder is documented to override the recently-
+                // used-folder memory the shell persists per file-type,
+                // but on some Windows builds it silently loses to MRU
+                // if the user has ever saved to a different folder
+                // for the same extension. SetDefaultFolder + a
+                // ClearClientData wipe of the persisted state force
+                // the dialog to actually honour our initialDir.
+                dlg->ClearClientData();
+                dlg->SetDefaultFolder(folder);
                 dlg->SetFolder(folder);
                 folder->Release();
             }
