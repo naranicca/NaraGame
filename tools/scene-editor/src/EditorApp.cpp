@@ -10998,7 +10998,12 @@ private:
                 current = sc.script.ToString();
             }
         }
-        if (SmallBeginCombo("Script", current.c_str())) {
+        // "##asset" gives the combo a different ID than the outer
+        // CollapsingHeader (which also labels itself "Script" via
+        // ScriptComponent::TypeName()); without it ImGui hashes both
+        // to the same ID in the PushID(comp) scope and its debug
+        // tooltip flags the collision.
+        if (SmallBeginCombo("Script##asset", current.c_str())) {
             if (ImGui::Selectable("(none)", !sc.script.IsValid())) {
                 UndoSnapshot();
                 sc.script = SceneEditor::AssetGuid{};
