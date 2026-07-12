@@ -1054,11 +1054,11 @@ private:
             //   None       = not a slope (default)
             //   Right      = / hypotenuse, filled bottom-right
             //   Left       = \ hypotenuse, filled bottom-left
-            //   RightHalf  = 22.5° / from bottom-left to mid-right
-            //   LeftHalf   = 22.5° \ from bottom-right to mid-left
-            //   RightHigh  = 22.5° / from mid-left to top-right
+            //   RightHalf  = 22.5째 / from bottom-left to mid-right
+            //   LeftHalf   = 22.5째 \ from bottom-right to mid-left
+            //   RightHigh  = 22.5째 / from mid-left to top-right
             //                (upper half of two-cell ramp)
-            //   LeftHigh   = 22.5° \ from mid-right to top-left
+            //   LeftHigh   = 22.5째 \ from mid-right to top-left
             enum class SlopeShape {
                 None,
                 Right, Left,
@@ -4962,7 +4962,7 @@ private:
                     ? ctrl.states[size_t(tr.fromIdx)].name.c_str()
                     : "(invalid)");
             ImGui::SetNextItemWidth(110.0f);
-            if (ImGui::BeginCombo("##from", fromLabel)) {
+            if (SmallBeginCombo("##from", fromLabel)) {
                 if (ImGui::Selectable("Any", tr.fromIdx < 0)) {
                     tr.fromIdx = -1;
                     dirty = true;
@@ -4985,7 +4985,7 @@ private:
                 ? ctrl.states[size_t(tr.toIdx)].name.c_str()
                 : "(invalid)";
             ImGui::SetNextItemWidth(110.0f);
-            if (ImGui::BeginCombo("##to", toLabel)) {
+            if (SmallBeginCombo("##to", toLabel)) {
                 for (int s = 0; s < int(ctrl.states.size()); ++s) {
                     const bool sel = (tr.toIdx == s);
                     if (ImGui::Selectable(ctrl.states[size_t(s)].name.c_str(),
@@ -5002,7 +5002,7 @@ private:
             const char* paramLabel = tr.param.empty() ? "(none)"
                                                      : tr.param.c_str();
             ImGui::SetNextItemWidth(120.0f);
-            if (ImGui::BeginCombo("##param", paramLabel)) {
+            if (SmallBeginCombo("##param", paramLabel)) {
                 if (ImGui::Selectable("(none)", tr.param.empty())) {
                     tr.param.clear();
                     dirty = true;
@@ -5034,7 +5034,7 @@ private:
             int opIdx = int(tr.op);
             if (opIdx < 0 || opIdx >= opCount) opIdx = 0;
             ImGui::SetNextItemWidth(60.0f);
-            if (ImGui::Combo("##gop", &opIdx, opNamesAll, opCount)) {
+            if (SmallCombo("##gop", &opIdx, opNamesAll, opCount)) {
                 tr.op = static_cast<OP>(opIdx);
                 dirty = true;
             }
@@ -5153,7 +5153,7 @@ private:
                                    ctrl->defaultState < int(ctrl->states.size()))
                 ? ctrl->states[size_t(ctrl->defaultState)].name.c_str()
                 : "(invalid)";
-            if (ImGui::BeginCombo("Default State", curName)) {
+            if (SmallBeginCombo("Default State", curName)) {
                 for (int i = 0; i < int(ctrl->states.size()); ++i) {
                     const bool sel = (i == ctrl->defaultState);
                     if (ImGui::Selectable(ctrl->states[size_t(i)].name.c_str(),
@@ -5221,7 +5221,7 @@ private:
                 }
             }
             ImGui::SetNextItemWidth(220.0f);
-            if (ImGui::BeginCombo("##anim", animLabel.c_str())) {
+            if (SmallBeginCombo("##anim", animLabel.c_str())) {
                 if (ImGui::Selectable("(none)", !st.animation.IsValid())) {
                     st.animation = SceneEditor::AssetGuid{};
                     dirty = true;
@@ -5440,7 +5440,7 @@ private:
                 "All", "Bool", "Float", "Int", "Trigger",
                 "Vec2", "Color", "String" };
             ImGui::SetNextItemWidth(90.0f);
-            ImGui::Combo("##ctrlparamtype",
+            SmallCombo("##ctrlparamtype",
                          &m_controllerEditorParamTypeFilter,
                          typeFilterNames, 8);
             ImGui::SameLine();
@@ -5489,7 +5489,7 @@ private:
                                         "Vec2", "Color", "String" };
             int typeIdx = int(p.type);
             ImGui::SetNextItemWidth(90.0f);
-            if (ImGui::Combo("##ptype", &typeIdx, typeNames, 7)) {
+            if (SmallCombo("##ptype", &typeIdx, typeNames, 7)) {
                 p.type = static_cast<SceneEditor::AnimatorParameter::Type>(typeIdx);
                 dirty = true;
             }
@@ -5656,7 +5656,7 @@ private:
                     ? params[size_t(p)].name.c_str() : "(invalid)";
             };
             ImGui::SetNextItemWidth(140.0f);
-            if (ImGui::BeginCombo("##trfromfilter",
+            if (SmallBeginCombo("##trfromfilter",
                     fromLabelFor(m_controllerEditorTrFromFilter))) {
                 if (ImGui::Selectable("From: all",
                         m_controllerEditorTrFromFilter == 0)) {
@@ -5677,7 +5677,7 @@ private:
             }
             ImGui::SameLine();
             ImGui::SetNextItemWidth(140.0f);
-            if (ImGui::BeginCombo("##trtofilter",
+            if (SmallBeginCombo("##trtofilter",
                     toLabelFor(m_controllerEditorTrToFilter))) {
                 if (ImGui::Selectable("To: all",
                         m_controllerEditorTrToFilter == 0)) {
@@ -5694,7 +5694,7 @@ private:
             }
             ImGui::SameLine();
             ImGui::SetNextItemWidth(160.0f);
-            if (ImGui::BeginCombo("##trparamfilter",
+            if (SmallBeginCombo("##trparamfilter",
                     paramLabelFor(m_controllerEditorTrParamFilter))) {
                 if (ImGui::Selectable("Param: all",
                         m_controllerEditorTrParamFilter == 0)) {
@@ -5773,7 +5773,7 @@ private:
                     ? ctrl->states[size_t(tr.fromIdx)].name.c_str()
                     : "(invalid)");
             ImGui::SetNextItemWidth(120.0f);
-            if (ImGui::BeginCombo("##from", fromLabel)) {
+            if (SmallBeginCombo("##from", fromLabel)) {
                 if (ImGui::Selectable("Any", tr.fromIdx < 0)) {
                     tr.fromIdx = -1;
                     dirty = true;
@@ -5796,7 +5796,7 @@ private:
                 ? ctrl->states[size_t(tr.toIdx)].name.c_str()
                 : "(invalid)";
             ImGui::SetNextItemWidth(120.0f);
-            if (ImGui::BeginCombo("##to", toLabel)) {
+            if (SmallBeginCombo("##to", toLabel)) {
                 for (int s = 0; s < int(ctrl->states.size()); ++s) {
                     const bool sel = (tr.toIdx == s);
                     if (ImGui::Selectable(ctrl->states[size_t(s)].name.c_str(),
@@ -5813,7 +5813,7 @@ private:
             ImGui::SetNextItemWidth(140.0f);
             const char* paramLabel = tr.param.empty() ? "(none)"
                                                      : tr.param.c_str();
-            if (ImGui::BeginCombo("##param", paramLabel)) {
+            if (SmallBeginCombo("##param", paramLabel)) {
                 if (ImGui::Selectable("(none)", tr.param.empty())) {
                     tr.param.clear();
                     dirty = true;
@@ -5848,7 +5848,7 @@ private:
             int opIdx = int(tr.op);
             if (opIdx < 0 || opIdx >= opCount) opIdx = 0;
             ImGui::SetNextItemWidth(60.0f);
-            if (ImGui::Combo("##op", &opIdx, opNamesAll, opCount)) {
+            if (SmallCombo("##op", &opIdx, opNamesAll, opCount)) {
                 tr.op = static_cast<OP>(opIdx);
                 dirty = true;
             }
@@ -6220,7 +6220,7 @@ private:
                 current = an->texture.ToString();
             }
         }
-        if (ImGui::BeginCombo("Texture", current.c_str())) {
+        if (SmallBeginCombo("Texture", current.c_str())) {
             if (ImGui::Selectable("(none)", !an->texture.IsValid())) {
                 an->texture = SceneEditor::AssetGuid{};
                 dirty = true;
@@ -6294,7 +6294,7 @@ private:
             ImGui::SetNextItemWidth(180.0f);
             const char* preview = fr.sprite.empty() ? "(none)"
                                                     : fr.sprite.c_str();
-            if (ImGui::BeginCombo("##sprite", preview)) {
+            if (SmallBeginCombo("##sprite", preview)) {
                 for (const std::string& n : subNames) {
                     const bool sel = (n == fr.sprite);
                     if (ImGui::Selectable(n.c_str(), sel)) {
@@ -7003,7 +7003,7 @@ private:
                 current = at->texture.ToString();
             }
         }
-        if (ImGui::BeginCombo("Texture", current.c_str())) {
+        if (SmallBeginCombo("Texture", current.c_str())) {
             if (ImGui::Selectable("(none)", !at->texture.IsValid())) {
                 at->texture = SceneEditor::AssetGuid{};
                 dirty = true;
@@ -7027,7 +7027,7 @@ private:
         const char* modeNames[] = { "Cardinal (4-bit, 16 tiles)",
                                     "Blob (8-bit, 47 tiles)" };
         int modeIdx = int(at->mode);
-        if (ImGui::Combo("Mode", &modeIdx, modeNames, 2)) {
+        if (SmallCombo("Mode", &modeIdx, modeNames, 2)) {
             at->mode = static_cast<
                 SceneEditor::AutotileAsset::Mode>(modeIdx);
             m_autotileEditorSlot = 0;
@@ -7262,7 +7262,7 @@ private:
                 current = ts->texture.ToString();
             }
         }
-        if (ImGui::BeginCombo("Texture", current.c_str())) {
+        if (SmallBeginCombo("Texture", current.c_str())) {
             if (ImGui::Selectable("(none)", !ts->texture.IsValid())) {
                 ts->texture = SceneEditor::AssetGuid{};
                 dirty = true;
@@ -7614,7 +7614,7 @@ private:
 
         // Slice mode chooser + parameter inputs.
         const char* sliceTabs[] = { "By Cell Size", "By Cell Count", "Manual" };
-        ImGui::Combo("##slicemode", &m_spriteEditorMode, sliceTabs, 3);
+        SmallCombo("##slicemode", &m_spriteEditorMode, sliceTabs, 3);
         ImGui::SameLine();
         ImGui::TextDisabled("(slice mode)");
 
@@ -8932,7 +8932,125 @@ private:
         }
     }
 
-    // Two stacked half-height ▲▼ buttons drawn immediately after the
+    // Overpaint ImGui's built-in combo arrow with a half-scale
+    // replacement so combos match the CollapsingHeader's smaller
+    // triangle. Called AFTER an ImGui::BeginCombo / ImGui::Combo so
+    // GetItemRectMin/Max return the combo's frame + we can identify
+    // the arrow-button chip on the right.
+    static void ShrinkComboArrow() {
+        // BeginCombo's ItemAdd stores the preview-frame rect (label
+        // excluded) in NavRect, and the total rect (preview + label)
+        // in Rect. GetItemRectMax lands past the trailing label, so
+        // NavRect is what we want to anchor the arrow chip on.
+        const ImRect& navBB   = ImGui::GetCurrentContext()->LastItemData.NavRect;
+        const ImVec2 bMin     = navBB.Min;
+        const ImVec2 bMax     = navBB.Max;
+        const float fs        = ImGui::GetFontSize();
+        const float chipW     = ImGui::GetFrameHeight();
+        if (bMax.x - bMin.x < chipW - 1.0f) return;
+        const float chipL     = bMax.x - chipW;
+        const bool hovered    = ImGui::IsItemHovered();
+        const ImU32 btnBg     = ImGui::GetColorU32(
+            hovered ? ImGuiCol_ButtonHovered : ImGuiCol_Button);
+        // Force the base fill fully opaque so the big arrow is
+        // completely painted out. WindowBg's alpha is ~94 %, which
+        // let the original triangle bleed through in an earlier
+        // attempt.
+        const ImVec4 wbg      = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+        const ImU32 windowBg  = IM_COL32(
+            int(wbg.x * 255.0f + 0.5f),
+            int(wbg.y * 255.0f + 0.5f),
+            int(wbg.z * 255.0f + 0.5f), 255);
+        const ImU32 textCol   = ImGui::GetColorU32(ImGuiCol_Text);
+        // Cover the whole arrow chip (opaque + button colour), then
+        // draw a half-scale arrow centred inside it.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 cMin(chipL + 1.0f, bMin.y + 1.0f);
+        const ImVec2 cMax(bMax.x - 1.0f, bMax.y - 1.0f);
+        dl->AddRectFilled(cMin, cMax, windowBg);
+        dl->AddRectFilled(cMin, cMax, btnBg);
+        const float smallScale = 0.5f;
+        const float cW = cMax.x - cMin.x;
+        const float cH = cMax.y - cMin.y;
+        const float apexX = cMin.x + cW * 0.5f - fs * 0.5f;
+        const float apexY = cMin.y + cH * 0.5f - fs * smallScale * 0.5f;
+        ImGui::RenderArrow(dl,
+            ImVec2(apexX, apexY),
+            textCol,
+            ImGuiDir_Down,
+            smallScale);
+    }
+
+    // Wrappers around ImGui::BeginCombo / ImGui::Combo that call
+    // ShrinkComboArrow() automatically. Call sites keep the exact
+    // same shape (bool return, pair with ImGui::EndCombo for the
+    // BeginCombo variant), only the qualifier changes.
+    static bool SmallBeginCombo(const char* label,
+                                const char* preview_value,
+                                ImGuiComboFlags flags = 0) {
+        const bool open = ImGui::BeginCombo(label, preview_value, flags);
+        ShrinkComboArrow();
+        return open;
+    }
+    static bool SmallCombo(const char* label, int* current_item,
+                           const char* const items[], int items_count,
+                           int popup_max_height_in_items = -1) {
+        const bool changed = ImGui::Combo(label, current_item, items,
+                                           items_count,
+                                           popup_max_height_in_items);
+        ShrinkComboArrow();
+        return changed;
+    }
+    static bool SmallCombo(const char* label, int* current_item,
+                           const char* items_separated_by_zeros,
+                           int popup_max_height_in_items = -1) {
+        const bool changed = ImGui::Combo(label, current_item,
+                                           items_separated_by_zeros,
+                                           popup_max_height_in_items);
+        ShrinkComboArrow();
+        return changed;
+    }
+
+    // Regular ImGui::Button with a small down-triangle painted on
+    // the right edge so the user can tell at a glance the button
+    // spawns a popup menu. Same behaviour as Button: returns true
+    // on click; the caller pairs it with OpenPopup + BeginPopup.
+    static bool MenuButton(const char* label) {
+        const ImGuiStyle& s = ImGui::GetStyle();
+        const float frameH = ImGui::GetFrameHeight();
+        const float triW   = frameH * 0.30f;
+        const float triH   = frameH * 0.22f;
+        // Space between the label's right edge and the triangle.
+        // Doubled the inner-item spacing so the arrow doesn't sit
+        // right up against the label glyphs, which read as one
+        // clumped word instead of "label + affordance".
+        const float labelToArrowGap = s.ItemInnerSpacing.x * 2.0f;
+        // Total right-side reserve: gap + triangle + inner FramePadding.
+        const float extraRight = labelToArrowGap + triW;
+        const float labelW = ImGui::CalcTextSize(label).x;
+        const float w = labelW + s.FramePadding.x * 2.0f + extraRight;
+        // Left-align the label so the extra width lands entirely on
+        // the arrow side. Without this, ImGui::Button centres the
+        // text + steals half our gap back.
+        ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign,
+                            ImVec2(0.0f, 0.5f));
+        const bool clicked = ImGui::Button(label, ImVec2(w, 0.0f));
+        ImGui::PopStyleVar();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 rMin = ImGui::GetItemRectMin();
+        const ImVec2 rMax = ImGui::GetItemRectMax();
+        const float cx = rMax.x - s.FramePadding.x - triW * 0.5f;
+        const float cy = (rMin.y + rMax.y) * 0.5f;
+        const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+        dl->AddTriangleFilled(
+            ImVec2(cx - triW * 0.5f, cy - triH * 0.5f),
+            ImVec2(cx + triW * 0.5f, cy - triH * 0.5f),
+            ImVec2(cx,               cy + triH * 0.5f),
+            col);
+        return clicked;
+    }
+
+    // Two stacked half-height ?꿎뼹 buttons drawn immediately after the
     // caller's cursor. Returns +1 if the up button was clicked this
     // frame, -1 for the down button, 0 otherwise. Consumes (btnW,
     // frameH) of horizontal + vertical space. Callers wrap the drag
@@ -8986,11 +9104,17 @@ private:
             const float cx = p.x + btnW * 0.5f;
             const float cy = p.y + halfH * 0.5f;
             const float a  = std::max(2.0f, btnW * 0.22f);
+            // Vertex order kept consistent (positive signed area in
+            // Y-down) between both variants. The old up-triangle
+            // wound the opposite way, so ImGui's AntiAliasedFill
+            // pushed its AA fringe outward while the down-triangle's
+            // pushed inward -- the visible shapes ended up different
+            // sizes even though the vertex offsets were identical.
             if (isUp) {
                 dl->AddTriangleFilled(
-                    ImVec2(cx - a, cy + a * 0.55f),
+                    ImVec2(cx,     cy - a * 0.55f),
                     ImVec2(cx + a, cy + a * 0.55f),
-                    ImVec2(cx,     cy - a * 0.55f), cFg);
+                    ImVec2(cx - a, cy + a * 0.55f), cFg);
             } else {
                 dl->AddTriangleFilled(
                     ImVec2(cx - a, cy - a * 0.55f),
@@ -9007,7 +9131,7 @@ private:
         return result;
     }
 
-    // DragFloat + ▲▼ spinner. Behaves like ImGui::DragFloat: same
+    // DragFloat + ?꿎뼹 spinner. Behaves like ImGui::DragFloat: same
     // drag-to-scrub, ctrl-click to type. Adds a stacked spinner on
     // the right that clicks the value up/down by `step` (defaults
     // to `speed`). Undo snapshot fires once on drag-start or on
@@ -9110,7 +9234,7 @@ private:
         return SpinDragFloatN(label, v, 3, speed, lo, hi, fmt, flags, step);
     }
 
-    // DragInt + ▲▼ spinner. `speed` matches ImGui::DragInt (fractional
+    // DragInt + ?꿎뼹 spinner. `speed` matches ImGui::DragInt (fractional
     // pixels-per-unit is fine); `step` defaults to 1.
     bool SpinDragInt(const char* label, int* v, float speed,
                      int lo = 0, int hi = 0,
@@ -9249,7 +9373,7 @@ private:
         // Add Component button. Lists every registered factory we don't
         // already have on this entity (Transform always present, so it
         // never re-offers itself).
-        if (ImGui::Button("Add Component...")) {
+        if (MenuButton("Add Component...")) {
             ImGui::OpenPopup("##add_component");
         }
         if (ImGui::BeginPopup("##add_component")) {
@@ -9287,6 +9411,68 @@ private:
                                          ImGuiTreeNodeFlags_Framed |
                                          ImGuiTreeNodeFlags_AllowOverlap;
         const bool open = ImGui::CollapsingHeader(comp->TypeName(), flags);
+        // Shrink the built-in expander arrow. ImGui's framed
+        // CollapsingHeader hardcodes RenderArrow at scale 1.0
+        // (imgui_widgets.cpp:7112) so the triangle is FontSize tall,
+        // which reads as oversized against the compact component
+        // name next to it.
+        //
+        // Overpaint the original glyph, then redraw the arrow at
+        // half scale in the same slot. The header background colours
+        // (ImGuiCol_Header*) are semi-transparent, so we have to
+        // repaint the opaque WindowBg underneath first + then re-lay
+        // the header colour on top -- otherwise the big arrow bleeds
+        // through the translucent overlay and the two triangles
+        // stack on screen.
+        {
+            const ImGuiStyle& st = ImGui::GetStyle();
+            const ImVec2 hMin = ImGui::GetItemRectMin();
+            const ImVec2 hMax = ImGui::GetItemRectMax();
+            const bool hovered = ImGui::IsItemHovered();
+            const bool held    = ImGui::IsItemActive();
+            const ImU32 headerCol = ImGui::GetColorU32(
+                (held && hovered) ? ImGuiCol_HeaderActive :
+                (hovered ? ImGuiCol_HeaderHovered : ImGuiCol_Header));
+            // Force alpha to 255 for the base fill -- the default
+            // WindowBg is ~94% opaque, so a straight GetColorU32
+            // still lets the big arrow bleed through at ~6%. Force
+            // a fully opaque base so the overpaint truly hides it.
+            const ImVec4 wbgVec = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+            const ImU32 windowBg = IM_COL32(
+                int(wbgVec.x * 255.0f + 0.5f),
+                int(wbgVec.y * 255.0f + 0.5f),
+                int(wbgVec.z * 255.0f + 0.5f),
+                255);
+            const ImU32 textCol   = ImGui::GetColorU32(ImGuiCol_Text);
+            const float fs        = ImGui::GetFontSize();
+            const float rowH      = hMax.y - hMin.y;
+            // Cover generously from the header's left edge, across
+            // fs + FramePadding.x + a bit of slack, so the width
+            // captures whatever spot ImGui put its full-size arrow in
+            // -- we don't need to know the exact offset the CollapsingHeader
+            // used, we just paint over the whole left-of-label region.
+            const float coverX    = hMin.x + 1.0f;  // avoid the header border
+            const float coverY    = hMin.y + 1.0f;
+            const float coverW    = fs + st.FramePadding.x * 2.0f;
+            const float coverH    = rowH - 2.0f;
+            ImDrawList* dl        = ImGui::GetWindowDrawList();
+            const ImVec2 rMin(coverX, coverY);
+            const ImVec2 rMax(coverX + coverW, coverY + coverH);
+            dl->AddRectFilled(rMin, rMax, windowBg);
+            dl->AddRectFilled(rMin, rMax, headerCol);
+            // Small arrow visually centered in the covered region.
+            // RenderArrow places its centre at pos + (fs/2, fs*scale/2),
+            // so shift pos.y down + centre horizontally in the cover
+            // area so the smaller arrow lands at the visual centre.
+            const float smallScale = 0.5f;
+            const float apexX = coverX + coverW * 0.5f - fs * 0.5f;
+            const float apexY = coverY + coverH * 0.5f - fs * smallScale * 0.5f;
+            ImGui::RenderArrow(dl,
+                ImVec2(apexX, apexY),
+                textCol,
+                open ? ImGuiDir_Down : ImGuiDir_Right,
+                smallScale);
+        }
         // Overlay a small X on the header's right edge so users can
         // remove the component without opening a submenu. Transform
         // is always required + never removed, so it doesn't get one.
@@ -9295,7 +9481,11 @@ private:
             const ImVec2 hMin = ImGui::GetItemRectMin();
             const ImVec2 hMax = ImGui::GetItemRectMax();
             const float  headerH = hMax.y - hMin.y;
-            const float  btnSize = std::max(12.0f, headerH - 4.0f);
+            // Half the header height keeps the X clickable + matches
+            // the reduced expander triangle on the left. Clamp so the
+            // hitbox stays at least 12 px even when the theme uses a
+            // very tight FramePadding.
+            const float  btnSize = std::max(12.0f, headerH * 0.55f);
             const float  padR    = 4.0f;
             const ImVec2 saved   = ImGui::GetCursorScreenPos();
             const ImVec2 pos(hMax.x - btnSize - padR,
@@ -9670,7 +9860,7 @@ private:
             "Box Edge", "Box Volume", "Line"
         };
         int shapeIdx = int(ps.shape);
-        if (ImGui::Combo("Shape", &shapeIdx,
+        if (SmallCombo("Shape", &shapeIdx,
                           kShapeNames, IM_ARRAYSIZE(kShapeNames))) {
             UndoSnapshot();
             ps.shape = Sh(shapeIdx);
@@ -9741,7 +9931,7 @@ private:
                 texLabel = ps.texture.ToString();
             }
         }
-        if (ImGui::BeginCombo("Texture", texLabel.c_str())) {
+        if (SmallBeginCombo("Texture", texLabel.c_str())) {
             if (ImGui::Selectable("(none)", !ps.texture.IsValid())) {
                 UndoSnapshot();
                 ps.texture = SceneEditor::AssetGuid{};
@@ -9792,7 +9982,7 @@ private:
                     }
                     const char* preview = ps.subSprite.empty()
                         ? "(whole texture)" : ps.subSprite.c_str();
-                    if (ImGui::BeginCombo("Sub-sprite", preview)) {
+                    if (SmallBeginCombo("Sub-sprite", preview)) {
                         if (!nameInList && !ps.subSprite.empty()) {
                             if (ImGui::Selectable(
                                     (ps.subSprite + "  (orphan)").c_str(),
@@ -9850,7 +10040,7 @@ private:
                 const char* preview =
                     frame.empty() ? "(none)" : frame.c_str();
                 ImGui::SetNextItemWidth(180.0f);
-                if (ImGui::BeginCombo("##framepick", preview)) {
+                if (SmallBeginCombo("##framepick", preview)) {
                     if (ImGui::Selectable("(none)", frame.empty())) {
                         UndoSnapshot();
                         frame.clear();
@@ -10040,7 +10230,7 @@ private:
     // selection back through UndoSnapshot.
     void DrawColliderLayerCombo(std::string& layer) {
         const auto& layers = m_project.CollisionLayers();
-        if (ImGui::BeginCombo("Layer", layer.c_str())) {
+        if (SmallBeginCombo("Layer", layer.c_str())) {
             for (const std::string& name : layers) {
                 const bool sel = (name == layer);
                 if (ImGui::Selectable(name.c_str(), sel)) {
@@ -10210,7 +10400,7 @@ private:
                 current = as.clip.ToString();
             }
         }
-        if (ImGui::BeginCombo("Clip", current.c_str())) {
+        if (SmallBeginCombo("Clip", current.c_str())) {
             if (ImGui::Selectable("(none)", !as.clip.IsValid())) {
                 UndoSnapshot();
                 as.clip = SceneEditor::AssetGuid{};
@@ -10305,7 +10495,7 @@ private:
                 current = sc.script.ToString();
             }
         }
-        if (ImGui::BeginCombo("Script", current.c_str())) {
+        if (SmallBeginCombo("Script", current.c_str())) {
             if (ImGui::Selectable("(none)", !sc.script.IsValid())) {
                 UndoSnapshot();
                 sc.script = SceneEditor::AssetGuid{};
@@ -10364,7 +10554,7 @@ private:
                 current = an.animation.ToString();
             }
         }
-        if (ImGui::BeginCombo("Animation", current.c_str())) {
+        if (SmallBeginCombo("Animation", current.c_str())) {
             if (ImGui::Selectable("(none)", !an.animation.IsValid())) {
                 UndoSnapshot();
                 an.animation = SceneEditor::AssetGuid{};
@@ -10438,7 +10628,7 @@ private:
                 ctrlLabel = an.controller.ToString();
             }
         }
-        if (ImGui::BeginCombo("Controller", ctrlLabel.c_str())) {
+        if (SmallBeginCombo("Controller", ctrlLabel.c_str())) {
             if (ImGui::Selectable("(none)", !an.controller.IsValid())) {
                 UndoSnapshot();
                 an.controller   = SceneEditor::AssetGuid{};
@@ -10478,7 +10668,7 @@ private:
                             "All", "Bool", "Float", "Int", "Trigger",
                             "Vec2", "Color", "String" };
                         ImGui::SetNextItemWidth(90.0f);
-                        ImGui::Combo("##animparamtype",
+                        SmallCombo("##animparamtype",
                                      &m_animInspectorParamTypeFilter,
                                      typeFilterNames, 8);
                         ImGui::SameLine();
@@ -10598,7 +10788,7 @@ private:
                 current = tm.tileset.ToString();
             }
         }
-        if (ImGui::BeginCombo("Tileset", current.c_str())) {
+        if (SmallBeginCombo("Tileset", current.c_str())) {
             if (ImGui::Selectable("(none)", !tm.tileset.IsValid())) {
                 UndoSnapshot();
                 tm.tileset = SceneEditor::AssetGuid{};
@@ -10668,7 +10858,7 @@ private:
         const auto& layers = m_project.SortingLayers();
         const bool currentInList = std::find(layers.begin(), layers.end(),
                                               tm.sortingLayer) != layers.end();
-        if (ImGui::BeginCombo("Sorting Layer", tm.sortingLayer.c_str())) {
+        if (SmallBeginCombo("Sorting Layer", tm.sortingLayer.c_str())) {
             if (!currentInList && !tm.sortingLayer.empty()) {
                 if (ImGui::Selectable((tm.sortingLayer + "  (orphan)").c_str(),
                                       true)) {
@@ -10695,7 +10885,7 @@ private:
         // CircleCollider layer picker; the runtime feeds the
         // selected layer into Project::CollisionLayersCollide.
         const auto& cLayers = m_project.CollisionLayers();
-        if (ImGui::BeginCombo("Collision Layer",
+        if (SmallBeginCombo("Collision Layer",
                                tm.collisionLayer.c_str())) {
             for (const std::string& l : cLayers) {
                 const bool sel = (l == tm.collisionLayer);
@@ -10977,7 +11167,7 @@ private:
                                      "BottomLeft", "BottomRight",
                                      "Custom" };
         int pivotIdx = int(imp.pivotMode);
-        if (ImGui::Combo("Pivot", &pivotIdx, pivotNames, 6)) {
+        if (SmallCombo("Pivot", &pivotIdx, pivotNames, 6)) {
             imp.pivotMode = static_cast<
                 SceneEditor::TextureImportSettings::PivotMode>(pivotIdx);
             changed = true;
@@ -10992,14 +11182,14 @@ private:
         }
         const char* filterNames[] = { "Linear", "Point" };
         int filterIdx = int(imp.filterMode);
-        if (ImGui::Combo("Filter", &filterIdx, filterNames, 2)) {
+        if (SmallCombo("Filter", &filterIdx, filterNames, 2)) {
             imp.filterMode = static_cast<
                 SceneEditor::TextureImportSettings::Filter>(filterIdx);
             changed = true;
         }
         const char* wrapNames[] = { "Clamp", "Repeat", "Mirror" };
         int wrapIdx = int(imp.wrapMode);
-        if (ImGui::Combo("Wrap", &wrapIdx, wrapNames, 3)) {
+        if (SmallCombo("Wrap", &wrapIdx, wrapNames, 3)) {
             imp.wrapMode = static_cast<
                 SceneEditor::TextureImportSettings::Wrap>(wrapIdx);
             changed = true;
@@ -11075,7 +11265,7 @@ private:
                 current = s.sprite.ToString();
             }
         }
-        if (ImGui::BeginCombo("Sprite", current.c_str())) {
+        if (SmallBeginCombo("Sprite", current.c_str())) {
             if (ImGui::Selectable("(none)", !s.sprite.IsValid())) {
                 UndoSnapshot();
                 s.sprite = SceneEditor::AssetGuid{};
@@ -11128,7 +11318,7 @@ private:
                     }
                     const char* preview = s.subSprite.empty()
                         ? "(whole texture)" : s.subSprite.c_str();
-                    if (ImGui::BeginCombo("Sub-sprite", preview)) {
+                    if (SmallBeginCombo("Sub-sprite", preview)) {
                         if (!nameInList && !s.subSprite.empty()) {
                             if (ImGui::Selectable((s.subSprite + "  (orphan)").c_str(),
                                                   true)) {
@@ -11181,7 +11371,7 @@ private:
         }
         const char* modes[] = { "Simple", "Sliced", "Tiled" };
         int idx = int(s.drawMode);
-        if (ImGui::Combo("Draw Mode", &idx, modes, 3)) {
+        if (SmallCombo("Draw Mode", &idx, modes, 3)) {
             UndoSnapshot();
             s.drawMode = static_cast<SceneEditor::SpriteDrawMode>(idx);
             changed = true;
@@ -11202,7 +11392,7 @@ private:
         const auto& layers = m_project.SortingLayers();
         const bool currentInList = std::find(layers.begin(), layers.end(),
                                               s.sortingLayer) != layers.end();
-        if (ImGui::BeginCombo("Sorting Layer", s.sortingLayer.c_str())) {
+        if (SmallBeginCombo("Sorting Layer", s.sortingLayer.c_str())) {
             if (!currentInList && !s.sortingLayer.empty()) {
                 if (ImGui::Selectable((s.sortingLayer + "  (orphan)").c_str(),
                                       true)) {
@@ -13938,6 +14128,27 @@ private:
             ImGui::End();
             return;
         }
+        // Quick-access asset creation. Same four flows as File > New
+        // Script / Tileset / Animation / Animator Controller -- kept
+        // on the panel so a user browsing the tree doesn't have to
+        // trip up to the menu bar. Split-button style: click the
+        // main label to drop a menu the same way File > Recent
+        // Projects does.
+        if (MenuButton("New")) {
+            ImGui::OpenPopup("##project_new");
+        }
+        if (ImGui::BeginPopup("##project_new")) {
+            if (ImGui::MenuItem("Script..."))
+                DoNewScript();
+            if (ImGui::MenuItem("Tileset..."))
+                DoNewTileset();
+            if (ImGui::MenuItem("Animation..."))
+                DoNewAnimation();
+            if (ImGui::MenuItem("Animator Controller..."))
+                DoNewController();
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
         if (ImGui::Button("Refresh")) m_assetDb.Rescan();
         ImGui::SameLine();
         ImGui::TextDisabled("%zu assets in '%s'",
