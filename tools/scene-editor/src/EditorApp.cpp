@@ -6610,30 +6610,111 @@ private:
         ImGui::TextDisabled("Current frame: %s",
                             curFr ? curFr->sprite.c_str() : "(none)");
 
-        // Texture preview with current frame outlined.
+        // Texture preview: two panels side-by-side. Left is the
+        // current frame cropped out so the user can see how the
+        // sprite will actually render in-game; right is the whole
+        // sheet with the same frame outlined so they still know
+        // which cell they're looking at. Layout falls back to a
+        // single "full sheet" preview when the texture hasn't been
+        // sliced yet (nothing to crop).
         if (an->texture.IsValid()) {
             if (NaraGame::RHITexture* tex =
                     m_assetDb.GetTexture(GetDevice(), an->texture)) {
-                const ImVec2 avail = ImGui::GetContentRegionAvail();
-                const float texW = float(tex->Width());
-                const float texH = float(tex->Height());
-                float scale = std::min(avail.x, std::min(280.0f, avail.y))
-                              / std::max(texW, texH);
-                if (scale <= 0.0f) scale = 1.0f;
-                const ImVec2 imgSize{texW * scale, texH * scale};
-                const ImVec2 imgMin = ImGui::GetCursorScreenPos();
-                const ImTextureID texId =
-                    static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
-                        tex->GetNativeView()));
-                ImGui::Image(texId, imgSize);
-                // The same TextureImportSettings powers both the
-                // current-frame highlight and the per-event marker
-                // dots below, so load it once.
+                // Sprite sheet lookup drives both the cropped preview
+                // (which needs the sub-rect UVs) + the outline on the
+                // whole-sheet view (which needs pixel coords).
                 SceneEditor::TextureImportSettings imp;
                 bool haveImp = false;
                 if (const auto* te = m_assetDb.FindByGuid(an->texture)) {
                     imp.FromJson(te->importSettings);
                     haveImp = !imp.spriteSheet.sprites.empty();
+                }
+                const SceneEditor::SubSprite* curSub = nullptr;
+                if (curFr && haveImp) {
+                    for (const auto& s : imp.spriteSheet.sprites) {
+                        if (s.name == curFr->sprite) { curSub = &s; break; }
+                    }
+                }
+
+                const ImVec2 avail = ImGui::GetContentRegionAvail();
+                const float texW = float(tex->Width());
+                const float texH = float(tex->Height());
+                const ImTextureID texId =
+                    static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                        tex->GetNativeView()));
+
+                // Left column: cropped current frame. Filled to a
+                // square that fits the row's height so a wide or
+                // tall sprite still lands centred.
+                const float rowH = std::min(280.0f, avail.y);
+                const float cropSide = std::max(48.0f,
+                    std::min(rowH, avail.x * 0.45f));
+                if (curSub && curSub->w > 0 && curSub->h > 0) {
+                    // Aspect-fit the frame into cropSide x cropSide.
+                    const float fw = float(curSub->w);
+                    const float fh = float(curSub->h);
+                    const float fitScale = cropSide / std::max(fw, fh);
+                    const ImVec2 cropSize{fw * fitScale, fh * fitScale};
+                    const ImVec2 cropOrigin = ImGui::GetCursorScreenPos();
+                    // Centre inside the reserved square so a tall
+                    // frame sits vertically middle + doesn't drift
+                    // from the whole-sheet baseline.
+                    const ImVec2 cropOffset{
+                        (cropSide - cropSize.x) * 0.5f,
+                        (cropSide - cropSize.y) * 0.5f};
+                    ImGui::Dummy(ImVec2(cropSide, cropSide));
+                    ImDrawList* cdl = ImGui::GetWindowDrawList();
+                    const ImVec2 cropMin{cropOrigin.x + cropOffset.x,
+                                          cropOrigin.y + cropOffset.y};
+                    const ImVec2 cropMax{cropMin.x + cropSize.x,
+                                          cropMin.y + cropSize.y};
+                    // Respect the texture's Point filter so pixel-art
+                    // frames don't upscale to a smear.
+                    const bool pushed = PushTextureFilter(cdl, an->texture);
+                    cdl->AddImage(texId, cropMin, cropMax,
+                        ImVec2(float(curSub->x)          / texW,
+                               float(curSub->y)          / texH),
+                        ImVec2(float(curSub->x + curSub->w) / texW,
+                               float(curSub->y + curSub->h) / texH));
+                    PopTextureFilter(cdl, pushed);
+                    // Thin frame around the cropped region so it
+                    // reads as a distinct panel next to the sheet.
+                    cdl->AddRect(cropOrigin,
+                        ImVec2(cropOrigin.x + cropSide,
+                               cropOrigin.y + cropSide),
+                        IM_COL32(90, 90, 100, 200));
+                } else {
+                    ImGui::Dummy(ImVec2(cropSide, cropSide));
+                    ImDrawList* cdl = ImGui::GetWindowDrawList();
+                    const ImVec2 o = ImGui::GetItemRectMin();
+                    const ImVec2 m = ImGui::GetItemRectMax();
+                    cdl->AddRect(o, m, IM_COL32(90, 90, 100, 200));
+                    const char* hint = curFr
+                        ? "Frame has no matching sub-sprite."
+                        : "(no frame at cursor)";
+                    const ImVec2 ts = ImGui::CalcTextSize(hint);
+                    cdl->AddText(
+                        ImVec2(o.x + (cropSide - ts.x) * 0.5f,
+                               o.y + (cropSide - ts.y) * 0.5f),
+                        IM_COL32(140, 140, 150, 220), hint);
+                }
+
+                ImGui::SameLine();
+
+                // Right column: whole sprite sheet with the current
+                // frame outlined. Same code path as before, just
+                // sized against the remaining width.
+                const float sheetAvailX = ImGui::GetContentRegionAvail().x;
+                float scale = std::min(sheetAvailX, std::min(280.0f, rowH))
+                              / std::max(texW, texH);
+                if (scale <= 0.0f) scale = 1.0f;
+                const ImVec2 imgSize{texW * scale, texH * scale};
+                const ImVec2 imgMin = ImGui::GetCursorScreenPos();
+                {
+                    ImDrawList* sdl = ImGui::GetWindowDrawList();
+                    const bool pushed = PushTextureFilter(sdl, an->texture);
+                    ImGui::Image(texId, imgSize);
+                    PopTextureFilter(sdl, pushed);
                 }
                 ImDrawList* pdl = ImGui::GetWindowDrawList();
                 auto findRect = [&](const std::string& name,
