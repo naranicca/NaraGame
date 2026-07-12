@@ -25,7 +25,7 @@ void CircleColliderComponent::Deserialize(const Value& obj) {
             offset = { pick(0), pick(1) };
         }
     }
-    isTrigger = obj.GetBool("isTrigger", true);
+    isTrigger = obj.GetBool("isTrigger", false);
     layer     = obj.GetString("layer", "Default");
 }
 

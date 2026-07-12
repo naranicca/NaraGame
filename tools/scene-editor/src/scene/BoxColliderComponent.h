@@ -25,7 +25,11 @@ class BoxColliderComponent final : public Component {
 public:
     NaraGame::Vec2 size   { 1.0f, 1.0f };
     NaraGame::Vec2 offset { 0.0f, 0.0f };
-    bool           isTrigger = true;
+    // Solid by default -- a freshly-added BoxCollider acts as a
+    // physical wall (MTV push-out + optional Rigidbody2D bounce +
+    // friction). Flip to true for overlap-only zones (damage,
+    // pickups, checkpoints, etc.) that shouldn't stop the body.
+    bool           isTrigger = false;
     // M7c11: project-level collision layer. The runtime checks
     // Project::CollisionLayersCollide(this.layer, other.layer)
     // before any overlap test. Defaults to "Default" so legacy

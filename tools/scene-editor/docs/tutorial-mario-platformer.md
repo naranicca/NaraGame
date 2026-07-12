@@ -325,7 +325,7 @@ Player 엔티티 선택 → Inspector → **Add Component...** →
 * **Friction**: `0.2` (지면 마찰. 너무 크면 미끄러지지 않고 갑자기
   멈춤)
 
-### 5.2 BoxCollider 추가 — 매우 중요한 함정 주의
+### 5.2 BoxCollider 추가
 
 Inspector → **Add Component...** → **BoxCollider**.
 
@@ -335,12 +335,12 @@ Inspector → **Add Component...** → **BoxCollider**.
   줍니다 (예: 캐릭터 시각 크기의 80%).
 * **Offset**: 스프라이트 pivot에 따라 조정. BottomLeft pivot에 세로가
   0.5 유닛인 경우 `(0.25, 0.25)` 처럼 중심을 몸통으로 옮깁니다.
-* **Is Trigger**: **반드시 체크 해제 (false)**.
-
-> **결정적으로 중요합니다.** `BoxCollider` 는 기본값이
-> `Is Trigger = true` 입니다. 이 상태로는 발판이 "통과"돼 캐릭터가
-> 지면 아래로 떨어져 버립니다. 지면·플랫폼·플레이어 몸통의 모든
-> BoxCollider는 **Is Trigger 를 꺼야** 실제로 충돌·정지가 됩니다.
+* **Is Trigger**: **체크 해제 상태 유지 (false)**. 이게 기본값이라
+  새로 추가한 BoxCollider 는 곧바로 실체 콜라이더로 작동합니다.
+  이 값이 true 인 경우 발판이 "통과"돼 캐릭터가 지면 아래로
+  떨어지므로, 지면·플랫폼·플레이어 몸통의 BoxCollider 는 반드시
+  false 여야 합니다. 코인·데미지 존 같이 통과하되 이벤트만
+  받고 싶은 경우에만 true 로 켭니다 (11 장 참조).
 
 * **Layer**: `Default` (또는 `Player` 로 별도 관리)
 
@@ -353,7 +353,8 @@ Inspector → **Add Component...** → **BoxCollider**.
 
 이 상태에서 뷰포트 툴바의 **Play** 체크박스를 한 번 켜 봅니다 (섹션
 16 참조). 플레이어가 지면 위로 떨어져 착지하면 물리 세팅이 정상입니다.
-아래로 뚫고 지나가면 3.3, 5.2 (Is Trigger) 를 다시 확인하세요.
+아래로 뚫고 지나가면 3.3 을 다시 확인하고, 5.2 의 BoxCollider 에서
+Is Trigger 가 실수로 켜져 있지 않은지 확인하세요.
 **Play** 를 다시 끄면 원래 위치로 돌아옵니다.
 
 ---
@@ -987,7 +988,7 @@ scene-editor.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.
 
 | 증상 | 원인 | 해결 |
 |---|---|---|
-| 플레이어가 지면 아래로 계속 떨어짐 | 지면 또는 플레이어 `BoxCollider.Is Trigger = true` | 두 콜라이더 모두 `Is Trigger` 체크 해제 |
+| 플레이어가 지면 아래로 계속 떨어짐 | 지면 또는 플레이어 `BoxCollider.Is Trigger` 가 실수로 켜져 있음 | 두 콜라이더 모두 `Is Trigger` 체크 해제 (기본값 false) |
 | `Space` 키가 안 먹힘 | 키 이름 `"space"` (소문자) 사용 | `"Space"` (PascalCase) 로 변경 |
 | 점프가 즉시 두 번씩 | `is_action_down` 을 점프에 사용 | `is_action_pressed` (한 프레임만 true) 사용 |
 | Player가 벽을 뚫고 지나감 | 매 프레임 `transform.set_position` 으로 직접 이동 | `rigidbody.set_velocity` 를 쓰고 물리에 맡김 |
