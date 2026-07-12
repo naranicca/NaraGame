@@ -11341,8 +11341,10 @@ private:
         const ImTextureID texId =
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                 tex->GetNativeView()));
+        const bool filterPushed = PushTextureFilter(dl, best->texture);
         dl->AddImage(texId, drawMin, drawMax,
                      ImVec2(0, 0), ImVec2(1, 1), tint);
+        PopTextureFilter(dl, filterPushed);
     }
 
     // Create a new entity with a SpriteRenderer pointing at `guid`,
@@ -12224,6 +12226,8 @@ private:
             const float fps =
                 (ps->animFps > 0.0f) ? ps->animFps : 0.0f;
             const int   frameCount = int(frameUVs.size());
+            const bool psFilterPushed = tex
+                ? PushTextureFilter(dl, ps->texture) : false;
             for (int i = 0; i < ps->_liveCount; ++i) {
                 const auto& p = ps->_pool[size_t(i)];
                 const float t = (p.lifetime > 0.0f)
@@ -12309,6 +12313,7 @@ private:
                     dl->AddQuadFilled(pTL, pTR, pBR, pBL, col);
                 }
             }
+            PopTextureFilter(dl, psFilterPushed);
         }
 
         // M9c11 camera frustum gizmo. Editor-only -- shows the
@@ -12781,6 +12786,10 @@ private:
         float locMaxX = -std::numeric_limits<float>::infinity();
         float locMaxY = -std::numeric_limits<float>::infinity();
 
+        // Every cell samples the same source texture -- push the
+        // Nearest sampler once before the loop, pop once after so a
+        // Point-filtered tileset stays crisp at any upscale factor.
+        const bool filterPushed = PushTextureFilter(dl, rt.textureGuid);
         for (const auto& kv : tm.cells) {
             const int gx  = kv.first.first;
             const int gy  = kv.first.second;
@@ -12827,6 +12836,7 @@ private:
                              ImVec2(vu1, vv1), ImVec2(vu0, vv1),
                              tint);
         }
+        PopTextureFilter(dl, filterPushed);
 
         // Collision overlay: walk the cells once more (now that we have
         // the same world-to-screen math handy) and paint a translucent
@@ -12916,6 +12926,49 @@ private:
         dl->AddText(ImVec2{c.x + half + 4.0f, c.y - ts * 0.5f},
                     IM_COL32(220, 220, 220, 255),
                     e.name.c_str());
+    }
+
+    // Look up a texture asset's import filterMode. Falls through to
+    // Linear when the guid is empty, unknown, or its meta is missing --
+    // matches the ImGui backend's own default sampler, so a missed
+    // lookup doesn't visibly change anything.
+    SceneEditor::TextureImportSettings::Filter
+    ResolveTextureFilter(const SceneEditor::AssetGuid& guid) const {
+        if (!guid.IsValid())
+            return SceneEditor::TextureImportSettings::Filter::Linear;
+        const auto* entry = m_assetDb.FindByGuid(guid);
+        if (!entry)
+            return SceneEditor::TextureImportSettings::Filter::Linear;
+        SceneEditor::TextureImportSettings imp;
+        imp.FromJson(entry->importSettings);
+        return imp.filterMode;
+    }
+
+    // The ImGui DX11 backend uses a single LINEAR sampler by default
+    // for every AddImage call. That silently ignores the per-texture
+    // filterMode we bake into RHITexture, which shows up as blurry
+    // upscaled sprites (Player at 1:1 hides it; a tilemap at 3x /
+    // 4x reveals it). AddCallback with the backend's
+    // SetSamplerNearest / SetSamplerLinear thunks swaps the state
+    // between draw commands -- push before AddImage, pop after so a
+    // later widget doesn't inherit the nearest sampler.
+    // Returns true when a Nearest push was actually emitted, so the
+    // caller can conditionally pop.
+    bool PushTextureFilter(ImDrawList* dl,
+                           const SceneEditor::AssetGuid& guid) const {
+        if (ResolveTextureFilter(guid) !=
+            SceneEditor::TextureImportSettings::Filter::Point) return false;
+        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+        if (!pio.DrawCallback_SetSamplerNearest) return false;
+        dl->AddCallback(pio.DrawCallback_SetSamplerNearest, nullptr);
+        return true;
+    }
+    void PopTextureFilter(ImDrawList* dl, bool wasPushed) const {
+        if (!wasPushed) return;
+        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+        if (pio.DrawCallback_SetSamplerLinear) {
+            dl->AddCallback(pio.DrawCallback_SetSamplerLinear, nullptr);
+        }
     }
 
     // Resolved sprite info: source rect (px) inside the texture, 9-slice
@@ -13048,8 +13101,10 @@ private:
         const ImTextureID texId =
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                 tex->GetNativeView()));
+        const bool filterPushed = PushTextureFilter(dl, spr.sprite);
         dl->AddImageQuad(texId, pTL, pTR, pBR, pBL,
                          uvTL, uvTR, uvBR, uvBL, tint);
+        PopTextureFilter(dl, filterPushed);
 
         // Selection outline traces the rotated quad.
         if (selected) {
@@ -13173,6 +13228,7 @@ private:
         // Walk the 9 tiles. Column i (0=L, 1=C, 2=R) maps to source
         // column i. World row j (0=bottom, 1=mid, 2=top) maps to source
         // row (2-j) because the texture's Y=0 is the top edge.
+        const bool filterPushed = PushTextureFilter(dl, spr.sprite);
         for (int j = 0; j < 3; ++j) {
             for (int i = 0; i < 3; ++i) {
                 if (xs[i + 1] <= xs[i] || ys[j + 1] <= ys[j]) continue;
@@ -13184,6 +13240,7 @@ private:
                                 us[i + 1], vs[srcRow + 1], tint);
             }
         }
+        PopTextureFilter(dl, filterPushed);
 
         // Selection outline traces the rotated outer quad.
         auto P = [&](float wx, float wy) {
@@ -13343,6 +13400,7 @@ private:
             else                  { sy = rs.srcY + rs.srcH - rs.borderB; sh = rs.borderB; }
         };
 
+        const bool filterPushed = PushTextureFilter(dl, spr.sprite);
         for (int j = 0; j < 3; ++j) {
             for (int i = 0; i < 3; ++i) {
                 if (xs[i + 1] <= xs[i] || ys[j + 1] <= ys[j]) continue;
@@ -13357,6 +13415,7 @@ private:
                          cosR, sinR);
             }
         }
+        PopTextureFilter(dl, filterPushed);
 
         // Selection outline traces the rotated outer quad.
         auto P = [&](float wx, float wy) {
