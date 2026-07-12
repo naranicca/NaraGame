@@ -4617,6 +4617,25 @@ private:
             return std::sqrt(ex * ex + ey * ey);
         };
 
+        // Point where a ray from a rectangle centre along `u`
+        // exits the rectangle's boundary. Used to clip the arrow's
+        // endpoints to each node's edge instead of pulling back by a
+        // fixed distance -- the naive `max(kNodeW, kNodeH) * 0.5`
+        // pullback overshoots whenever two nodes are stacked
+        // vertically (centre-to-centre distance < pullback), which
+        // parked the tip behind the source and made the whole arrow
+        // vanish inside a node body.
+        auto RectExit = [](ImVec2 c, float ux, float uy,
+                           float halfW, float halfH) {
+            const float eps = 1e-4f;
+            float tx = std::numeric_limits<float>::infinity();
+            if (std::abs(ux) > eps) tx = halfW / std::abs(ux);
+            float ty = std::numeric_limits<float>::infinity();
+            if (std::abs(uy) > eps) ty = halfH / std::abs(uy);
+            const float t = std::min(tx, ty);
+            return ImVec2{c.x + ux * t, c.y + uy * t};
+        };
+
         // Transitions first so node bodies overlay them.
         for (int ti = 0; ti < int(ctrl.transitions.size()); ++ti) {
             const auto& tr = ctrl.transitions[size_t(ti)];
@@ -4630,16 +4649,27 @@ private:
             if (len < 1.0f) continue;
             const float ux = dxa / len;
             const float uy = dya / len;
-            const float pullBack = std::max(kNodeW, kNodeH) * 0.5f;
-            const ImVec2 tip{dstC.x - ux * pullBack,
-                             dstC.y - uy * pullBack};
+            // Clip endpoints to each node's edge so a vertically
+            // stacked pair still shows an arrow between them.
+            const ImVec2 base = RectExit(srcC,  ux,  uy,
+                                          kNodeW * 0.5f, kNodeH * 0.5f);
+            const ImVec2 tip  = RectExit(dstC, -ux, -uy,
+                                          kNodeW * 0.5f, kNodeH * 0.5f);
             const bool selected = (ti == m_graphSelectedTransition);
             const ImU32 col = selected
                 ? IM_COL32(255, 220, 60, 255)
                 : IM_COL32(190, 190, 200, 220);
-            dl->AddLine(srcC, tip, col, selected ? 3.0f : 1.5f);
             const float ah = selected ? 13.0f : 10.0f;
             const float aw = selected ?  6.0f :  5.0f;
+            // Draw the shaft only when there's real distance left
+            // after clipping. When two nodes touch, base == tip; the
+            // arrowhead below still gets drawn on top so the user
+            // sees the direction indicator.
+            const float shaftDx = tip.x - base.x;
+            const float shaftDy = tip.y - base.y;
+            if (shaftDx * shaftDx + shaftDy * shaftDy > 1.0f) {
+                dl->AddLine(base, tip, col, selected ? 3.0f : 1.5f);
+            }
             const ImVec2 head1{tip.x - ux * ah - uy * aw,
                                tip.y - uy * ah + ux * aw};
             const ImVec2 head2{tip.x - ux * ah + uy * aw,
