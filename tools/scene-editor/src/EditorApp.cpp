@@ -4467,7 +4467,7 @@ private:
             // m_prefs.recentProjects mid-iteration.
             std::string pickedRecent;
             const bool anyRecent = !m_prefs.recentProjects.empty();
-            if (ImGui::BeginMenu("Recent Projects", anyRecent)) {
+            if (SmallBeginMenu("Recent Projects", anyRecent)) {
                 namespace fs = std::filesystem;
                 for (const std::string& p : m_prefs.recentProjects) {
                     const std::string label =
@@ -9011,6 +9011,61 @@ private:
         return changed;
     }
 
+    // Overpaint the built-in "there's a submenu here" chevron with a
+    // half-scale variant so a menu with expandable rows visually
+    // matches the smaller combo + collapsing-header arrows. Called
+    // AFTER ImGui::BeginMenu so LastItemData.Rect reflects the parent
+    // MenuItem the arrow was drawn onto.
+    // `parentDL` is the parent menu's drawlist captured before
+    // BeginMenu -- required because BeginMenu returning true switches
+    // ImGui's current window to the submenu popup, so
+    // GetWindowDrawList() at this point would target the popup, not
+    // the row we need to overpaint.
+    static void ShrinkSubmenuArrow(ImDrawList* parentDL) {
+        const ImRect& bb   = ImGui::GetCurrentContext()->LastItemData.Rect;
+        const float fs     = ImGui::GetFontSize();
+        const bool hovered = ImGui::IsItemHovered();
+        // Cover an fs-square patch flush against the right edge of the
+        // menu row (where ImGui puts the original arrow).
+        const float coverW = fs;
+        const ImVec2 cMin(bb.Max.x - coverW - 2.0f, bb.Min.y + 1.0f);
+        const ImVec2 cMax(bb.Max.x - 2.0f,           bb.Max.y - 1.0f);
+        ImDrawList* dl = parentDL;
+        // Opaque PopupBg base so the big arrow can't bleed through.
+        const ImVec4 pbg = ImGui::GetStyle().Colors[ImGuiCol_PopupBg];
+        const ImU32 popupBg = IM_COL32(
+            int(pbg.x * 255.0f + 0.5f),
+            int(pbg.y * 255.0f + 0.5f),
+            int(pbg.z * 255.0f + 0.5f), 255);
+        dl->AddRectFilled(cMin, cMax, popupBg);
+        // Re-lay the hover highlight so we don't punch a hole in it.
+        if (hovered) {
+            dl->AddRectFilled(cMin, cMax,
+                ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+        }
+        // Half-scale arrow centred in the patch.
+        const ImU32 textCol = ImGui::GetColorU32(ImGuiCol_Text);
+        const float smallScale = 0.5f;
+        const float cW = cMax.x - cMin.x;
+        const float cH = cMax.y - cMin.y;
+        const float apexX = cMin.x + cW * 0.5f - fs * 0.5f;
+        const float apexY = cMin.y + cH * 0.5f - fs * smallScale * 0.5f;
+        ImGui::RenderArrow(dl,
+            ImVec2(apexX, apexY),
+            textCol,
+            ImGuiDir_Right,
+            smallScale);
+    }
+
+    static bool SmallBeginMenu(const char* label, bool enabled = true) {
+        // Capture the parent's drawlist before BeginMenu so a "true"
+        // return doesn't pull us into the submenu's context.
+        ImDrawList* parentDL = ImGui::GetWindowDrawList();
+        const bool open = ImGui::BeginMenu(label, enabled);
+        ShrinkSubmenuArrow(parentDL);
+        return open;
+    }
+
     // Regular ImGui::Button with a small down-triangle painted on
     // the right edge so the user can tell at a glance the button
     // spawns a popup menu. Same behaviour as Button: returns true
@@ -9410,7 +9465,33 @@ private:
         const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen |
                                          ImGuiTreeNodeFlags_Framed |
                                          ImGuiTreeNodeFlags_AllowOverlap;
+        // Keep the header lit as "hovered" while the mouse is over
+        // the X remove button. AllowOverlap makes the X consume the
+        // hover state on that frame, so the header's own IsItemHovered
+        // flips false + it renders with the idle Header colour --
+        // visually the header looks like it "un-hovered" the moment
+        // the cursor entered the X. Override ImGuiCol_Header with the
+        // hovered colour when the mouse is in the X region so the
+        // header keeps its highlighted fill regardless.
+        bool boostHeaderHover = false;
+        if (!isTransform) {
+            const ImVec2 headerStart = ImGui::GetCursorScreenPos();
+            const float  frameH      = ImGui::GetFrameHeight();
+            const float  availW      = ImGui::GetContentRegionAvail().x;
+            const float  btnSizePre  = std::max(12.0f, frameH * 0.55f);
+            const float  padR        = 4.0f;
+            const ImVec2 xMin(headerStart.x + availW - btnSizePre - padR,
+                              headerStart.y + (frameH - btnSizePre) * 0.5f);
+            const ImVec2 xMax(xMin.x + btnSizePre, xMin.y + btnSizePre);
+            if (ImGui::IsMouseHoveringRect(xMin, xMax)) {
+                const ImU32 hoverCol =
+                    ImGui::GetColorU32(ImGuiCol_HeaderHovered);
+                ImGui::PushStyleColor(ImGuiCol_Header, hoverCol);
+                boostHeaderHover = true;
+            }
+        }
         const bool open = ImGui::CollapsingHeader(comp->TypeName(), flags);
+        if (boostHeaderHover) ImGui::PopStyleColor(1);
         // Shrink the built-in expander arrow. ImGui's framed
         // CollapsingHeader hardcodes RenderArrow at scale 1.0
         // (imgui_widgets.cpp:7112) so the triangle is FontSize tall,
@@ -9430,9 +9511,14 @@ private:
             const ImVec2 hMax = ImGui::GetItemRectMax();
             const bool hovered = ImGui::IsItemHovered();
             const bool held    = ImGui::IsItemActive();
+            // Boost matches the PushStyleColor above: while the mouse
+            // is on the X the header body draws as hovered, so the
+            // arrow overlay's patch has to match or a small idle-
+            // coloured square shows through where the arrow lives.
             const ImU32 headerCol = ImGui::GetColorU32(
                 (held && hovered) ? ImGuiCol_HeaderActive :
-                (hovered ? ImGuiCol_HeaderHovered : ImGuiCol_Header));
+                (hovered || boostHeaderHover)
+                    ? ImGuiCol_HeaderHovered : ImGuiCol_Header);
             // Force alpha to 255 for the base fill -- the default
             // WindowBg is ~94% opaque, so a straight GetColorU32
             // still lets the big arrow bleed through at ~6%. Force
