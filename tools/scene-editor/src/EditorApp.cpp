@@ -11215,7 +11215,8 @@ private:
         // queue after it because we draw to GetWindowDrawList().
         ImGui::InvisibleButton("##viewport_hit", panelSize,
                                ImGuiButtonFlags_MouseButtonLeft |
-                               ImGuiButtonFlags_MouseButtonMiddle);
+                               ImGuiButtonFlags_MouseButtonMiddle |
+                               ImGuiButtonFlags_MouseButtonRight);
         const bool hovered = ImGui::IsItemHovered();
         const bool active  = ImGui::IsItemActive();
 
@@ -11911,9 +11912,14 @@ private:
             m_viewCam.center.x += worldBefore.x - worldAfter.x;
             m_viewCam.center.y += worldBefore.y - worldAfter.y;
         }
-        // Mid-button drag pans. We don't need ImGui::IsItemActive for the
-        // middle button -- IsMouseDragging works against the active item.
-        if ((active || hovered) && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        // Middle-drag pans (Unity convention); right-drag also pans,
+        // since we're 2D-only + a rotate/orbit shortcut on RMB would
+        // be meaningless here. Both work against active OR hovered so
+        // the pan doesn't drop the moment the cursor slips off the
+        // viewport's InvisibleButton mid-stroke.
+        if ((active || hovered) &&
+            (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
+             ImGui::IsMouseDragging(ImGuiMouseButton_Right))) {
             const ImVec2 d = io.MouseDelta;
             m_viewCam.center.x -= d.x / m_viewCam.zoom;
             m_viewCam.center.y += d.y / m_viewCam.zoom;  // screen Y inverted
