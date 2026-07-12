@@ -6218,6 +6218,7 @@ private:
         m_scriptEditorRelPath  = relPath;
         m_scriptEditorOpen     = true;
         m_scriptEditorActivate = true;
+        m_scriptEditorDirty    = false;
     }
 
     // Writes the editor buffer back to disk + re-runs the
@@ -6235,6 +6236,7 @@ private:
         std::fclose(f);
         m_scriptHost.LoadFile(m_scriptEditorAbsPath,
                               m_scriptEditorRelPath);
+        m_scriptEditorDirty = false;
     }
 
     // Discards in-memory edits + re-reads from disk. Same code
@@ -6257,14 +6259,23 @@ private:
         }
         ImGui::SetNextWindowSize(ImVec2(720, 520),
                                   ImGuiCond_FirstUseEver);
+        // ImGui's UnsavedDocument flag draws a dot next to the title
+        // when the buffer has unsaved edits; that's the sole dirty
+        // indicator so the header stays uncluttered.
         std::string title = "Script: " + m_scriptEditorRelPath +
                             "###scripteditor";
-        if (!ImGui::Begin(title.c_str(), &m_scriptEditorOpen)) {
+        const ImGuiWindowFlags wf = m_scriptEditorDirty
+            ? ImGuiWindowFlags_UnsavedDocument : 0;
+        if (!ImGui::Begin(title.c_str(), &m_scriptEditorOpen, wf)) {
             ImGui::End();
             return;
         }
         ShrinkFloatingCollapseIcon();
+        // Save has no effect when nothing changed; grey it out so the
+        // toolbar's dirty state is legible at a glance.
+        ImGui::BeginDisabled(!m_scriptEditorDirty || m_scriptEditorTruncated);
         if (ImGui::Button("Save")) SaveScriptEditor();
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Reload from disk")) ReloadScriptEditor();
         ImGui::SameLine();
@@ -6278,12 +6289,16 @@ private:
         ImGui::Separator();
         // Fill the remaining region with the text widget. The
         // buffer's NUL keeps trailing capacity invisible to the
-        // widget while still letting the user grow the file.
-        ImGui::InputTextMultiline("##scripttext",
-            m_scriptEditorBuffer.data(),
-            m_scriptEditorBuffer.size(),
-            ImVec2(-FLT_MIN, -FLT_MIN),
-            ImGuiInputTextFlags_AllowTabInput);
+        // widget while still letting the user grow the file. Any
+        // keystroke that mutates the buffer makes the widget return
+        // true -- we use that as the dirty signal.
+        if (ImGui::InputTextMultiline("##scripttext",
+                m_scriptEditorBuffer.data(),
+                m_scriptEditorBuffer.size(),
+                ImVec2(-FLT_MIN, -FLT_MIN),
+                ImGuiInputTextFlags_AllowTabInput)) {
+            m_scriptEditorDirty = true;
+        }
         ImGui::End();
     }
 
@@ -15106,6 +15121,7 @@ private:
     std::string         m_scriptEditorAbsPath;
     std::string         m_scriptEditorRelPath;
     bool                m_scriptEditorTruncated = false;
+    bool                m_scriptEditorDirty     = false;
     std::vector<char>   m_scriptEditorBuffer;
     static constexpr size_t kScriptEditorBufSize = 64 * 1024;
 
