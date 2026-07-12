@@ -224,6 +224,7 @@ void Project::Close() {
     m_audioMusicVolume  = 1.0f;
     m_audioReverbWet    = 0.0f;
     m_mainScenePath.clear();
+    m_lastOpenedScenePath.clear();
 }
 
 bool Project::EnsureFolderTree() const {
@@ -280,6 +281,9 @@ bool Project::WriteProjectJson() const {
     root.Add("audioMixer", std::move(mixer));
     if (!m_mainScenePath.empty()) {
         root.Add("mainScene", Value::MakeString(m_mainScenePath));
+    }
+    if (!m_lastOpenedScenePath.empty()) {
+        root.Add("lastScene", Value::MakeString(m_lastOpenedScenePath));
     }
     const std::string out = NaraGame::MiniJson::Write(root);
     if (!WriteFileText(ProjectJsonPath(), out)) {
@@ -342,7 +346,8 @@ bool Project::ReadProjectJson() {
         m_audioMusicVolume  = 1.0f;
         m_audioReverbWet    = 0.0f;
     }
-    m_mainScenePath = root.GetString("mainScene", "");
+    m_mainScenePath       = root.GetString("mainScene", "");
+    m_lastOpenedScenePath = root.GetString("lastScene", "");
     m_collisionMatrixOff.clear();
     const NaraGame::MiniJson::Value* cmatrix = root.Find("collisionMatrixOff");
     if (cmatrix && cmatrix->IsArray()) {

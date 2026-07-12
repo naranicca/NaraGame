@@ -106,6 +106,14 @@ public:
     // scene the editor's default constructor produces.
     const std::string& MainScenePath() const { return m_mainScenePath; }
     void SetMainScenePath(std::string p)     { m_mainScenePath = std::move(p); }
+
+    // Path (relative to Assets/) of the scene the editor was last
+    // working on. Written on every scene load/save so re-opening the
+    // project drops the user back on the same file instead of the
+    // empty default scene. Distinct from MainScenePath, which is the
+    // stable "boot scene" for standalone builds.
+    const std::string& LastOpenedScenePath() const { return m_lastOpenedScenePath; }
+    void SetLastOpenedScenePath(std::string p)     { m_lastOpenedScenePath = std::move(p); }
     void  SetAudioMasterVolume(float v);
     void  SetAudioSfxVolume(float v);
     void  SetAudioMusicVolume(float v);
@@ -132,6 +140,7 @@ private:
     float m_audioMusicVolume  = 1.0f;
     float m_audioReverbWet    = 0.0f;
     std::string m_mainScenePath;
+    std::string m_lastOpenedScenePath;
 };
 
 } // namespace SceneEditor

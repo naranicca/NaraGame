@@ -542,7 +542,14 @@ public:
         }
         NotifyAllScriptsForDestroy();
         if (!m_startupScenePath.empty() && m_scene.Load(m_startupScenePath)) {
-            m_currentScenePath = m_startupScenePath;
+            SetCurrentScenePath(m_startupScenePath);
+            UpdateWindowTitle();
+        } else {
+            // No explicit --scene: fall back to whatever the user was
+            // last editing in this project. AutoLoadLastScene is a
+            // no-op if the project isn't open or the remembered file
+            // has moved.
+            AutoLoadLastScene();
             UpdateWindowTitle();
         }
         // M9c1 standalone: force Play on after the scene is loaded
@@ -2855,7 +2862,7 @@ private:
         if (path.empty()) return;
         NotifyAllScriptsForDestroy();
         if (m_scene.Load(path)) {
-            m_currentScenePath = path;
+            SetCurrentScenePath(path);
             m_selection = SceneEditor::kInvalidEntityId;
             UndoClear();
             UpdateWindowTitle();
@@ -3579,11 +3586,49 @@ private:
         if (folder.empty()) return;
         SceneEditor::Project p;
         if (!p.Open(folder)) return;
+        // Drop the previous project's scene state so AutoLoadLastScene
+        // isn't skipped by the "already have a path" guard + the empty
+        // fallback below shows the new project's default state instead
+        // of leftover entities.
+        NotifyAllScriptsForDestroy();
+        m_scene = SceneEditor::Scene();
+        m_currentScenePath.clear();
+        m_selection = SceneEditor::kInvalidEntityId;
+        UndoClear();
         m_project = std::move(p);
         m_assetDb.Open(m_project);
         ApplyProjectAudioMixer();
         ReloadAllScripts();
+        AutoLoadLastScene();
         UpdateWindowTitle();
+    }
+
+    // Re-open the scene the user was last editing in this project.
+    // Called after any Project::Open path (menu, CLI, splash flow).
+    // Silent no-op when the project has no remembered scene, when the
+    // file has vanished, or when a scene is already loaded (the --scene
+    // CLI arg wins over the remembered one so smoke scripts stay
+    // deterministic).
+    void AutoLoadLastScene() {
+        if (!m_project.IsOpen()) return;
+        if (!m_currentScenePath.empty()) return;
+        const std::string& stored = m_project.LastOpenedScenePath();
+        if (stored.empty()) return;
+        // RelToAssets stores rel paths for scenes under Assets/ + the
+        // raw absolute path for anything else (unusual project layouts,
+        // scenes at project root, ...). Reconstruct symmetrically.
+        namespace fs = std::filesystem;
+        const fs::path p(stored);
+        const std::string abs = p.is_absolute()
+            ? stored
+            : (m_project.AssetsDir() + "/" + stored);
+        std::error_code ec;
+        if (!fs::exists(abs, ec)) return;
+        if (m_scene.Load(abs)) {
+            SetCurrentScenePath(abs);
+            m_selection = SceneEditor::kInvalidEntityId;
+            UndoClear();
+        }
     }
 
     // M8c12. Push the project's persisted master/SFX/music levels
@@ -3673,7 +3718,7 @@ private:
         if (path.empty()) return;
         NotifyAllScriptsForDestroy();
         if (m_scene.Load(path)) {
-            m_currentScenePath = path;
+            SetCurrentScenePath(path);
             m_selection = SceneEditor::kInvalidEntityId;
             UndoClear();
             UpdateWindowTitle();
@@ -4045,6 +4090,20 @@ private:
         return abs;
     }
 
+    // Central point for updating which scene the editor is currently
+    // working on. Beyond assigning m_currentScenePath, this stamps the
+    // project's LastOpenedScenePath + persists it, so the next launch
+    // (File > Open Project or --project <path>) drops the user back
+    // onto the same file.
+    void SetCurrentScenePath(const std::string& absPath) {
+        m_currentScenePath = absPath;
+        if (!m_project.IsOpen() || absPath.empty()) return;
+        const std::string rel = RelToAssets(absPath);
+        if (rel == m_project.LastOpenedScenePath()) return;
+        m_project.SetLastOpenedScenePath(rel);
+        m_project.Save();
+    }
+
     // Rename the current scene on disk + in the JSON's sceneName field.
     // Called from the Rename Scene modal after the user types a new stem
     // (extension is fixed at .nscene). Returns false + writes an error
@@ -4128,7 +4187,7 @@ private:
             m_project.Save();
         }
 
-        m_currentScenePath = newPath;
+        SetCurrentScenePath(newPath);
         m_scene.SetName(stem);
         // Re-serialize so the JSON's sceneName field matches the new
         // stem. Without this, the next load would show the old name in
@@ -4213,7 +4272,7 @@ private:
             ScenesDir());
         if (path.empty()) return;
         if (m_scene.Save(path)) {
-            m_currentScenePath = path;
+            SetCurrentScenePath(path);
             m_scene.ClearDirty();
             // Use the file stem as the scene name so the title and JSON
             // line up with what the user picked.
@@ -10525,7 +10584,7 @@ private:
                 m_assetDb.AssetsRoot() + "/" + entry.relPath;
             NotifyAllScriptsForDestroy();
             if (m_scene.Load(abs)) {
-                m_currentScenePath = abs;
+                SetCurrentScenePath(abs);
                 m_selection = SceneEditor::kInvalidEntityId;
                 UndoClear();
                 UpdateWindowTitle();
