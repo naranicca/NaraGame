@@ -191,6 +191,75 @@ void ApplyEditorTheme(EditorTheme theme, float uiScale) {
     style.GrabRounding    = 4.0f;
     style.TabRounding     = 4.0f;
     style.PopupRounding   = 4.0f;
+    // Neutral gray palette for buttons + input frames. ImGui's
+    // default paints both families in the same blue as selection /
+    // active tint, so they visually compete with real selection
+    // highlights. A gray family reads as "affordance, not selected"
+    // -- hovered / active states step up in brightness so click
+    // feedback stays legible. FrameBg (input fields, combos,
+    // spinners) uses a slightly darker gray than Button so a
+    // number field still reads as recessed vs a raised button.
+    if (theme == EditorTheme::Dark) {
+        // Panel body sits at (54, 54, 54) instead of the ImGui dark
+        // default of (~15, 15, 15). The lighter background pushes
+        // contrast down inside the panel + reads less "console-like",
+        // matching modern editor look. Alpha stays 1.0 so the docked
+        // grid behind doesn't bleed through when a panel scrolls.
+        style.Colors[ImGuiCol_WindowBg]       = ImVec4(0.212f, 0.212f, 0.212f, 1.00f);
+        style.Colors[ImGuiCol_ChildBg]        = ImVec4(0.212f, 0.212f, 0.212f, 0.00f);
+        style.Colors[ImGuiCol_Button]         = ImVec4(0.28f, 0.28f, 0.30f, 1.00f);
+        style.Colors[ImGuiCol_ButtonHovered]  = ImVec4(0.40f, 0.40f, 0.43f, 1.00f);
+        style.Colors[ImGuiCol_ButtonActive]   = ImVec4(0.52f, 0.52f, 0.55f, 1.00f);
+        // Bumped up from the initial (0.20) tuning -- that was too
+        // close to WindowBg, so an idle checkbox looked transparent
+        // until the mouse rolled onto it. 0.32 gives the box a
+        // visible gray fill in the idle state while leaving room for
+        // the hover / active steps above.
+        style.Colors[ImGuiCol_FrameBg]        = ImVec4(0.32f, 0.32f, 0.35f, 1.00f);
+        style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.42f, 0.42f, 0.45f, 1.00f);
+        style.Colors[ImGuiCol_FrameBgActive]  = ImVec4(0.50f, 0.50f, 0.53f, 1.00f);
+        // Header covers CollapsingHeader background, Hierarchy row
+        // selection (Selectable), and other "picked" states. Set a
+        // distinct medium gray so it stands out as a container/
+        // selection without reverting to the ImGui blue.
+        style.Colors[ImGuiCol_Header]         = ImVec4(0.34f, 0.34f, 0.37f, 1.00f);
+        style.Colors[ImGuiCol_HeaderHovered]  = ImVec4(0.44f, 0.44f, 0.47f, 1.00f);
+        style.Colors[ImGuiCol_HeaderActive]   = ImVec4(0.54f, 0.54f, 0.57f, 1.00f);
+        // Blue check-mark on the gray FrameBg so a ticked checkbox
+        // pops as clearly ON. Saturated enough to read against the
+        // dark theme without becoming neon.
+        style.Colors[ImGuiCol_CheckMark]      = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+        // Dock tab bar + panel title strip run through the gray
+        // family too. Active tab is a touch lighter so the currently
+        // focused panel still reads as "the one that's in front".
+        style.Colors[ImGuiCol_Tab]                  = ImVec4(0.20f, 0.20f, 0.22f, 1.00f);
+        style.Colors[ImGuiCol_TabHovered]           = ImVec4(0.40f, 0.40f, 0.43f, 1.00f);
+        style.Colors[ImGuiCol_TabSelected]          = ImVec4(0.34f, 0.34f, 0.37f, 1.00f);
+        style.Colors[ImGuiCol_TabDimmed]            = ImVec4(0.14f, 0.14f, 0.16f, 1.00f);
+        style.Colors[ImGuiCol_TabDimmedSelected]    = ImVec4(0.26f, 0.26f, 0.28f, 1.00f);
+        style.Colors[ImGuiCol_TitleBg]              = ImVec4(0.14f, 0.14f, 0.16f, 1.00f);
+        style.Colors[ImGuiCol_TitleBgActive]        = ImVec4(0.28f, 0.28f, 0.30f, 1.00f);
+        style.Colors[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.12f, 0.12f, 0.14f, 0.75f);
+    } else {
+        style.Colors[ImGuiCol_Button]         = ImVec4(0.78f, 0.78f, 0.80f, 1.00f);
+        style.Colors[ImGuiCol_ButtonHovered]  = ImVec4(0.68f, 0.68f, 0.70f, 1.00f);
+        style.Colors[ImGuiCol_ButtonActive]   = ImVec4(0.58f, 0.58f, 0.60f, 1.00f);
+        style.Colors[ImGuiCol_FrameBg]        = ImVec4(0.88f, 0.88f, 0.90f, 1.00f);
+        style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.80f, 0.80f, 0.82f, 1.00f);
+        style.Colors[ImGuiCol_FrameBgActive]  = ImVec4(0.72f, 0.72f, 0.74f, 1.00f);
+        style.Colors[ImGuiCol_Header]         = ImVec4(0.72f, 0.72f, 0.74f, 1.00f);
+        style.Colors[ImGuiCol_HeaderHovered]  = ImVec4(0.62f, 0.62f, 0.64f, 1.00f);
+        style.Colors[ImGuiCol_HeaderActive]   = ImVec4(0.52f, 0.52f, 0.54f, 1.00f);
+        style.Colors[ImGuiCol_CheckMark]      = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+        style.Colors[ImGuiCol_Tab]                  = ImVec4(0.82f, 0.82f, 0.84f, 1.00f);
+        style.Colors[ImGuiCol_TabHovered]           = ImVec4(0.68f, 0.68f, 0.70f, 1.00f);
+        style.Colors[ImGuiCol_TabSelected]          = ImVec4(0.72f, 0.72f, 0.74f, 1.00f);
+        style.Colors[ImGuiCol_TabDimmed]            = ImVec4(0.88f, 0.88f, 0.90f, 1.00f);
+        style.Colors[ImGuiCol_TabDimmedSelected]    = ImVec4(0.78f, 0.78f, 0.80f, 1.00f);
+        style.Colors[ImGuiCol_TitleBg]              = ImVec4(0.88f, 0.88f, 0.90f, 1.00f);
+        style.Colors[ImGuiCol_TitleBgActive]        = ImVec4(0.72f, 0.72f, 0.74f, 1.00f);
+        style.Colors[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.92f, 0.92f, 0.94f, 0.75f);
+    }
     style.ScaleAllSizes(uiScale);
 }
 
@@ -1064,11 +1133,11 @@ private:
             //   None       = not a slope (default)
             //   Right      = / hypotenuse, filled bottom-right
             //   Left       = \ hypotenuse, filled bottom-left
-            //   RightHalf  = 22.5째 / from bottom-left to mid-right
-            //   LeftHalf   = 22.5째 \ from bottom-right to mid-left
-            //   RightHigh  = 22.5째 / from mid-left to top-right
+            //   RightHalf  = 22.5吏?/ from bottom-left to mid-right
+            //   LeftHalf   = 22.5吏?\ from bottom-right to mid-left
+            //   RightHigh  = 22.5吏?/ from mid-left to top-right
             //                (upper half of two-cell ramp)
-            //   LeftHigh   = 22.5째 \ from mid-right to top-left
+            //   LeftHigh   = 22.5吏?\ from mid-right to top-left
             enum class SlopeShape {
                 None,
                 Right, Left,
@@ -4461,8 +4530,22 @@ private:
         }
     }
 
+    // Blue used for menu / popup item highlights so a hovered row
+    // pops the same way it does in the pre-gray theme + doesn't
+    // blend with the surrounding popup bg.
+    static ImVec4 MenuHoverColor()  { return ImVec4(0.26f, 0.59f, 0.98f, 1.00f); }
+    static ImVec4 MenuActiveColor() { return ImVec4(0.20f, 0.51f, 0.90f, 1.00f); }
+
     void DrawMainMenuBar() {
-        if (!ImGui::BeginMainMenuBar()) return;
+        // Force menu items back to blue on hover / active while the
+        // rest of the theme keeps its gray Header* palette. Popped
+        // right after EndMainMenuBar so no other widget picks it up.
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
+        if (!ImGui::BeginMainMenuBar()) {
+            ImGui::PopStyleColor(2);
+            return;
+        }
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("New Project...", "Ctrl+Shift+N"))
                 StartNewProjectFlow();
@@ -4574,6 +4657,7 @@ private:
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
+        ImGui::PopStyleColor(2);
     }
 
     // --- Sprite Editor --------------------------------------------------
@@ -5059,7 +5143,7 @@ private:
                 if (tr.valueBool != true) { tr.valueBool = true; dirty = true; }
                 bool draft = true;
                 ImGui::BeginDisabled();
-                ImGui::Checkbox("##gval", &draft);
+                NGCheckbox("##gval", &draft);
                 ImGui::EndDisabled();
             } else if (decl && decl->type == PT::Vec2) {
                 float v2[2] = { tr.valueVec2.x, tr.valueVec2.y };
@@ -5088,14 +5172,14 @@ private:
                 }
             } else {
                 bool draft = tr.valueBool;
-                if (ImGui::Checkbox("##gval", &draft)) {
+                if (NGCheckbox("##gval", &draft)) {
                     tr.valueBool = draft;
                     dirty = true;
                 }
             }
             ImGui::SameLine();
             bool exitDraft = tr.hasExitTime;
-            if (ImGui::Checkbox("exit", &exitDraft)) {
+            if (NGCheckbox("exit", &exitDraft)) {
                 tr.hasExitTime = exitDraft;
                 dirty = true;
             }
@@ -5545,7 +5629,7 @@ private:
                 }
             } else {
                 bool draft = p.defaultBool;
-                if (ImGui::Checkbox("default", &draft)) {
+                if (NGCheckbox("default", &draft)) {
                     p.defaultBool = draft;
                     dirty = true;
                 }
@@ -5872,7 +5956,7 @@ private:
                 if (tr.valueBool != true) { tr.valueBool = true; dirty = true; }
                 bool draft = true;
                 ImGui::BeginDisabled();
-                ImGui::Checkbox("##val", &draft);
+                NGCheckbox("##val", &draft);
                 ImGui::EndDisabled();
             } else if (decl && decl->type == PT::Vec2) {
                 float v2[2] = { tr.valueVec2.x, tr.valueVec2.y };
@@ -5901,7 +5985,7 @@ private:
                 }
             } else {
                 bool draft = tr.valueBool;
-                if (ImGui::Checkbox("##val", &draft)) {
+                if (NGCheckbox("##val", &draft)) {
                     tr.valueBool = draft;
                     dirty = true;
                 }
@@ -5911,7 +5995,7 @@ private:
             // normalised threshold (0..1) the source animation has to
             // play past before the transition is allowed to fire.
             bool exitDraft = tr.hasExitTime;
-            if (ImGui::Checkbox("exit", &exitDraft)) {
+            if (NGCheckbox("exit", &exitDraft)) {
                 tr.hasExitTime = exitDraft;
                 dirty = true;
             }
@@ -6245,7 +6329,7 @@ private:
             }
             ImGui::EndCombo();
         }
-        if (ImGui::Checkbox("Loop", &an->loop)) dirty = true;
+        if (NGCheckbox("Loop", &an->loop)) dirty = true;
 
         // Pre-resolve the texture's sub-sprite name list so the
         // per-frame Combo can offer it without re-parsing every row.
@@ -6581,7 +6665,7 @@ private:
             ImGui::SameLine();
             {
                 bool draft = ev.boolArg;
-                if (ImGui::Checkbox("##evbarg", &draft)) {
+                if (NGCheckbox("##evbarg", &draft)) {
                     ev.boolArg = draft;
                     dirty = true;
                 }
@@ -6639,7 +6723,7 @@ private:
             SortEventsByTime();
         }
         ImGui::SameLine();
-        ImGui::Checkbox("Auto", &m_animEditorAutoSort);
+        NGCheckbox("Auto", &m_animEditorAutoSort);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
                 "Re-sort the events list by time after every add or "
@@ -6728,7 +6812,7 @@ private:
             ImGui::Dummy(ImVec2(0, 12));
         }
         ImGui::SameLine();
-        ImGui::Checkbox("Autoplay", &m_animEditorAutoplay);
+        NGCheckbox("Autoplay", &m_animEditorAutoplay);
         const SceneEditor::AnimationFrame* curFr =
             an->Sample(m_animEditorScrubTime);
         ImGui::TextDisabled("Current frame: %s",
@@ -8246,7 +8330,7 @@ private:
                     ImGui::PushID(i * 256 + j);
                     bool on = m_project.CollisionLayersCollide(
                         layers[i], layers[j]);
-                    if (ImGui::Checkbox("##c", &on)) {
+                    if (NGCheckbox("##c", &on)) {
                         m_project.SetCollisionLayersCollide(
                             layers[i], layers[j], on);
                         m_project.Save();
@@ -8771,6 +8855,12 @@ private:
             ImGui::End();
             return;
         }
+        // Blue hover / selection for list rows (entity nodes) so a
+        // "picked" item pops the same way it did in the original
+        // theme. Rest of the theme stays on the gray Header palette.
+        ImGui::PushStyleColor(ImGuiCol_Header,        MenuActiveColor());
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
         if (ImGui::Button("+ Entity")) {
             UndoSnapshot();
             const SceneEditor::EntityId id = m_scene.CreateEntity("Entity");
@@ -8808,6 +8898,7 @@ private:
                 ImGui::EndDragDropTarget();
             }
         }
+        ImGui::PopStyleColor(3);
         ImGui::End();
     }
 
@@ -8909,6 +9000,8 @@ private:
             }
             ImGui::EndDragDropTarget();
         }
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
         if (ImGui::BeginPopupContextItem()) {
             if (ImGui::MenuItem("Add Child")) {
                 UndoSnapshot();
@@ -8931,10 +9024,12 @@ private:
                 if (m_selection == id) m_selection = SceneEditor::kInvalidEntityId;
                 UpdateWindowTitle();
                 ImGui::EndPopup();
+                ImGui::PopStyleColor(2);
                 return;
             }
             ImGui::EndPopup();
         }
+        ImGui::PopStyleColor(2);
         if (open && !e->children.empty()) {
             // Copy ids first so deletions in the loop body don't trip iterators.
             const std::vector<SceneEditor::EntityId> kids = e->children;
@@ -9183,6 +9278,47 @@ private:
             ImGui::GetColorU32(ImGuiCol_Text));
     }
 
+    // Checkbox wrapper that overpaints ImGui's default rendering so
+    // the check mark stays a small blue glyph on a gray box even when
+    // checked. ImGui hardcodes RenderCheckMark's thickness at sz/5,
+    // which on a normal-size checkbox covers so much of the box that
+    // a ticked field visually reads as a solid blue rectangle.
+    // Behaviour + return semantics match ImGui::Checkbox exactly.
+    static bool NGCheckbox(const char* label, bool* v) {
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        const bool ret = ImGui::Checkbox(label, v);
+        const ImGuiStyle& s = ImGui::GetStyle();
+        const float sz = ImGui::GetFrameHeight();
+        const ImVec2 boxMin = pos;
+        const ImVec2 boxMax = ImVec2(pos.x + sz, pos.y + sz);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        // Re-derive the interactive state ourselves. IsItemHovered
+        // after the click frame is fine + IsMouseDown gives us the
+        // held signal without relying on ImGui's internal item state.
+        const bool boxHovered = ImGui::IsItemHovered();
+        const bool boxHeld    = boxHovered &&
+            ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        const ImU32 bg = ImGui::GetColorU32(
+            boxHeld ? ImGuiCol_FrameBgActive :
+            (boxHovered ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg));
+        // Overpaint the whole box in FrameBg (gray), then re-draw the
+        // check mark ourselves at a saner size (56 % of box, centred).
+        dl->AddRectFilled(boxMin, boxMax, bg, s.FrameRounding);
+        if (v && *v) {
+            // 20 % inset -> tick fills 60 % of the box; a touch
+            // bigger than the original 44 % so the glyph reads
+            // clearly at typical inspector row heights without
+            // recovering the "solid blue rectangle" look ImGui's
+            // native RenderCheckMark falls into.
+            const float pad = sz * 0.20f;
+            ImGui::RenderCheckMark(dl,
+                ImVec2(boxMin.x + pad, boxMin.y + pad),
+                ImGui::GetColorU32(ImGuiCol_CheckMark),
+                sz - pad * 2.0f);
+        }
+        return ret;
+    }
+
     static bool MenuButton(const char* label) {
         const ImGuiStyle& s = ImGui::GetStyle();
         const float frameH = ImGui::GetFrameHeight();
@@ -9218,7 +9354,7 @@ private:
         return clicked;
     }
 
-    // Two stacked half-height ?꿎뼹 buttons drawn immediately after the
+    // Two stacked half-height ?轅롫섰 buttons drawn immediately after the
     // caller's cursor. Returns +1 if the up button was clicked this
     // frame, -1 for the down button, 0 otherwise. Consumes (btnW,
     // frameH) of horizontal + vertical space. Callers wrap the drag
@@ -9303,7 +9439,7 @@ private:
         return result;
     }
 
-    // DragFloat + ?꿎뼹 spinner. Behaves like ImGui::DragFloat: same
+    // DragFloat + ?轅롫섰 spinner. Behaves like ImGui::DragFloat: same
     // drag-to-scrub, ctrl-click to type. Adds a stacked spinner on
     // the right that clicks the value up/down by `step` (defaults
     // to `speed`). Undo snapshot fires once on drag-start or on
@@ -9438,7 +9574,7 @@ private:
         return SpinDragFloatN(label, v, 3, speed, lo, hi, fmt, flags, step);
     }
 
-    // DragInt + ?꿎뼹 spinner. `speed` matches ImGui::DragInt (fractional
+    // DragInt + ?轅롫섰 spinner. `speed` matches ImGui::DragInt (fractional
     // pixels-per-unit is fine); `step` defaults to 1.
     bool SpinDragInt(const char* label, int* v, float speed,
                      int lo = 0, int hi = 0,
@@ -9572,7 +9708,7 @@ private:
         if (ImGui::IsItemActivated()) UndoSnapshot();
         {
             bool draft = e->enabled;
-            if (ImGui::Checkbox("Enabled", &draft)) {
+            if (NGCheckbox("Enabled", &draft)) {
                 UndoSnapshot();
                 e->enabled = draft;
                 m_scene.MarkDirty();
@@ -9604,6 +9740,8 @@ private:
         if (MenuButton("Add Component...")) {
             ImGui::OpenPopup("##add_component");
         }
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
         if (ImGui::BeginPopup("##add_component")) {
             for (const std::string& type :
                  SceneEditor::ComponentRegistry::Get().TypeNames()) {
@@ -9623,6 +9761,7 @@ private:
             }
             ImGui::EndPopup();
         }
+        ImGui::PopStyleColor(2);
         ImGui::End();
     }
 
@@ -9864,7 +10003,7 @@ private:
                 }
             } else if (v.IsBool()) {
                 bool bv = v.boolValue;
-                if (ImGui::Checkbox(key.c_str(), &bv)) {
+                if (NGCheckbox(key.c_str(), &bv)) {
                     UndoSnapshot();
                     v.boolValue = bv;
                     m_scene.MarkDirty();
@@ -10062,7 +10201,7 @@ private:
         // off preserves the previous values via -1, so
         // toggling back on doesn't lose what the user typed.
         bool sizeLerp = (ps.endSizeMin >= 0.0f);
-        if (ImGui::Checkbox("Size over Lifetime", &sizeLerp)) {
+        if (NGCheckbox("Size over Lifetime", &sizeLerp)) {
             UndoSnapshot();
             if (sizeLerp) {
                 // Default the lerp endpoints to 0 (shrink to
@@ -10174,7 +10313,7 @@ private:
             ps.angularSpeedMinDeg = spinRange[0];
             ps.angularSpeedMaxDeg = spinRange[1];
         }
-        if (ImGui::Checkbox("Velocity Align", &ps.velocityAlign)) {
+        if (NGCheckbox("Velocity Align", &ps.velocityAlign)) {
             UndoSnapshot();
         }
         if (ImGui::IsItemHovered()) {
@@ -10333,7 +10472,7 @@ private:
                                   0.5f, 0.0f, 0.0f, "%.1f")) {
                     if (ps.animFps < 0.0f) ps.animFps = 0.0f;
                 }
-                if (ImGui::Checkbox("Anim Loop", &ps.animLoop)) {
+                if (NGCheckbox("Anim Loop", &ps.animLoop)) {
                     UndoSnapshot();
                 }
                 if (ImGui::IsItemHovered()) {
@@ -10345,11 +10484,11 @@ private:
             }
         }
 
-        if (ImGui::Checkbox("Play On Start", &ps.playOnStart)) {
+        if (NGCheckbox("Play On Start", &ps.playOnStart)) {
             UndoSnapshot();
         }
         ImGui::SameLine();
-        if (ImGui::Checkbox("Loop", &ps.loop)) UndoSnapshot();
+        if (NGCheckbox("Loop", &ps.loop)) UndoSnapshot();
 
         // M9c9 burst events. duration sets the cycle length;
         // when Loop is on the emitter wraps at duration + re-
@@ -10474,7 +10613,7 @@ private:
             bc.offset = { off[0], off[1] };
         }
         bool trig = bc.isTrigger;
-        if (ImGui::Checkbox("Is Trigger", &trig)) {
+        if (NGCheckbox("Is Trigger", &trig)) {
             UndoSnapshot();
             bc.isTrigger = trig;
         }
@@ -10532,7 +10671,7 @@ private:
             cc.offset = { off[0], off[1] };
         }
         bool trig = cc.isTrigger;
-        if (ImGui::Checkbox("Is Trigger", &trig)) {
+        if (NGCheckbox("Is Trigger", &trig)) {
             UndoSnapshot();
             cc.isTrigger = trig;
         }
@@ -10573,7 +10712,7 @@ private:
             ec.vertices.erase(ec.vertices.begin() + removeIdx);
         }
         bool closed = ec.closed;
-        if (ImGui::Checkbox("Closed (loop)", &closed)) {
+        if (NGCheckbox("Closed (loop)", &closed)) {
             UndoSnapshot();
             ec.closed = closed;
         }
@@ -10582,7 +10721,7 @@ private:
             ec.offset = { off[0], off[1] };
         }
         bool trig = ec.isTrigger;
-        if (ImGui::Checkbox("Is Trigger", &trig)) {
+        if (NGCheckbox("Is Trigger", &trig)) {
             UndoSnapshot();
             ec.isTrigger = trig;
         }
@@ -10632,7 +10771,7 @@ private:
             pgc.offset = { off[0], off[1] };
         }
         bool trig = pgc.isTrigger;
-        if (ImGui::Checkbox("Is Trigger", &trig)) {
+        if (NGCheckbox("Is Trigger", &trig)) {
             UndoSnapshot();
             pgc.isTrigger = trig;
         }
@@ -10688,12 +10827,12 @@ private:
             if (as.volume > 1.0f) as.volume = 1.0f;
         }
         bool pos = as.playOnStart;
-        if (ImGui::Checkbox("Play On Start", &pos)) {
+        if (NGCheckbox("Play On Start", &pos)) {
             UndoSnapshot();
             as.playOnStart = pos;
         }
         bool lp = as.loop;
-        if (ImGui::Checkbox("Loop (streams via PlayMusic)", &lp)) {
+        if (NGCheckbox("Loop (streams via PlayMusic)", &lp)) {
             UndoSnapshot();
             as.loop = lp;
         }
@@ -10703,7 +10842,7 @@ private:
         // M8c8 3D-positional block. Hidden when is3D is off
         // so the inspector stays compact for 2D sources.
         bool is3D = as.is3D;
-        if (ImGui::Checkbox("3D Positional", &is3D)) {
+        if (NGCheckbox("3D Positional", &is3D)) {
             UndoSnapshot();
             as.is3D = is3D;
         }
@@ -10737,7 +10876,7 @@ private:
             cc.offset = { off[0], off[1] };
         }
         bool trig = cc.isTrigger;
-        if (ImGui::Checkbox("Is Trigger", &trig)) {
+        if (NGCheckbox("Is Trigger", &trig)) {
             UndoSnapshot();
             cc.isTrigger = trig;
         }
@@ -10858,7 +10997,7 @@ private:
         }
         {
             bool draft = an.isPlaying;
-            if (ImGui::Checkbox("Playing", &draft)) {
+            if (NGCheckbox("Playing", &draft)) {
                 UndoSnapshot();
                 an.isPlaying = draft;
                 changed = true;
@@ -11023,7 +11162,7 @@ private:
                             bool draft = p.defaultBool;
                             auto it = an.paramBools.find(p.name);
                             if (it != an.paramBools.end()) draft = it->second;
-                            if (ImGui::Checkbox(p.name.c_str(), &draft)) {
+                            if (NGCheckbox(p.name.c_str(), &draft)) {
                                 UndoSnapshot();
                                 an.paramBools[p.name] = draft;
                                 changed = true;
@@ -11459,7 +11598,7 @@ private:
                 SceneEditor::TextureImportSettings::Wrap>(wrapIdx);
             changed = true;
         }
-        if (ImGui::Checkbox("Alpha is Transparency",
+        if (NGCheckbox("Alpha is Transparency",
                             &imp.alphaIsTransparency)) {
             changed = true;
         }
@@ -11620,7 +11759,7 @@ private:
         // so route through a local draft and snapshot before commit.
         {
             bool draft = s.flipX;
-            if (ImGui::Checkbox("Flip X", &draft)) {
+            if (NGCheckbox("Flip X", &draft)) {
                 UndoSnapshot();
                 s.flipX = draft;
                 changed = true;
@@ -11628,7 +11767,7 @@ private:
         }
         {
             bool draft = s.flipY;
-            if (ImGui::Checkbox("Flip Y", &draft)) {
+            if (NGCheckbox("Flip Y", &draft)) {
                 UndoSnapshot();
                 s.flipY = draft;
                 changed = true;
@@ -11841,7 +11980,7 @@ private:
             const ImVec2 fp = ImGui::GetStyle().FramePadding;
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
                                 ImVec2(fp.x, 0.0f));
-            if (ImGui::Checkbox("Play", &m_animPlaying)) {
+            if (NGCheckbox("Play", &m_animPlaying)) {
                 // Persist the toggle into the project so the next
                 // open lands in the same state. Only when the toggle
                 // truly moved, and only when a project is loaded
@@ -14275,7 +14414,7 @@ private:
         // Collision-overlay toggle. Sits in the same toolbar so the
         // debug view + paint tools share one panel; it's a global
         // flag, not per-tilemap.
-        ImGui::Checkbox("Show collision", &m_showCollisionOverlay);
+        NGCheckbox("Show collision", &m_showCollisionOverlay);
         ImGui::Separator();
 
         // Autotile brush picker. Lists every .autotile asset in the
@@ -14406,6 +14545,8 @@ private:
         if (MenuButton("New")) {
             ImGui::OpenPopup("##project_new");
         }
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
         if (ImGui::BeginPopup("##project_new")) {
             if (ImGui::MenuItem("Script..."))
                 DoNewScript();
@@ -14417,6 +14558,7 @@ private:
                 DoNewController();
             ImGui::EndPopup();
         }
+        ImGui::PopStyleColor(2);
         ImGui::SameLine();
         if (ImGui::Button("Refresh")) m_assetDb.Rescan();
         ImGui::SameLine();
@@ -14424,9 +14566,15 @@ private:
                             m_assetDb.Entries().size(),
                             m_project.Name().c_str());
         ImGui::Separator();
+        // Blue hover / selection for asset rows so picking an asset
+        // reads distinctly from the gray affordance chrome around it.
+        ImGui::PushStyleColor(ImGuiCol_Header,        MenuActiveColor());
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
         if (const SceneEditor::AssetTreeNode* root = m_assetDb.RootNode()) {
             DrawAssetTreeNode(*root, /*topLevel=*/true);
         }
+        ImGui::PopStyleColor(3);
         ImGui::End();
     }
 
