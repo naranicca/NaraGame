@@ -5231,6 +5231,7 @@ private:
             ImGui::End();
             return;
         }
+        ShrinkFloatingCollapseIcon();
         const SceneEditor::AssetEntry* entry =
             m_assetDb.FindByGuid(m_controllerEditorAsset);
         if (!entry || entry->typeName != "AnimatorController") {
@@ -6175,6 +6176,21 @@ private:
     }
 
     // Loads `absPath` into m_scriptEditorBuffer + makes the
+    // Hand `absPath` to whatever program Windows has registered as
+    // the default handler for the extension (VS Code / Notepad / ...).
+    // Used by the Project panel's double-click on a .lua script.
+    // Silently no-ops if the shell fails to launch anything (invalid
+    // path, no handler registered) -- the user's next attempt from
+    // Explorer would already surface the error dialog.
+    void OpenScriptExternally(const std::string& absPath) {
+        namespace fs = std::filesystem;
+        const std::wstring wpath =
+            fs::path(absPath).make_preferred().wstring();
+        if (wpath.empty()) return;
+        ShellExecuteW(nullptr, L"open", wpath.c_str(),
+                      nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
     // editor window visible. relPath is the project-relative
     // path the title bar shows so absolute paths don't bloat
     // the window header. Truncated reads (file > 64 KB) flip
@@ -6247,6 +6263,7 @@ private:
             ImGui::End();
             return;
         }
+        ShrinkFloatingCollapseIcon();
         if (ImGui::Button("Save")) SaveScriptEditor();
         ImGui::SameLine();
         if (ImGui::Button("Reload from disk")) ReloadScriptEditor();
@@ -6296,6 +6313,7 @@ private:
             ImGui::End();
             return;
         }
+        ShrinkFloatingCollapseIcon();
         const SceneEditor::AssetEntry* entry =
             m_assetDb.FindByGuid(m_animEditorAsset);
         if (!entry || entry->typeName != "Animation") {
@@ -7078,6 +7096,7 @@ private:
             ImGui::End();
             return;
         }
+        ShrinkFloatingCollapseIcon();
         const SceneEditor::AssetEntry* entry =
             m_assetDb.FindByGuid(m_autotileEditorAsset);
         if (!entry || entry->typeName != "Autotile") {
@@ -7337,6 +7356,7 @@ private:
             ImGui::End();
             return;
         }
+        ShrinkFloatingCollapseIcon();
         const SceneEditor::AssetEntry* entry =
             m_assetDb.FindByGuid(m_tilesetEditorAsset);
         if (!entry || entry->typeName != "Tileset") {
@@ -7692,6 +7712,7 @@ private:
             ImGui::End();
             return;
         }
+        ShrinkFloatingCollapseIcon();
         SceneEditor::AssetEntry* entry =
             m_assetDb.FindByGuidMutable(m_spriteEditorAsset);
         if (!entry || entry->typeName != "Texture") {
@@ -9286,6 +9307,58 @@ private:
             ImVec2(btnMin.x + off, btnMin.y + off),
             smallFs,
             ImGui::GetColorU32(ImGuiCol_Text));
+    }
+
+    // Same idea for FLOATING (non-docked) internal editor windows
+    // (Script Editor, Animator Controller, Animation Editor...): shrink
+    // the title-bar collapse arrow to 60 %. ImGui hardcodes it to
+    // RenderArrow(..., 1.0f) inside CollapseButton, so we overpaint the
+    // button rect and redraw the glyph smaller. No-op for docked
+    // windows (ShrinkPanelCollapseIcon handles those), NoCollapse
+    // windows, or WindowMenuButtonPosition == None.
+    static void ShrinkFloatingCollapseIcon() {
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        if (!w || w->DockNode) return;
+        const ImGuiWindowFlags f = w->Flags;
+        if (f & (ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse)) return;
+        const ImGuiStyle& s = ImGui::GetStyle();
+        if (s.WindowMenuButtonPosition == ImGuiDir_None) return;
+        const float fs = ImGui::GetFontSize();
+        const ImRect titleRect = w->TitleBarRect();
+        // Mirror the layout math from RenderWindowTitleBarContents so
+        // we hit the exact rect ImGui rendered into.
+        ImVec2 btnMin;
+        if (s.WindowMenuButtonPosition == ImGuiDir_Left) {
+            btnMin = ImVec2(titleRect.Min.x + s.FramePadding.x,
+                            titleRect.Min.y + s.FramePadding.y);
+        } else { // Right — sits inside of the close button
+            float pad_r = s.FramePadding.x;
+            if (w->HasCloseButton) pad_r += fs + s.ItemInnerSpacing.x;
+            btnMin = ImVec2(titleRect.Max.x - pad_r - fs,
+                            titleRect.Min.y + s.FramePadding.y);
+        }
+        const ImVec2 btnMax(btnMin.x + fs, btnMin.y + fs);
+        const bool hovered = ImGui::IsMouseHoveringRect(btnMin, btnMax);
+        // Match the title-bar fill ImGui itself used a few instructions
+        // earlier so the cover is invisible.
+        const bool titleHl = (ImGui::GetCurrentContext()->NavWindow == w);
+        const ImU32 titleBg = ImGui::GetColorU32(
+            titleHl ? ImGuiCol_TitleBgActive : ImGuiCol_TitleBg);
+        ImDrawList* dl = w->DrawList;
+        dl->AddRectFilled(btnMin, btnMax, titleBg);
+        if (hovered) {
+            dl->AddRectFilled(btnMin, btnMax,
+                ImGui::GetColorU32(ImGuiCol_ButtonHovered));
+        }
+        // Redraw the arrow at 60 % scale. RenderArrow places its centre
+        // at pos + (fs*0.5, fs*0.5*scale); shift pos.y so the smaller
+        // glyph stays visually centred inside the fs*fs button box.
+        const float scale  = 0.6f;
+        const float yShift = fs * 0.5f * (1.0f - scale);
+        const ImGuiDir dir = w->Collapsed ? ImGuiDir_Right : ImGuiDir_Down;
+        ImGui::RenderArrow(dl,
+            ImVec2(btnMin.x, btnMin.y + yShift),
+            ImGui::GetColorU32(ImGuiCol_Text), dir, scale);
     }
 
     // Checkbox wrapper that overpaints ImGui's default rendering so
@@ -14648,11 +14721,31 @@ private:
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             OpenControllerEditor(e->guid);
         }
+        // Script: double-click hands the file off to whatever program
+        // Windows has registered as the .lua opener (VS Code, notepad,
+        // whatever the user picked). Users who prefer the in-editor
+        // Script Editor can right-click for the alternative.
         if (e && e->typeName == "Script" &&
             ImGui::IsItemHovered() &&
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-            OpenScriptEditor(m_assetDb.AssetsRoot() + "/" + e->relPath,
-                             e->relPath);
+            OpenScriptExternally(m_assetDb.AssetsRoot() + "/" + e->relPath);
+        }
+        if (e && e->typeName == "Script") {
+            // Right-click context menu offers both open paths so the
+            // user isn't locked into whichever one double-click chose.
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
+            if (ImGui::BeginPopupContextItem()) {
+                const std::string abs = m_assetDb.AssetsRoot() + "/" + e->relPath;
+                if (ImGui::MenuItem("Open in Scene Editor")) {
+                    OpenScriptEditor(abs, e->relPath);
+                }
+                if (ImGui::MenuItem("Open with default program")) {
+                    OpenScriptExternally(abs);
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleColor(2);
         }
         if (e && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             // The 16-byte GUID is the entire payload. Editor drop sites
