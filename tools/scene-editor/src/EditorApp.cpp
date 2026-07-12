@@ -4004,6 +4004,88 @@ private:
         return true;
     }
 
+    void DoNewScript() {
+        namespace fs = std::filesystem;
+        const std::string scriptsDir =
+            m_project.IsOpen() ? (m_project.AssetsDir() + "/Scripts")
+                               : std::string{};
+        if (!scriptsDir.empty()) {
+            std::error_code ec;
+            fs::create_directories(fs::path(scriptsDir), ec);
+        }
+        const std::string path = PickFileDialog(
+            m_hwnd, CLSID_FileSaveDialog, L"New Script",
+            L"Lua Script (*.lua)", L"*.lua", L"lua",
+            scriptsDir);
+        if (path.empty()) return;
+        // Stem drives the entry-function prefix that ScriptComponent
+        // + the runtime dispatcher look for -- `<stem>_Update`,
+        // `<stem>_Start`, etc. Fall back to "Script" if the picker
+        // handed us a nameless path (defensive; SaveFileDialog
+        // shouldn't).
+        std::string stem = fs::path(path).stem().string();
+        if (stem.empty()) stem = "Script";
+        // Compact starter template. Two live callbacks (Start,
+        // Update) with self/dt so the file runs the moment it's
+        // attached; the rest are commented pointers to the full
+        // callback set documented in the Mario tutorial.
+        std::string body;
+        body.reserve(600);
+        body += "-- ";
+        body += stem;
+        body += "\n-- Attach via Inspector > Add Component > ScriptComponent;\n"
+                "-- set entryFunction to \"";
+        body += stem;
+        body += "\" or leave blank to derive from filename.\n"
+                "--\n"
+                "-- Callback naming: <entry>_<Event>(self, ...)\n"
+                "--   _Start(self)         once, before the first Update.\n"
+                "--   _Update(self, dt)    every frame while enabled.\n"
+                "--   _Enable/_Disable(self)\n"
+                "--   _Destroy(self)       just before the entity dies.\n"
+                "--   _CollisionEnter/Stay/Exit(self, other)\n"
+                "--   _TriggerEnter/Stay/Exit(self, other)\n"
+                "\n"
+                "function ";
+        body += stem;
+        body += "_Start(self)\n"
+                "end\n"
+                "\n"
+                "function ";
+        body += stem;
+        body += "_Update(self, dt)\n"
+                "end\n";
+        // Refuse to clobber an existing file so the picker's
+        // "Save As" confirmation stays the only overwrite path.
+        std::error_code ec;
+        if (fs::exists(path, ec)) {
+            NARAGAME_ERROR("scene-editor: '%s' already exists; aborting",
+                           path.c_str());
+            return;
+        }
+        FILE* f = nullptr;
+        fopen_s(&f, path.c_str(), "wb");
+        if (!f) {
+            NARAGAME_ERROR("scene-editor: could not create '%s'",
+                           path.c_str());
+            return;
+        }
+        std::fwrite(body.data(), 1, body.size(), f);
+        std::fclose(f);
+        m_assetDb.Rescan();
+        // Open the freshly written script in the Script Editor so
+        // the user drops straight into editing it -- mirrors what
+        // DoNewTileset / DoNewAnimation do for their asset editors.
+        const std::string rel = RelToAssets(path);
+        OpenScriptEditor(path, rel);
+        // Reload through the host so the interpreter sees the new
+        // file immediately + a live scene can attach it without a
+        // manual rescan.
+        if (const auto* entry = m_assetDb.FindByPath(rel)) {
+            m_scriptHost.LoadFile(path, entry->relPath);
+        }
+    }
+
     void DoNewTileset() {
         const std::string tilesetsDir =
             m_project.IsOpen() ? (m_project.AssetsDir() + "/Tilesets")
@@ -4421,6 +4503,8 @@ private:
                                 projOpen && !m_currentScenePath.empty()))
                 m_openRenameSceneModal = true;
             ImGui::Separator();
+            if (ImGui::MenuItem("New Script...", nullptr, false, projOpen))
+                DoNewScript();
             if (ImGui::MenuItem("New Tileset...", nullptr, false, projOpen))
                 DoNewTileset();
             if (ImGui::MenuItem("New Animation...", nullptr, false, projOpen))
