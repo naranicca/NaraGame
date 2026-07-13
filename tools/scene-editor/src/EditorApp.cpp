@@ -9528,13 +9528,15 @@ private:
         dl->AddRectFilled(pos,
                           ImVec2(pos.x + w, pos.y + h),
                           bg, s.FrameRounding);
-        // Two diagonals. Inset the endpoints so the cross doesn't
-        // touch the button edges; a ~28 % inset matches the visual
-        // weight of the component-header X we hand-draw elsewhere.
+        // Two diagonals. Sized to match the visual weight of the
+        // 70%-scale SmallTriangleButton next to it: a cross spanning
+        // ~55 % of the button roughly matches the triangle's ~56 %
+        // radius so ▲ ▼ ✕ line up as a set instead of the X
+        // dominating.
         const float cx = pos.x + w * 0.5f;
         const float cy = pos.y + h * 0.5f;
-        const float half = fs * 0.5f * 0.7f;  // 70 % of button height
-        const float th = std::max(1.5f, fs * 0.10f);
+        const float half = fs * 0.5f * 0.55f;
+        const float th = std::max(1.5f, fs * 0.09f);
         const ImU32 fg = ImGui::GetColorU32(ImGuiCol_Text);
         dl->AddLine(ImVec2(cx - half, cy - half),
                     ImVec2(cx + half, cy + half), fg, th);
