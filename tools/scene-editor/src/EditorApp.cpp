@@ -9460,7 +9460,16 @@ private:
         // padding so the arrow doesn't touch the button edges.
         const float w = fs + s.FramePadding.x;
         const float h = fs;
-        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        // Match SmallButton's baseline-alignment shift. SmallButton
+        // uses ImGuiButtonFlags_AlignTextBaseLine which nudges the
+        // button down by (CurrLineTextBaseOffset - FramePadding.y),
+        // and on a row with a framed item (like a DragFloat) that's
+        // equal to FramePadding.y -- without the shift my
+        // InvisibleButton sits at the top of the line while every
+        // sibling button aligns to the middle.
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        pos.y += s.FramePadding.y;
+        ImGui::SetCursorScreenPos(pos);
         ImGui::InvisibleButton(id, ImVec2(w, h));
         const bool clicked = ImGui::IsItemClicked();
         const bool hovered = ImGui::IsItemHovered();
