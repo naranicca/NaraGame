@@ -8934,10 +8934,12 @@ private:
             ImGui::End();
             return;
         }
-        // Blue hover / selection for list rows (entity nodes) so a
-        // "picked" item pops the same way it did in the original
-        // theme. Rest of the theme stays on the gray Header palette.
-        ImGui::PushStyleColor(ImGuiCol_Header,        MenuActiveColor());
+        // Blue only under the cursor. Matches the Project panel: the
+        // selected entity keeps its state in m_selection (used by the
+        // Inspector) but the row itself doesn't paint a persistent
+        // tint, so the hover blue unambiguously means "cursor is
+        // here right now".
+        ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
         ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
         if (ImGui::Button("+ Entity")) {
@@ -9053,16 +9055,32 @@ private:
         SceneEditor::Entity* e = m_scene.Get(id);
         if (!e) return;
 
+        // Unique popup name per entity so IsPopupOpen can identify
+        // which row's context menu is currently on screen. While it
+        // is, we force the row to render with the hover tint so the
+        // highlight stays put through the right-click.
+        const std::string popupName = "##hnodectx##" + std::to_string(id);
+        const bool popupOnMe = ImGui::IsPopupOpen(popupName.c_str());
+
         ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
                                    ImGuiTreeNodeFlags_OpenOnDoubleClick |
                                    ImGuiTreeNodeFlags_SpanAvailWidth;
         if (e->children.empty()) flags |= ImGuiTreeNodeFlags_Leaf |
                                            ImGuiTreeNodeFlags_NoTreePushOnOpen;
-        if (id == m_selection) flags |= ImGuiTreeNodeFlags_Selected;
+        if (popupOnMe) flags |= ImGuiTreeNodeFlags_Selected;
 
+        if (popupOnMe) {
+            ImGui::PushStyleColor(ImGuiCol_Header, MenuHoverColor());
+        }
         const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(size_t(id)),
                                             flags, "%s", e->name.c_str());
-        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+        if (popupOnMe) ImGui::PopStyleColor();
+        // Left or right click on the row picks it as the current
+        // selection so the Inspector switches over + the right-click
+        // menu clearly belongs to this entity.
+        if ((ImGui::IsItemClicked(ImGuiMouseButton_Left) ||
+             ImGui::IsItemClicked(ImGuiMouseButton_Right)) &&
+            !ImGui::IsItemToggledOpen()) {
             m_selection     = id;
             m_selectedAsset = SceneEditor::AssetGuid{};
         }
@@ -9081,7 +9099,7 @@ private:
         }
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
         ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
-        if (ImGui::BeginPopupContextItem()) {
+        if (ImGui::BeginPopupContextItem(popupName.c_str())) {
             if (ImGui::MenuItem("Add Child")) {
                 UndoSnapshot();
                 m_scene.CreateEntity("Entity", id);
