@@ -5388,9 +5388,10 @@ private:
                 dirty = true;
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("Up") && i > 0) moveStateUp = i;
+            if (SmallTriangleButton("##stateup", ImGuiDir_Up) &&
+                i > 0) moveStateUp = i;
             ImGui::SameLine();
-            if (ImGui::SmallButton("Down") &&
+            if (SmallTriangleButton("##statedown", ImGuiDir_Down) &&
                 i + 1 < int(ctrl->states.size())) moveStateDown = i;
             ImGui::SameLine();
             if (ImGui::SmallButton("X")) removeStateAt = i;
@@ -6050,9 +6051,10 @@ private:
                 dirty = true;
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("Up") && i > 0) moveTrUp = i;
+            if (SmallTriangleButton("##trup", ImGuiDir_Up) &&
+                i > 0) moveTrUp = i;
             ImGui::SameLine();
-            if (ImGui::SmallButton("Down") &&
+            if (SmallTriangleButton("##trdown", ImGuiDir_Down) &&
                 i + 1 < int(ctrl->transitions.size())) moveTrDown = i;
             ImGui::SameLine();
             if (ImGui::SmallButton("X")) removeTrAt = i;
@@ -9445,6 +9447,44 @@ private:
         ImGui::RenderArrow(dl,
             ImVec2(btnMin.x, btnMin.y + yShift),
             ImGui::GetColorU32(ImGuiCol_Text), dir, scale);
+    }
+
+    // Compact square button that renders an ImGui arrow (Up / Down /
+    // Left / Right) instead of a text label. Matches SmallButton in
+    // height so it lines up next to X/Copy/Paste in reorderable list
+    // rows. Returns true on the frame the user clicks it.
+    static bool SmallTriangleButton(const char* id, ImGuiDir dir) {
+        const ImGuiStyle& s = ImGui::GetStyle();
+        const float fs = ImGui::GetFontSize();
+        // Width matches SmallButton height (fs) with a bit of side
+        // padding so the arrow doesn't touch the button edges.
+        const float w = fs + s.FramePadding.x;
+        const float h = fs;
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton(id, ImVec2(w, h));
+        const bool clicked = ImGui::IsItemClicked();
+        const bool hovered = ImGui::IsItemHovered();
+        const bool active  = ImGui::IsItemActive();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        // Background: idle stays flat (matches SmallButton's usual
+        // no-fill hover-only look), hovered/active get the theme's
+        // Button colours.
+        const ImU32 bg = ImGui::GetColorU32(
+            active  ? ImGuiCol_ButtonActive  :
+            hovered ? ImGuiCol_ButtonHovered :
+                      ImGuiCol_Button);
+        dl->AddRectFilled(pos,
+                          ImVec2(pos.x + w, pos.y + h),
+                          bg, s.FrameRounding);
+        // Centre the arrow inside the button. RenderArrow's origin is
+        // the top-left of an fs*fs box, and it centres the glyph in
+        // that box at scale 1.0; nudge x to centre it inside our
+        // slightly wider button.
+        const float ox = pos.x + (w - fs) * 0.5f;
+        ImGui::RenderArrow(dl, ImVec2(ox, pos.y),
+                           ImGui::GetColorU32(ImGuiCol_Text),
+                           dir, 0.7f);
+        return clicked;
     }
 
     // Checkbox wrapper that overpaints ImGui's default rendering so
