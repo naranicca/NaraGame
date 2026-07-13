@@ -14718,22 +14718,33 @@ private:
                            bool topLevel,
                            const std::string& parentRelPath = {}) {
         if (node.isFolder) {
-            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
-                                       ImGuiTreeNodeFlags_OpenOnArrow |
-                                       ImGuiTreeNodeFlags_OpenOnDoubleClick;
-            if (topLevel) flags |= ImGuiTreeNodeFlags_DefaultOpen;
-            const bool open = ImGui::TreeNodeEx(node.name.c_str(), flags,
-                                                "%s/", node.name.c_str());
-            // Right-click any folder in the tree (including the top-
-            // level Assets root) to jump to its on-disk location.
-            // AssetTreeNode doesn't store a rel path so we thread the
-            // parent's rel path down + append this folder's name
-            // (empty parentRelPath means we're at the Assets root, in
-            // which case the absolute path is just AssetsRoot()).
+            // Precompute the folder's rel path so we can flag the row
+            // as selected before submitting it -- otherwise the
+            // highlight only kicks in one frame later.
             const std::string folderRel = topLevel
                 ? std::string{}
                 : (parentRelPath.empty() ? node.name
                                           : parentRelPath + "/" + node.name);
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
+                                       ImGuiTreeNodeFlags_OpenOnArrow |
+                                       ImGuiTreeNodeFlags_OpenOnDoubleClick;
+            if (topLevel) flags |= ImGuiTreeNodeFlags_DefaultOpen;
+            if (m_selectedFolderRel == folderRel && !m_selectedAsset.IsValid()) {
+                flags |= ImGuiTreeNodeFlags_Selected;
+            }
+            const bool open = ImGui::TreeNodeEx(node.name.c_str(), flags,
+                                                "%s/", node.name.c_str());
+            // Left or right click on the folder row picks it as the
+            // "current" folder so the row lights up + it's clear which
+            // folder the right-click menu is targeting.
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) ||
+                ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                m_selectedFolderRel = folderRel;
+                m_selectedAsset     = SceneEditor::AssetGuid{};
+                m_selection         = SceneEditor::kInvalidEntityId;
+            }
+            // Right-click any folder in the tree (including the top-
+            // level Assets root) to jump to its on-disk location.
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
             ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
             if (ImGui::BeginPopupContextItem()) {
@@ -14768,9 +14779,14 @@ private:
                           ImGuiTreeNodeFlags_SpanAvailWidth |
                           (selected ? ImGuiTreeNodeFlags_Selected : 0),
                           "%s", node.name.c_str());
-        if (ImGui::IsItemClicked() && e) {
-            m_selectedAsset = e->guid;
-            m_selection     = SceneEditor::kInvalidEntityId;
+        // Left click selects; right click ALSO selects so the row
+        // lights up under the popup instead of leaving the reader
+        // guessing which asset the menu belongs to.
+        if ((ImGui::IsItemClicked(ImGuiMouseButton_Left) ||
+             ImGui::IsItemClicked(ImGuiMouseButton_Right)) && e) {
+            m_selectedAsset     = e->guid;
+            m_selection         = SceneEditor::kInvalidEntityId;
+            m_selectedFolderRel.clear();
         }
         // Double-click a Texture row to open the Sprite Editor with
         // that asset as the active edit target.
@@ -14901,6 +14917,12 @@ private:
 
     SceneEditor::AssetDatabase m_assetDb;
     SceneEditor::AssetGuid     m_selectedAsset;
+    // Rel path of the folder row the user last clicked (left or right)
+    // in the Project panel. Folders don't participate in AssetGuid
+    // selection, but we still want the row highlighted while the
+    // right-click "Open in Explorer" popup is showing so it's obvious
+    // which folder the menu belongs to.
+    std::string                m_selectedFolderRel;
     // M8c6 per-asset audition gain. Keyed on AssetGuid so
     // the slider state survives Inspector redraws + lets
     // the user A/B test two clips at different volumes by
