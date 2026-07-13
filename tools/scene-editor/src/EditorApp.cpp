@@ -3883,10 +3883,12 @@ private:
         }
     }
 
-    void DoNewController() {
-        const std::string animDir =
+    void DoNewController(const std::string& initialDir = {}) {
+        const std::string defaultDir =
             m_project.IsOpen() ? (m_project.AssetsDir() + "/Animations")
                                : std::string{};
+        const std::string animDir =
+            initialDir.empty() ? defaultDir : initialDir;
         if (!animDir.empty()) {
             namespace fs = std::filesystem;
             std::error_code ec;
@@ -3906,10 +3908,12 @@ private:
         }
     }
 
-    void DoNewAnimation() {
-        const std::string animDir =
+    void DoNewAnimation(const std::string& initialDir = {}) {
+        const std::string defaultDir =
             m_project.IsOpen() ? (m_project.AssetsDir() + "/Animations")
                                : std::string{};
+        const std::string animDir =
+            initialDir.empty() ? defaultDir : initialDir;
         // Ensure the folder exists for older projects that pre-date the
         // M5 default subfolder; the save dialog falls back to Assets/
         // anyway when this can't be created.
@@ -4093,11 +4097,13 @@ private:
         return true;
     }
 
-    void DoNewScript() {
+    void DoNewScript(const std::string& initialDir = {}) {
         namespace fs = std::filesystem;
-        const std::string scriptsDir =
+        const std::string defaultDir =
             m_project.IsOpen() ? (m_project.AssetsDir() + "/Scripts")
                                : std::string{};
+        const std::string scriptsDir =
+            initialDir.empty() ? defaultDir : initialDir;
         if (!scriptsDir.empty()) {
             std::error_code ec;
             fs::create_directories(fs::path(scriptsDir), ec);
@@ -4175,10 +4181,12 @@ private:
         }
     }
 
-    void DoNewTileset() {
-        const std::string tilesetsDir =
+    void DoNewTileset(const std::string& initialDir = {}) {
+        const std::string defaultDir =
             m_project.IsOpen() ? (m_project.AssetsDir() + "/Tilesets")
                                : std::string{};
+        const std::string tilesetsDir =
+            initialDir.empty() ? defaultDir : initialDir;
         const std::string path = PickFileDialog(
             m_hwnd, CLSID_FileSaveDialog, L"New Tileset",
             L"NaraGame Tileset (*.ntileset)", L"*.ntileset", L"ntileset",
@@ -14781,12 +14789,46 @@ private:
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
             ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
             if (ImGui::BeginPopupContextItem(popupName.c_str())) {
-                if (ImGui::MenuItem("Open in Explorer")) {
-                    const std::string abs = folderRel.empty()
-                        ? m_assetDb.AssetsRoot()
-                        : (m_assetDb.AssetsRoot() + "/" + folderRel);
-                    OpenInExplorer(abs);
+                const std::string abs = folderRel.empty()
+                    ? m_assetDb.AssetsRoot()
+                    : (m_assetDb.AssetsRoot() + "/" + folderRel);
+                // Categorise the folder by its top-level segment so a
+                // deep folder like "Scripts/Enemies" still surfaces the
+                // "New Script..." affordance. The Assets root shows
+                // every category since it's the catch-all.
+                auto inCategory = [&](const char* cat) {
+                    if (folderRel == cat) return true;
+                    const std::string prefix = std::string(cat) + "/";
+                    return folderRel.rfind(prefix, 0) == 0;
+                };
+                const bool showScript     = folderRel.empty() ||
+                                             inCategory("Scripts");
+                const bool showTileset    = folderRel.empty() ||
+                                             inCategory("Tilesets");
+                const bool showAnimation  = folderRel.empty() ||
+                                             inCategory("Animations");
+                const bool showController = folderRel.empty() ||
+                                             inCategory("Animations");
+                bool anyNew = false;
+                if (showScript) {
+                    if (ImGui::MenuItem("New Script...")) DoNewScript(abs);
+                    anyNew = true;
                 }
+                if (showTileset) {
+                    if (ImGui::MenuItem("New Tileset...")) DoNewTileset(abs);
+                    anyNew = true;
+                }
+                if (showAnimation) {
+                    if (ImGui::MenuItem("New Animation...")) DoNewAnimation(abs);
+                    anyNew = true;
+                }
+                if (showController) {
+                    if (ImGui::MenuItem("New Animator Controller..."))
+                        DoNewController(abs);
+                    anyNew = true;
+                }
+                if (anyNew) ImGui::Separator();
+                if (ImGui::MenuItem("Open in Explorer")) OpenInExplorer(abs);
                 ImGui::EndPopup();
             }
             ImGui::PopStyleColor(2);
