@@ -14702,9 +14702,13 @@ private:
                             m_assetDb.Entries().size(),
                             m_project.Name().c_str());
         ImGui::Separator();
-        // Blue hover / selection for asset rows so picking an asset
-        // reads distinctly from the gray affordance chrome around it.
-        ImGui::PushStyleColor(ImGuiCol_Header,        MenuActiveColor());
+        // Blue only under the cursor. The selected row keeps its
+        // state in m_selectedAsset / m_selectedFolderRel + drives the
+        // Inspector, but we don't paint a persistent selection tint
+        // -- otherwise a blue-highlighted row that's no longer under
+        // the mouse competes for attention with whatever the user is
+        // actually pointing at right now.
+        ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
         ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
         if (const SceneEditor::AssetTreeNode* root = m_assetDb.RootNode()) {
