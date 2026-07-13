@@ -6191,6 +6191,20 @@ private:
                       nullptr, nullptr, SW_SHOWNORMAL);
     }
 
+    // Same underlying ShellExecute call as OpenScriptExternally --
+    // Windows treats a folder path passed to `open` as "show it in
+    // Explorer". Kept as its own name so Project-panel call sites
+    // read as "open this folder in Explorer" rather than
+    // "externally".
+    void OpenInExplorer(const std::string& absPath) {
+        namespace fs = std::filesystem;
+        const std::wstring wpath =
+            fs::path(absPath).make_preferred().wstring();
+        if (wpath.empty()) return;
+        ShellExecuteW(nullptr, L"open", wpath.c_str(),
+                      nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
     // editor window visible. relPath is the project-relative
     // path the title bar shows so absolute paths don't bloat
     // the window header. Truncated reads (file > 64 KB) flip
@@ -14683,7 +14697,8 @@ private:
     }
 
     void DrawAssetTreeNode(const SceneEditor::AssetTreeNode& node,
-                           bool topLevel) {
+                           bool topLevel,
+                           const std::string& parentRelPath = {}) {
         if (node.isFolder) {
             ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
                                        ImGuiTreeNodeFlags_OpenOnArrow |
@@ -14691,8 +14706,32 @@ private:
             if (topLevel) flags |= ImGuiTreeNodeFlags_DefaultOpen;
             const bool open = ImGui::TreeNodeEx(node.name.c_str(), flags,
                                                 "%s/", node.name.c_str());
+            // Right-click any folder in the tree (including the top-
+            // level Assets root) to jump to its on-disk location.
+            // AssetTreeNode doesn't store a rel path so we thread the
+            // parent's rel path down + append this folder's name
+            // (empty parentRelPath means we're at the Assets root, in
+            // which case the absolute path is just AssetsRoot()).
+            const std::string folderRel = topLevel
+                ? std::string{}
+                : (parentRelPath.empty() ? node.name
+                                          : parentRelPath + "/" + node.name);
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Open in Explorer")) {
+                    const std::string abs = folderRel.empty()
+                        ? m_assetDb.AssetsRoot()
+                        : (m_assetDb.AssetsRoot() + "/" + folderRel);
+                    OpenInExplorer(abs);
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleColor(2);
             if (open) {
-                for (const auto& c : node.children) DrawAssetTreeNode(*c, false);
+                for (const auto& c : node.children) {
+                    DrawAssetTreeNode(*c, false, folderRel);
+                }
                 ImGui::TreePop();
             }
             return;
