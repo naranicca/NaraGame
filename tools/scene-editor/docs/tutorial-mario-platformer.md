@@ -535,18 +535,22 @@ local function s(name)
   return t
 end
 
--- Ground 감지: 발밑으로 짧은 raycast.
--- BoxCollider.Size(y)가 대략 0.33 이므로 발 아래 0.05만 더 쐈다.
+-- Ground 감지: Player 원점에서 아래로 1 world unit 쏘고, 자기 자신
+-- 콜라이더는 exclude 로 걸러낸다. BoxCollider Size 를 얼마로
+-- 잡았든 (원점 아래 어딘가에 지면이 있으면) 잡을 수 있다.
 local function isGrounded(self, py)
   local px, _, _ = transform.get_position(self)
-  local hit = scene.raycast(px, py - 0.20, px, py - 0.30)
-  return hit ~= "" and hit ~= self
+  local hit = scene.raycast(px, py, px, py - 1.0, self)
+  return hit ~= ""
 end
 
 function Player_Start(self)
-  input.bind("left",  "a")
-  input.bind("right", "d")
-  input.bind("jump",  "Space")
+  -- 액션 하나에 여러 키를 걸고 싶으면 두 번째 인자를 문자열 대신
+  -- 배열 (테이블) 로 넘기면 됩니다. 아래는 A/D + 방향키를 모두
+  -- 받도록 한 예시.
+  input.bind("left",  {"a", "Left"})
+  input.bind("right", {"d", "Right"})
+  input.bind("jump",  {"Space", "w", "Up"})
   print("Player_Start: ", self)
 end
 
@@ -1044,7 +1048,7 @@ scene-editor.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.
 | `input.mouse_position()` | x, y |
 | `input.is_mouse_down(btn=0)` / `_pressed` / `_released` | bool |
 | `input.mouse_wheel()` | number |
-| `input.bind(action, key)` / `unbind(action)` / `binding(action)` | — |
+| `input.bind(action, key_or_keys)` / `unbind(action)` / `binding(action)` | — |
 | `input.is_action_down/pressed/released(action)` | bool |
 
 ### transform.*
@@ -1100,7 +1104,7 @@ scene-editor.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.
 | `scene.entity_at(x, y)` | 이름 str, "" = 없음 |
 | `scene.find_by_component(type)` | table |
 | `scene.broadcast(method, ...)` | int |
-| `scene.raycast(x0, y0, x1, y1)` | name, hx, hy, dist (miss = "") |
+| `scene.raycast(x0, y0, x1, y1, exclude?)` | name, hx, hy, dist (miss = "") |
 | `scene.overlap_box(cx, cy, w, h)` / `overlap_circle(cx, cy, r)` | table |
 | `scene.find_path(sx, sy, ex, ey, smooth?)` | table 또는 nil |
 | `scene.load(path, opts?)` | bool (지연 실행) |

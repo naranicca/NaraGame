@@ -170,9 +170,13 @@ static ImGuiKey LookupImGuiKey(const char* name) {
 // SetEmpty, or Lua state teardown. Persistence is up to the
 // caller -- a typical settings UI walks these into the
 // savegame state table + reloads on boot.
-static std::unordered_map<std::string, std::string>&
+// Multi-key: each action stores a list of keys so a script can
+// register several inputs for the same action (e.g. arrow keys +
+// WASD). Any key in the list being down/pressed satisfies the
+// action query.
+static std::unordered_map<std::string, std::vector<std::string>>&
 ActionBindings() {
-    static std::unordered_map<std::string, std::string> map;
+    static std::unordered_map<std::string, std::vector<std::string>> map;
     return map;
 }
 
@@ -180,7 +184,7 @@ ActionBindings() {
 // the surrounding namespace) can reach the per-process binding
 // table without re-declaring it. The function-local static
 // pattern is the same as ActionBindings() right above.
-const std::unordered_map<std::string, std::string>&
+const std::unordered_map<std::string, std::vector<std::string>>&
 ActionBindingsConst() {
     return ActionBindings();
 }
@@ -391,15 +395,31 @@ static int LuaSettingsIsVisible(lua_State* L) {
     return 1;
 }
 
-// input.bind(action, key) -> nil. Stores the action -> key
-// mapping; replaces any previous binding for `action`.
-// Subsequent input.is_action_* calls dispatch through here.
+// input.bind(action, key_or_keys) -> nil. Stores the action -> key
+// mapping; replaces any previous binding for `action`. The second
+// argument accepts either a single key name (string) or an array of
+// key names (table) so a script can bind e.g. both arrow keys and
+// WASD to the same action.
 static int LuaInputBind(lua_State* L) {
     const char* act = luaL_checkstring(L, 1);
-    const char* key = luaL_checkstring(L, 2);
-    if (act && *act && key && *key) {
-        ActionBindings()[act] = key;
+    if (!act || !*act) return 0;
+    std::vector<std::string> keys;
+    if (lua_istable(L, 2)) {
+        const int n = int(lua_rawlen(L, 2));
+        keys.reserve(size_t(n));
+        for (int i = 1; i <= n; ++i) {
+            lua_rawgeti(L, 2, i);
+            if (lua_isstring(L, -1)) {
+                const char* k = lua_tostring(L, -1);
+                if (k && *k) keys.emplace_back(k);
+            }
+            lua_pop(L, 1);
+        }
+    } else {
+        const char* key = luaL_checkstring(L, 2);
+        if (key && *key) keys.emplace_back(key);
     }
+    if (!keys.empty()) ActionBindings()[act] = std::move(keys);
     return 0;
 }
 
@@ -414,42 +434,56 @@ static int LuaInputUnbind(lua_State* L) {
 }
 
 // input.binding(action) -> str. Reverse lookup so the settings
-// UI can render "Jump = Space". Returns "" when the action
-// isn't bound.
+// UI can render "Jump = Space". For multi-key bindings the keys
+// come back joined by ", " (e.g. "a, Left") which is what the
+// rebind widget already prints. Returns "" when the action isn't
+// bound.
 static int LuaInputBinding(lua_State* L) {
     const char* act = luaL_checkstring(L, 1);
     auto& map = ActionBindings();
     auto it = map.find(act ? act : "");
-    lua_pushstring(L, it == map.end() ? "" : it->second.c_str());
+    if (it == map.end()) { lua_pushstring(L, ""); return 1; }
+    std::string joined;
+    for (size_t i = 0; i < it->second.size(); ++i) {
+        if (i) joined += ", ";
+        joined += it->second[i];
+    }
+    lua_pushstring(L, joined.c_str());
     return 1;
 }
 
-static ImGuiKey ActionKey(lua_State* L, int argIdx) {
+// Run `check` against every key bound to the action + return true
+// if any of them satisfies it. ImGuiKey_None keys are skipped (they
+// mean "the key name didn't resolve") so a typo in one entry
+// doesn't wipe out the whole action.
+template <typename F>
+static bool AnyKey(lua_State* L, int argIdx, F check) {
     const char* act = luaL_checkstring(L, argIdx);
     auto& map = ActionBindings();
     auto it = map.find(act ? act : "");
-    if (it == map.end()) return ImGuiKey_None;
-    return LookupImGuiKey(it->second.c_str());
+    if (it == map.end()) return false;
+    for (const std::string& name : it->second) {
+        ImGuiKey k = LookupImGuiKey(name.c_str());
+        if (k != ImGuiKey_None && check(k)) return true;
+    }
+    return false;
 }
 
 static int LuaInputIsActionDown(lua_State* L) {
-    const ImGuiKey k = ActionKey(L, 1);
-    lua_pushboolean(L,
-        k != ImGuiKey_None && ImGui::IsKeyDown(k));
+    lua_pushboolean(L, AnyKey(L, 1,
+        [](ImGuiKey k) { return ImGui::IsKeyDown(k); }));
     return 1;
 }
 static int LuaInputIsActionPressed(lua_State* L) {
-    const ImGuiKey k = ActionKey(L, 1);
     bool repeat = false;
     if (lua_gettop(L) >= 2) repeat = lua_toboolean(L, 2) != 0;
-    lua_pushboolean(L,
-        k != ImGuiKey_None && ImGui::IsKeyPressed(k, repeat));
+    lua_pushboolean(L, AnyKey(L, 1,
+        [repeat](ImGuiKey k) { return ImGui::IsKeyPressed(k, repeat); }));
     return 1;
 }
 static int LuaInputIsActionReleased(lua_State* L) {
-    const ImGuiKey k = ActionKey(L, 1);
-    lua_pushboolean(L,
-        k != ImGuiKey_None && ImGui::IsKeyReleased(k));
+    lua_pushboolean(L, AnyKey(L, 1,
+        [](ImGuiKey k) { return ImGui::IsKeyReleased(k); }));
     return 1;
 }
 
@@ -797,14 +831,18 @@ static bool RaySegmentVsCircle(float ox, float oy, float dx, float dy,
     return false;
 }
 
-// scene.raycast(x0, y0, x1, y1) -> (name, hx, hy, distance).
+// scene.raycast(x0, y0, x1, y1, exclude?) -> (name, hx, hy, distance).
 // Walks every enabled entity that carries a Box or Circle
 // collider, returns the nearest hit's entity name + hit point
 // + distance from the origin. Misses return just "" so callers
 // can write `if scene.raycast(...) ~= "" then`. Treats the
 // 4-arg form as a finite segment from (x0, y0) to (x1, y1) --
 // for unbounded rays the caller can scale (x1, y1) far away
-// from the origin.
+// from the origin. Optional 5th arg names an entity to skip --
+// the common case is a ground-check raycast that starts inside
+// the caller's own collider; passing `self` here makes the raycast
+// see through the caller instead of always reporting itself as the
+// nearest hit.
 static int LuaSceneRaycast(lua_State* L) {
     ScriptHost* host = HostFromUpvalue(L);
     if (!host || !host->BoundScene()) {
@@ -814,6 +852,8 @@ static int LuaSceneRaycast(lua_State* L) {
     const float y0 = float(luaL_checknumber(L, 2));
     const float x1 = float(luaL_checknumber(L, 3));
     const float y1 = float(luaL_checknumber(L, 4));
+    const char* excludeName = (lua_gettop(L) >= 5 && lua_isstring(L, 5))
+        ? lua_tostring(L, 5) : nullptr;
     const float dx = x1 - x0;
     const float dy = y1 - y0;
     Scene* scene = host->BoundScene();
@@ -827,36 +867,85 @@ static int LuaSceneRaycast(lua_State* L) {
         if (!e) continue;
         for (EntityId childId : e->children) stack.push_back(childId);
         if (!e->enabled) continue;
+        if (excludeName && e->name == excludeName) continue;
         auto* tr = e->GetComponent<TransformComponent>();
         if (!tr) continue;
         auto* bc = e->GetComponent<BoxColliderComponent>();
         auto* cc = e->GetComponent<CircleColliderComponent>();
-        if (!bc && !cc) continue;
-        float tHit = 0.0f;
-        bool hit = false;
+        auto* tm = e->GetComponent<TilemapComponent>();
+        if (!bc && !cc && !tm) continue;
+        const float rotRad = tr->rotation
+            * 3.14159265358979323846f / 180.0f;
+        const float cosR = std::cos(rotRad);
+        const float sinR = std::sin(rotRad);
         if (bc) {
             const float halfX = bc->size.x * 0.5f * tr->scale.x;
             const float halfY = bc->size.y * 0.5f * tr->scale.y;
             const float cx    = tr->position.x + bc->offset.x;
             const float cy    = tr->position.y + bc->offset.y;
-            const float rotRad = tr->rotation
-                * 3.14159265358979323846f / 180.0f;
-            const float cosR = std::cos(rotRad);
-            const float sinR = std::sin(rotRad);
-            hit = RaySegmentVsObb(x0, y0, dx, dy,
-                                  cx, cy, halfX, halfY,
-                                  cosR, sinR, tHit);
-        } else {
+            float tHit = 0.0f;
+            if (RaySegmentVsObb(x0, y0, dx, dy,
+                                cx, cy, halfX, halfY,
+                                cosR, sinR, tHit) && tHit < bestT) {
+                bestT = tHit;
+                bestE = e;
+            }
+        }
+        if (cc) {
             const float scaleAvg =
                 (tr->scale.x + tr->scale.y) * 0.5f;
             const float cx = tr->position.x + cc->offset.x;
             const float cy = tr->position.y + cc->offset.y;
             const float r  = cc->radius * scaleAvg;
-            hit = RaySegmentVsCircle(x0, y0, dx, dy, cx, cy, r, tHit);
+            float tHit = 0.0f;
+            if (RaySegmentVsCircle(x0, y0, dx, dy, cx, cy, r, tHit) &&
+                tHit < bestT) {
+                bestT = tHit;
+                bestE = e;
+            }
         }
-        if (hit && tHit < bestT) {
-            bestT = tHit;
-            bestE = e;
+        // Tilemap cells synthesise their own colliders for the
+        // physics pass (see EditorApp::CollectColliders). Test them
+        // here too so a script's isGrounded raycast against a
+        // Tilemap-based ground actually reports a hit.
+        if (tm) {
+            AssetDatabase* db = host->BoundAssetDatabase();
+            TilesetAsset* ts = db ? db->GetTileset(tm->tileset) : nullptr;
+            if (ts) {
+                float cellW = 1.0f, cellH = 1.0f;
+                if (const auto* texEntry = db->FindByGuid(ts->texture)) {
+                    TextureImportSettings imp;
+                    imp.FromJson(texEntry->importSettings);
+                    cellW = float(ts->cellPixelW) / imp.pixelsPerUnit;
+                    cellH = float(ts->cellPixelH) / imp.pixelsPerUnit;
+                }
+                if (cellW > 1e-4f && cellH > 1e-4f) {
+                    const float halfX = cellW * 0.5f * tr->scale.x;
+                    const float halfY = cellH * 0.5f * tr->scale.y;
+                    for (const auto& kv : tm->cells) {
+                        auto tIt = ts->tiles.find(kv.second);
+                        if (tIt == ts->tiles.end()) continue;
+                        if (!tIt->second.collides &&
+                            !tIt->second.isTrigger) continue;
+                        const int gx = kv.first.first;
+                        const int gy = kv.first.second;
+                        const float lx = (float(gx) + 0.5f) * cellW;
+                        const float ly = (float(gy) + 0.5f) * cellH;
+                        const float wx = tr->position.x +
+                            cosR * lx - sinR * ly;
+                        const float wy = tr->position.y +
+                            sinR * lx + cosR * ly;
+                        float tHit = 0.0f;
+                        if (RaySegmentVsObb(x0, y0, dx, dy,
+                                            wx, wy, halfX, halfY,
+                                            cosR, sinR, tHit) &&
+                            tHit < bestT) {
+                            bestT = tHit;
+                            bestE = e;
+                        }
+                    }
+                }
+            }
         }
     }
     if (!bestE) { lua_pushstring(L, ""); return 1; }
@@ -3655,13 +3744,25 @@ void ScriptHost::OnAnimationEvent(
 void ScriptHost::SetActionBinding(const std::string& action,
                                   const std::string& key) {
     if (action.empty() || key.empty()) return;
-    ActionBindings()[action] = key;
+    // Single-key setter used by the M10c1 rebind overlay: replace
+    // whatever list was there with a one-key list. Callers wanting
+    // to add rather than replace should build the vector themselves
+    // + write it through the multi-key input.bind API in Lua.
+    ActionBindings()[action] = std::vector<std::string>{ key };
 }
 
 std::string ScriptHost::ActionBinding(const std::string& action) const {
     const auto& map = ActionBindingsConst();
     auto it = map.find(action);
-    return it == map.end() ? std::string{} : it->second;
+    if (it == map.end() || it->second.empty()) return std::string{};
+    // Join keys with ", " so the rebind widget renders the whole
+    // multi-key binding as one row (e.g. "a, Left").
+    std::string joined;
+    for (size_t i = 0; i < it->second.size(); ++i) {
+        if (i) joined += ", ";
+        joined += it->second[i];
+    }
+    return joined;
 }
 
 std::vector<std::pair<std::string, std::string>>
@@ -3669,7 +3770,14 @@ ScriptHost::AllActionBindings() const {
     std::vector<std::pair<std::string, std::string>> out;
     const auto& map = ActionBindingsConst();
     out.reserve(map.size());
-    for (const auto& kv : map) out.emplace_back(kv.first, kv.second);
+    for (const auto& kv : map) {
+        std::string joined;
+        for (size_t i = 0; i < kv.second.size(); ++i) {
+            if (i) joined += ", ";
+            joined += kv.second[i];
+        }
+        out.emplace_back(kv.first, std::move(joined));
+    }
     std::sort(out.begin(), out.end(),
               [](const auto& a, const auto& b) {
                   return a.first < b.first;
