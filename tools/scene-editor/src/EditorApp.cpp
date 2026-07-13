@@ -9476,14 +9476,20 @@ private:
         dl->AddRectFilled(pos,
                           ImVec2(pos.x + w, pos.y + h),
                           bg, s.FrameRounding);
-        // Centre the arrow inside the button. RenderArrow's origin is
-        // the top-left of an fs*fs box, and it centres the glyph in
-        // that box at scale 1.0; nudge x to centre it inside our
-        // slightly wider button.
+        // Centre the arrow inside the button. RenderArrow places its
+        // vertical centre at pos.y + fs * 0.5 * scale (not fs * 0.5),
+        // so at scale < 1 the glyph sits too high in an fs-tall box.
+        // Shift pos.y down by fs * 0.5 * (1 - scale) so the actual
+        // centre lands at fs * 0.5 -- i.e. the middle of the button.
+        // Horizontally the glyph is already centred at pos.x + fs*0.5
+        // regardless of scale, so we just offset by the extra button
+        // padding.
+        const float scale = 0.7f;
         const float ox = pos.x + (w - fs) * 0.5f;
-        ImGui::RenderArrow(dl, ImVec2(ox, pos.y),
+        const float oy = pos.y + fs * 0.5f * (1.0f - scale);
+        ImGui::RenderArrow(dl, ImVec2(ox, oy),
                            ImGui::GetColorU32(ImGuiCol_Text),
-                           dir, 0.7f);
+                           dir, scale);
         return clicked;
     }
 
