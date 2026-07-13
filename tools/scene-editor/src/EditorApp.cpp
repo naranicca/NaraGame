@@ -9105,9 +9105,27 @@ private:
             }
             ImGui::EndDragDropTarget();
         }
+        // Capture right-click intent while LastItemData still refers
+        // to this entity's row. Deferring OpenPopup + BeginPopup until
+        // after TreePop keeps them at the parent scope so the popup
+        // ID matches IsPopupOpen(popupName) checked at frame top --
+        // otherwise expanded parents would push a child ID scope that
+        // BeginPopupContextItem would inherit + the hover-through-
+        // right-click highlight would drop out.
+        const bool wantOpenPopup =
+            ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+            ImGui::IsItemHovered(
+                ImGuiHoveredFlags_AllowWhenBlockedByPopup);
+        if (open && !e->children.empty()) {
+            // Copy ids first so deletions in the loop body don't trip iterators.
+            const std::vector<SceneEditor::EntityId> kids = e->children;
+            for (SceneEditor::EntityId c : kids) DrawHierarchyNode(c);
+            ImGui::TreePop();
+        }
+        if (wantOpenPopup) ImGui::OpenPopup(popupName.c_str());
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
         ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
-        if (ImGui::BeginPopupContextItem(popupName.c_str())) {
+        if (ImGui::BeginPopup(popupName.c_str())) {
             if (ImGui::MenuItem("Add Child")) {
                 UndoSnapshot();
                 m_scene.CreateEntity("Entity", id);
@@ -9135,12 +9153,6 @@ private:
             ImGui::EndPopup();
         }
         ImGui::PopStyleColor(2);
-        if (open && !e->children.empty()) {
-            // Copy ids first so deletions in the loop body don't trip iterators.
-            const std::vector<SceneEditor::EntityId> kids = e->children;
-            for (SceneEditor::EntityId c : kids) DrawHierarchyNode(c);
-            ImGui::TreePop();
-        }
     }
 
     // Overpaint ImGui's built-in combo arrow with a half-scale
@@ -14784,11 +14796,31 @@ private:
                 m_selectedAsset     = SceneEditor::AssetGuid{};
                 m_selection         = SceneEditor::kInvalidEntityId;
             }
-            // Right-click any folder in the tree (including the top-
-            // level Assets root) to jump to its on-disk location.
+            // Capture "should we open the popup" intent right after
+            // TreeNodeEx while LastItemData still refers to the folder
+            // row. If we used BeginPopupContextItem inline instead, the
+            // popup ID would be hashed at whatever scope we happened to
+            // be in, and TreeNodeEx pushes a child ID scope for open
+            // folders -- meaning the popup gets a different ID for
+            // expanded vs collapsed folders, and IsPopupOpen(popupName)
+            // (called at the parent scope at the top of this function)
+            // can't find it. Defer OpenPopup + BeginPopup to after
+            // TreePop below so both live at the parent scope.
+            const bool wantOpenPopup =
+                ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+                ImGui::IsItemHovered(
+                    ImGuiHoveredFlags_AllowWhenBlockedByPopup);
+            if (open) {
+                for (const auto& c : node.children) {
+                    DrawAssetTreeNode(*c, false, folderRel);
+                }
+                ImGui::TreePop();
+            }
+            // Parent scope now (TreePop restored it if we entered).
+            if (wantOpenPopup) ImGui::OpenPopup(popupName.c_str());
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
             ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
-            if (ImGui::BeginPopupContextItem(popupName.c_str())) {
+            if (ImGui::BeginPopup(popupName.c_str())) {
                 const std::string abs = folderRel.empty()
                     ? m_assetDb.AssetsRoot()
                     : (m_assetDb.AssetsRoot() + "/" + folderRel);
@@ -14832,12 +14864,6 @@ private:
                 ImGui::EndPopup();
             }
             ImGui::PopStyleColor(2);
-            if (open) {
-                for (const auto& c : node.children) {
-                    DrawAssetTreeNode(*c, false, folderRel);
-                }
-                ImGui::TreePop();
-            }
             return;
         }
         // File: show name + the classified type label, selectable +
