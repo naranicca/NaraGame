@@ -14945,7 +14945,7 @@ private:
             ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
             if (ImGui::BeginPopupContextItem(filePopupName.c_str())) {
                 const std::string abs = m_assetDb.AssetsRoot() + "/" + e->relPath;
-                if (ImGui::MenuItem("Open in Scene Editor")) {
+                if (ImGui::MenuItem("Edit...")) {
                     OpenScriptEditor(abs, e->relPath);
                 }
                 if (ImGui::MenuItem("Open with default program")) {
