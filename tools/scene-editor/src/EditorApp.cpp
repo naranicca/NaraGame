@@ -5151,9 +5151,14 @@ private:
                 if (ImGui::DragInt("##gval", &tr.valueInt)) dirty = true;
             } else if (decl && decl->type == PT::Trigger) {
                 if (tr.valueBool != true) { tr.valueBool = true; dirty = true; }
-                bool draft = true;
+                // Show as a disabled True/False dropdown for visual
+                // parity with the Bool case; the value stays locked
+                // at True since a Trigger transition only ever fires
+                // on the exact moment the flag is set.
+                static const char* kBoolNames[] = { "False", "True" };
+                int bidx = 1;
                 ImGui::BeginDisabled();
-                NGCheckbox("##gval", &draft);
+                SmallCombo("##gval", &bidx, kBoolNames, 2);
                 ImGui::EndDisabled();
             } else if (decl && decl->type == PT::Vec2) {
                 float v2[2] = { tr.valueVec2.x, tr.valueVec2.y };
@@ -5971,9 +5976,12 @@ private:
                 if (ImGui::DragInt("##val", &tr.valueInt)) dirty = true;
             } else if (decl && decl->type == PT::Trigger) {
                 if (tr.valueBool != true) { tr.valueBool = true; dirty = true; }
-                bool draft = true;
+                // Disabled True/False dropdown, matching the graph-
+                // inspector transition above.
+                static const char* kBoolNames[] = { "False", "True" };
+                int bidx = 1;
                 ImGui::BeginDisabled();
-                NGCheckbox("##val", &draft);
+                SmallCombo("##val", &bidx, kBoolNames, 2);
                 ImGui::EndDisabled();
             } else if (decl && decl->type == PT::Vec2) {
                 float v2[2] = { tr.valueVec2.x, tr.valueVec2.y };
