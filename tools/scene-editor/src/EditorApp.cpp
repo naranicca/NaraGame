@@ -5394,7 +5394,7 @@ private:
             if (SmallTriangleButton("##statedown", ImGuiDir_Down) &&
                 i + 1 < int(ctrl->states.size())) moveStateDown = i;
             ImGui::SameLine();
-            if (ImGui::SmallButton("X")) removeStateAt = i;
+            if (SmallXButton("##staterm")) removeStateAt = i;
             ImGui::PopID();
         }
         if (moveStateUp > 0) {
@@ -5666,7 +5666,7 @@ private:
                 }
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("X")) removeParamAt = i;
+            if (SmallXButton("##paramrm")) removeParamAt = i;
             ImGui::PopID();
         }
         if (removeParamAt >= 0) {
@@ -6057,7 +6057,7 @@ private:
             if (SmallTriangleButton("##trdown", ImGuiDir_Down) &&
                 i + 1 < int(ctrl->transitions.size())) moveTrDown = i;
             ImGui::SameLine();
-            if (ImGui::SmallButton("X")) removeTrAt = i;
+            if (SmallXButton("##trrm")) removeTrAt = i;
             ImGui::PopID();
         }
         if (moveTrUp > 0) {
@@ -9499,6 +9499,47 @@ private:
         ImGui::RenderArrow(dl, ImVec2(ox, oy),
                            ImGui::GetColorU32(ImGuiCol_Text),
                            dir, scale);
+        return clicked;
+    }
+
+    // Small "remove" button that draws two crossed lines instead of
+    // the letter 'X'. Advantage over SmallButton("X") is the glyph is
+    // a true square instead of following the font's X aspect ratio
+    // (which reads tall / narrow), and it matches SmallTriangleButton
+    // in height + baseline alignment so a row of ▲ ▼ X buttons lines
+    // up cleanly.
+    static bool SmallXButton(const char* id) {
+        const ImGuiStyle& s = ImGui::GetStyle();
+        const float fs = ImGui::GetFontSize();
+        const float w = fs + s.FramePadding.x;
+        const float h = fs;
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        pos.y += s.FramePadding.y;  // Match SmallButton baseline shift.
+        ImGui::SetCursorScreenPos(pos);
+        ImGui::InvisibleButton(id, ImVec2(w, h));
+        const bool clicked = ImGui::IsItemClicked();
+        const bool hovered = ImGui::IsItemHovered();
+        const bool active  = ImGui::IsItemActive();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImU32 bg = ImGui::GetColorU32(
+            active  ? ImGuiCol_ButtonActive  :
+            hovered ? ImGuiCol_ButtonHovered :
+                      ImGuiCol_Button);
+        dl->AddRectFilled(pos,
+                          ImVec2(pos.x + w, pos.y + h),
+                          bg, s.FrameRounding);
+        // Two diagonals. Inset the endpoints so the cross doesn't
+        // touch the button edges; a ~28 % inset matches the visual
+        // weight of the component-header X we hand-draw elsewhere.
+        const float cx = pos.x + w * 0.5f;
+        const float cy = pos.y + h * 0.5f;
+        const float half = fs * 0.5f * 0.7f;  // 70 % of button height
+        const float th = std::max(1.5f, fs * 0.10f);
+        const ImU32 fg = ImGui::GetColorU32(ImGuiCol_Text);
+        dl->AddLine(ImVec2(cx - half, cy - half),
+                    ImVec2(cx + half, cy + half), fg, th);
+        dl->AddLine(ImVec2(cx + half, cy - half),
+                    ImVec2(cx - half, cy + half), fg, th);
         return clicked;
     }
 
