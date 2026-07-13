@@ -5181,9 +5181,15 @@ private:
                     dirty = true;
                 }
             } else {
-                bool draft = tr.valueBool;
-                if (NGCheckbox("##gval", &draft)) {
-                    tr.valueBool = draft;
+                // Bool (explicit) or the no-param fallback. A
+                // True/False dropdown reads unambiguously as the
+                // value being compared against, whereas a plain
+                // checkbox is easy to misread as "is this
+                // transition on".
+                static const char* kBoolNames[] = { "False", "True" };
+                int bidx = tr.valueBool ? 1 : 0;
+                if (SmallCombo("##gval", &bidx, kBoolNames, 2)) {
+                    tr.valueBool = (bidx != 0);
                     dirty = true;
                 }
             }
@@ -5995,9 +6001,13 @@ private:
                     dirty = true;
                 }
             } else {
-                bool draft = tr.valueBool;
-                if (NGCheckbox("##val", &draft)) {
-                    tr.valueBool = draft;
+                // Bool (explicit) or the no-param fallback. Same
+                // rationale as the graph-inspector transition
+                // above.
+                static const char* kBoolNames[] = { "False", "True" };
+                int bidx = tr.valueBool ? 1 : 0;
+                if (SmallCombo("##val", &bidx, kBoolNames, 2)) {
+                    tr.valueBool = (bidx != 0);
                     dirty = true;
                 }
             }
