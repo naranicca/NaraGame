@@ -14729,18 +14729,29 @@ private:
                 ? std::string{}
                 : (parentRelPath.empty() ? node.name
                                           : parentRelPath + "/" + node.name);
+            // Unique popup name per folder so IsPopupOpen can tell us
+            // "the context menu currently on screen belongs to THIS
+            // folder"; while it does, we force the row to render with
+            // the hover tint so the highlight stays put through the
+            // right-click even though the mouse has moved onto the
+            // popup.
+            const std::string popupName = "##folderctx##" + folderRel;
+            const bool popupOnMe = ImGui::IsPopupOpen(popupName.c_str());
             ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth |
                                        ImGuiTreeNodeFlags_OpenOnArrow |
                                        ImGuiTreeNodeFlags_OpenOnDoubleClick;
             if (topLevel) flags |= ImGuiTreeNodeFlags_DefaultOpen;
-            if (m_selectedFolderRel == folderRel && !m_selectedAsset.IsValid()) {
-                flags |= ImGuiTreeNodeFlags_Selected;
+            if (popupOnMe) flags |= ImGuiTreeNodeFlags_Selected;
+            if (popupOnMe) {
+                ImGui::PushStyleColor(ImGuiCol_Header, MenuHoverColor());
             }
             const bool open = ImGui::TreeNodeEx(node.name.c_str(), flags,
                                                 "%s/", node.name.c_str());
+            if (popupOnMe) ImGui::PopStyleColor();
             // Left or right click on the folder row picks it as the
-            // "current" folder so the row lights up + it's clear which
-            // folder the right-click menu is targeting.
+            // "current" folder; used by the Inspector logic, not the
+            // hover paint (the popup-open check above already covers
+            // right-click).
             if (ImGui::IsItemClicked(ImGuiMouseButton_Left) ||
                 ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                 m_selectedFolderRel = folderRel;
@@ -14751,7 +14762,7 @@ private:
             // level Assets root) to jump to its on-disk location.
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
             ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
-            if (ImGui::BeginPopupContextItem()) {
+            if (ImGui::BeginPopupContextItem(popupName.c_str())) {
                 if (ImGui::MenuItem("Open in Explorer")) {
                     const std::string abs = folderRel.empty()
                         ? m_assetDb.AssetsRoot()
@@ -14777,12 +14788,25 @@ private:
                 ? &m_assetDb.Entries()[node.entryIndex]
                 : nullptr;
         const bool selected = (e && m_selectedAsset == e->guid);
+        // Only Script rows currently have a right-click popup; other
+        // file types keep popupOnMe = false so nothing overrides
+        // their normal hover state.
+        const std::string filePopupName =
+            (e && e->typeName == "Script")
+                ? ("##filectx##" + e->relPath) : std::string{};
+        const bool popupOnMe = !filePopupName.empty() &&
+                               ImGui::IsPopupOpen(filePopupName.c_str());
+        if (popupOnMe) {
+            ImGui::PushStyleColor(ImGuiCol_Header, MenuHoverColor());
+        }
         ImGui::TreeNodeEx(node.name.c_str(),
                           ImGuiTreeNodeFlags_Leaf |
                           ImGuiTreeNodeFlags_NoTreePushOnOpen |
                           ImGuiTreeNodeFlags_SpanAvailWidth |
-                          (selected ? ImGuiTreeNodeFlags_Selected : 0),
+                          ((selected || popupOnMe) ?
+                              ImGuiTreeNodeFlags_Selected : 0),
                           "%s", node.name.c_str());
+        if (popupOnMe) ImGui::PopStyleColor();
         // Left click selects; right click ALSO selects so the row
         // lights up under the popup instead of leaving the reader
         // guessing which asset the menu belongs to.
@@ -14833,7 +14857,7 @@ private:
             // user isn't locked into whichever one double-click chose.
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
             ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
-            if (ImGui::BeginPopupContextItem()) {
+            if (ImGui::BeginPopupContextItem(filePopupName.c_str())) {
                 const std::string abs = m_assetDb.AssetsRoot() + "/" + e->relPath;
                 if (ImGui::MenuItem("Open in Scene Editor")) {
                     OpenScriptEditor(abs, e->relPath);
