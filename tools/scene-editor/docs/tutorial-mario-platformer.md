@@ -535,12 +535,14 @@ local function s(name)
   return t
 end
 
--- Ground 감지: Player 원점에서 아래로 1 world unit 쏘고, 자기 자신
--- 콜라이더는 exclude 로 걸러낸다. BoxCollider Size 를 얼마로
--- 잡았든 (원점 아래 어딘가에 지면이 있으면) 잡을 수 있다.
+-- Ground 감지: Player 원점에서 아래로 2 world unit 쏘고, 자기 자신
+-- 콜라이더는 exclude 로 걸러낸다. 2 unit 이면 대부분의 캐릭터
+-- 콜라이더 (원점 아래 최대 1.5 unit 정도) 를 통과하고도 지면
+-- tile 까지 닿을 여유. Ray 길이가 콜라이더 반높이보다 짧으면
+-- 지면에 못 닿아 항상 not grounded 로 나오므로 주의.
 local function isGrounded(self, py)
   local px, _, _ = transform.get_position(self)
-  local hit = scene.raycast(px, py, px, py - 1.0, self)
+  local hit = scene.raycast(px, py, px, py - 2.0, self)
   return hit ~= ""
 end
 
