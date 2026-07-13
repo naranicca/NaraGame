@@ -422,33 +422,59 @@ Animator Controller는 조건부로 애니메이션 상태를 전이시키는
 
 ### 7.4 파라미터 3개 추가
 
-**Parameters** 섹션에서 **+ Parameter** 3번:
+**Parameters** 섹션에서 **+ Param** 을 3번 눌러 행 3개를 만들고,
+왼쪽 `##pname` 필드에 이름을, 옆의 `##ptype` 드롭다운에서 타입을
+지정합니다.
 
-| ##pname | ##ptype |
-|---|---|
-| `speed` | `Float` (기본값 0) |
-| `grounded` | `Bool` (기본값 false) |
-| `Jump` | `Trigger` |
+| ##pname | ##ptype | 기본값 |
+|---|---|---|
+| `speed` | `Float` | `0.00` |
+| `grounded` | `Bool` | `false` (체크 해제) |
+| `Jump` | `Trigger` | (auto-reset -- 별도 값 없음) |
+
+⚠️ 파라미터 이름은 **대소문자를 구분**합니다. `Jump` 와 `jump` 는
+서로 다른 파라미터로 취급되고, 뒤에서 만들 Lua 스크립트가
+`animator.set_trigger(self, "Jump")` 로 발동하므로 반드시 대문자로
+시작하는 `Jump` 여야 합니다.
 
 ### 7.5 전이(Transition) 만들기
 
-상단의 상태 그래프에서 Idle 노드를 우클릭 →
-**Add Transition From Here** → 마우스로 `Run` 노드 클릭. 화살표가
-생성됩니다.
+두 가지 방법으로 전이를 추가할 수 있습니다:
 
-**Transitions** 섹션에서 방금 만들어진 행의 조건을 편집합니다.
-설정할 4개 전이:
+* **그래프에서**: 상태 그래프의 노드를 우클릭 →
+  **Add Transition From Here** → 마우스로 도착 노드를 클릭. 화살표가
+  생성됩니다. 시작이 특정 상태인 경우에 편리합니다.
+* **Transitions 섹션에서 `+ Transition` 버튼**: `From = Any` 로 새 행이
+  생깁니다. `Any → X` 처럼 그래프에 시작 노드가 없는 전이는 이 쪽이
+  편합니다.
 
-1. **Idle → Run**: `speed > 0.1`
-2. **Run → Idle**: `speed < 0.1`
-3. **Any → Jump**: trigger `Jump` (**From** 콤보에서 `Any` 선택)
-4. **Jump → Idle**: `grounded == true` (그리고 speed < 0.1)  
-   또는 **Jump → Run**: `grounded == true` 그리고 `speed > 0.1`
+행이 만들어지면 그 행의 콤보들을 채워 넣습니다. 설정할 4개 전이:
 
-각 전이 행에서:
+1. **Idle → Run**: `speed` `>` `0.1`
+2. **Run → Idle**: `speed` `<` `0.1`
+3. **Any → Jump**: 파라미터 `Jump` (**From** 콤보 = `Any`,
+   **To** = `Jump`)
+4. **Jump → Idle**: `grounded` `==` `true`
+
+각 전이 행의 위젯 구성:
+
 * **From** 콤보 → 시작 상태 (또는 `Any` = 어느 상태에서든).
 * **To** 콤보 → 도착 상태.
-* 파라미터 콤보에서 위 조건에 사용할 파라미터를 골라 임계값 입력.
+* **when** 옆의 **파라미터** 콤보 → 7.4에서 만든 파라미터 이름 선택.
+  콤보는 파라미터 **타입** 이 아니라 **이름** 을 나열합니다.
+  `Jump` (Trigger 타입) 도 이 목록에서 그냥 이름 `Jump` 로
+  보입니다.
+* 연산자 + 임계값 → 파라미터 타입에 따라 다른 위젯이 나옵니다.
+  `Float / Int` 는 `< <= > >= == !=` 6단 콤보 + 숫자,
+  `Bool` 은 `== !=` + 체크박스, `Trigger` 는 값 칸이 `true` 로
+  잠긴 disabled 체크박스로 표시됩니다 (트리거는 발동 자체가
+  조건이라 값을 지정할 필요가 없고, 발동 즉시 auto-reset 됩니다).
+
+⚠️ 한 전이당 조건 파라미터는 **하나** 만 지정할 수 있습니다.
+"grounded && speed > 0.1" 같은 AND 조합은 UI에 저장 자리가 없으므로,
+필요하다면 Lua 쪽에서 두 조건을 합친 파생 파라미터
+(예: `landingWithSpeed`) 를 하나 더 만들어 매 프레임 세팅하는 것이
+가장 간단합니다.
 
 창을 닫으면 자동 저장됩니다.
 
