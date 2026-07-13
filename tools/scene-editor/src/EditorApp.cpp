@@ -14929,14 +14929,16 @@ private:
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             OpenControllerEditor(e->guid);
         }
-        // Script: double-click hands the file off to whatever program
-        // Windows has registered as the .lua opener (VS Code, notepad,
-        // whatever the user picked). Users who prefer the in-editor
-        // Script Editor can right-click for the alternative.
+        // Script: double-click opens the built-in Script Editor
+        // (same as "Edit..." in the right-click menu). Users who
+        // prefer their OS-registered .lua opener can right-click
+        // and choose "Open with default program".
         if (e && e->typeName == "Script" &&
             ImGui::IsItemHovered() &&
             ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-            OpenScriptExternally(m_assetDb.AssetsRoot() + "/" + e->relPath);
+            OpenScriptEditor(
+                m_assetDb.AssetsRoot() + "/" + e->relPath,
+                e->relPath);
         }
         if (e && e->typeName == "Script") {
             // Right-click context menu offers both open paths so the
