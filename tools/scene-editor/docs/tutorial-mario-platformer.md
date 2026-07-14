@@ -517,10 +517,14 @@ Windows 탐색기로 `Assets/Scripts/` 폴더에 빈 `Player.lua` 파일을
 -- Assets/Scripts/Player.lua
 -- 마리오 스타일 좌우 이동 + 점프.
 
-local MOVE_SPEED   = 6.0    -- world units / sec
-local JUMP_SPEED   = 12.0   -- world units / sec (점프 초기 속도)
-local COYOTE_TIME  = 0.08   -- 지면 이탈 직후 얼마 동안 점프 허용
-local JUMP_BUFFER  = 0.08   -- 착지 직전 눌린 점프 입력 저장 시간
+local MOVE_SPEED     = 6.0   -- world units / sec
+local JUMP_SPEED     = 12.0  -- world units / sec (점프 초기 속도)
+-- 마리오 스타일 가변 점프 높이: 상승 도중에 점프 버튼을 떼면 위쪽
+-- 속도를 이 값으로 잘라 낸다. 짧게 누르면 낮게 뛰고, 계속 누르고
+-- 있으면 JUMP_SPEED / 중력이 정한 최대 높이까지 뛴다.
+local JUMP_CUT_SPEED = 4.0
+local COYOTE_TIME    = 0.08  -- 지면 이탈 직후 얼마 동안 점프 허용
+local JUMP_BUFFER    = 0.08  -- 착지 직전 눌린 점프 입력 저장 시간
 
 -- entity 이름 → { coyote=<sec>, buffer=<sec>, wasGrounded=<bool> }
 -- 여러 Player 인스턴스에 대응하기 위한 per-entity 상태 저장소.
@@ -593,6 +597,14 @@ function Player_Update(self, dt)
       transform.set_position("JumpDust", px, py - 0.25, 0)
       particle.emit("JumpDust", 10)
     end
+  end
+
+  -- 가변 점프 높이: 아직 상승 중일 때 점프 버튼을 떼면 위쪽 속도를
+  -- JUMP_CUT_SPEED 이하로 잘라 낸다. is_action_released 는 버튼이
+  -- 눌렸다가 떨어진 프레임에 딱 한 번 true 를 반환하므로 상승 도중
+  -- 여러 번 발동하지 않는다.
+  if input.is_action_released("jump") and vy > JUMP_CUT_SPEED then
+    vy = JUMP_CUT_SPEED
   end
 
   rigidbody.set_velocity(self, vx, vy)
