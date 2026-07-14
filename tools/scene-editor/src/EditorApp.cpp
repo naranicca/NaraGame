@@ -8307,23 +8307,46 @@ private:
         // Checkerboard behind the image (transparency preview) --
         // fixed 8x8 screen pixels regardless of zoom so the pattern
         // stays a stable visual reference rather than scaling with
-        // the image.
+        // the image. Clip the iteration to the visible portion of
+        // the canvas -- at high zoom the image can be millions of
+        // 8-pixel cells wide, but only the ones inside the child
+        // window's visible rect need to be submitted.
         const float checkSz = 8.0f;
         {
-            const int cols = int((imgMax.x - imgMin.x) / checkSz) + 2;
-            const int rows = int((imgMax.y - imgMin.y) / checkSz) + 2;
-            for (int y = 0; y < rows; ++y)
-            for (int x = 0; x < cols; ++x) {
-                const bool dark = ((x + y) & 1) != 0;
-                const ImVec2 a(imgMin.x + x * checkSz,
-                               imgMin.y + y * checkSz);
-                ImVec2 b(a.x + checkSz, a.y + checkSz);
-                if (a.x >= imgMax.x || a.y >= imgMax.y) continue;
-                b.x = std::min(b.x, imgMax.x);
-                b.y = std::min(b.y, imgMax.y);
-                dl->AddRectFilled(a, b, dark
-                    ? IM_COL32(70, 70, 76, 255)
-                    : IM_COL32(96, 96, 104, 255));
+            const float visMinX = startScreen.x + ImGui::GetScrollX()
+                                   + scrollDeltaX;
+            const float visMinY = startScreen.y + ImGui::GetScrollY()
+                                   + scrollDeltaY;
+            const float visMaxX = visMinX + avail.x;
+            const float visMaxY = visMinY + avail.y;
+            const float drawMinX = std::max(imgMin.x, visMinX);
+            const float drawMinY = std::max(imgMin.y, visMinY);
+            const float drawMaxX = std::min(imgMax.x, visMaxX);
+            const float drawMaxY = std::min(imgMax.y, visMaxY);
+            if (drawMinX < drawMaxX && drawMinY < drawMaxY) {
+                const int startCol = int(std::floor(
+                    (drawMinX - imgMin.x) / checkSz));
+                const int endCol = int(std::ceil(
+                    (drawMaxX - imgMin.x) / checkSz));
+                const int startRow = int(std::floor(
+                    (drawMinY - imgMin.y) / checkSz));
+                const int endRow = int(std::ceil(
+                    (drawMaxY - imgMin.y) / checkSz));
+                for (int y = startRow; y < endRow; ++y)
+                for (int x = startCol; x < endCol; ++x) {
+                    const bool dark = ((x + y) & 1) != 0;
+                    ImVec2 a(imgMin.x + x * checkSz,
+                             imgMin.y + y * checkSz);
+                    ImVec2 b(a.x + checkSz, a.y + checkSz);
+                    // Trim cells that spill outside the image rect
+                    // (final row/column) so the checker stays inside
+                    // the image bounds.
+                    b.x = std::min(b.x, imgMax.x);
+                    b.y = std::min(b.y, imgMax.y);
+                    dl->AddRectFilled(a, b, dark
+                        ? IM_COL32(70, 70, 76, 255)
+                        : IM_COL32(96, 96, 104, 255));
+                }
             }
         }
         // Draw the image with the nearest-neighbour sampler so each
