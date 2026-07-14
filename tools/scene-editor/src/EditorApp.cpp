@@ -8024,17 +8024,6 @@ private:
                 ImGuiColorEditFlags_AlphaBar)) {
             m_pixelEditorColor = ImVec4{c[0], c[1], c[2], c[3]};
         }
-        ImGui::Separator();
-        ImGui::TextDisabled("Tools");
-        ImGui::BulletText("P = Pencil");
-        ImGui::BulletText("E = Eraser");
-        ImGui::BulletText("F = Fill (bucket)");
-        ImGui::BulletText("I = Colour picker");
-        ImGui::BulletText("S = Rect select");
-        ImGui::Separator();
-        ImGui::TextDisabled("Mouse wheel zoom");
-        ImGui::TextDisabled("MMB drag pan");
-        ImGui::TextDisabled("Ctrl+Z / Ctrl+Y undo/redo");
         ImGui::EndChild();
         // Global shortcuts (Ctrl+Z/Y, Ctrl+S).
         const ImGuiIO& io = ImGui::GetIO();
