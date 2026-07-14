@@ -39,6 +39,8 @@
 
 #include <NaraGame/renderer/rhi/RHIResources.h>
 
+#include <NaraGame/assets/Image.h>
+#include <NaraGame/assets/TextureLoader.h>
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/EntryPoint.h>
 #include <NaraGame/core/Log.h>
@@ -54,6 +56,8 @@
 #include <shobjidl.h>          // IFileOpenDialog
 #include <shellapi.h>          // DragAcceptFiles / WM_DROPFILES
 #include <combaseapi.h>
+#include <wincodec.h>          // WIC PNG encoding for the Pixel Editor
+#pragma comment(lib, "windowscodecs.lib")
 
 #include <algorithm>
 #include <array>
@@ -544,6 +548,13 @@ void SetWindowTitle(HWND hwnd, const std::string& title) {
 
 class EditorApp : public Application {
 public:
+    // Pixel Editor tool enum -- declared up here (before any member
+    // function that switches on it) so MSVC sees the enum-class type
+    // definition when parsing the case labels below. Declaration
+    // order inside a class body affects out-of-line-style name lookup
+    // for enum types.
+    enum class PixelTool { Pencil, Eraser, Fill, Picker, Select };
+
     EditorApp(std::string startupProject, std::string startupScene,
               bool standalone)
         : Application(MakeConfig()),
@@ -805,6 +816,7 @@ public:
         DrawSettingsPanel();
         DrawDialogPanel();
         DrawSpriteEditorWindow();
+        DrawPixelEditorWindow();
         DrawTilesetEditorWindow();
         DrawAutotileEditorWindow();
         DrawAnimationEditorWindow();
@@ -4692,6 +4704,72 @@ private:
         m_spriteEditorActivate = true;
     }
 
+    // Pixel Editor -- load the PNG at `guid` into an editable RGBA
+    // buffer, spin up an editor-owned RHITexture that mirrors it, and
+    // reset tool state. Called from the Project panel's right-click
+    // "Edit..." on any Texture asset.
+    void OpenPixelEditor(const SceneEditor::AssetGuid& guid) {
+        const auto* e = m_assetDb.FindByGuid(guid);
+        if (!e || e->typeName != "Texture") return;
+        const std::string abs =
+            m_assetDb.AssetsRoot() + "/" + e->relPath;
+        NaraGame::Image img = NaraGame::LoadImageFile(abs);
+        if (!img.Valid()) return;
+        m_pixelEditorAsset   = guid;
+        m_pixelEditorAbsPath = abs;
+        m_pixelEditorRelPath = e->relPath;
+        m_pixelEditorW       = int(img.width);
+        m_pixelEditorH       = int(img.height);
+        m_pixelEditorPixels  = std::move(img.pixels);
+        // Editor-owned texture we upload our in-memory pixels into so
+        // the canvas can render via ImGui::Image without touching the
+        // AssetDatabase's cached texture (that one belongs to the
+        // Scene view).
+        NaraGame::Image seed;
+        seed.width  = uint32_t(m_pixelEditorW);
+        seed.height = uint32_t(m_pixelEditorH);
+        seed.pixels = m_pixelEditorPixels;
+        m_pixelEditorTex = NaraGame::CreateTexture(
+            GetDevice(), seed, NaraGame::TextureFilter::Point);
+        m_pixelEditorDirty    = false;
+        m_pixelEditorTexDirty = false;
+        m_pixelEditorUndo.clear();
+        m_pixelEditorRedo.clear();
+        m_pixelEditorZoom     = 8.0f;
+        m_pixelEditorPan      = ImVec2{0, 0};
+        m_pixelEditorTool     = PixelTool::Pencil;
+        m_pixelEditorColor    = ImVec4{1, 1, 1, 1};
+        m_pixelEditorOpen     = true;
+        m_pixelEditorActivate = true;
+    }
+
+    // Push the current pixel buffer onto the undo stack (bounded so a
+    // long editing session doesn't grow without bound).
+    void PixelEditorPushUndo() {
+        constexpr size_t kMax = 32;
+        m_pixelEditorUndo.push_back(m_pixelEditorPixels);
+        if (m_pixelEditorUndo.size() > kMax) {
+            m_pixelEditorUndo.erase(m_pixelEditorUndo.begin());
+        }
+        m_pixelEditorRedo.clear();
+    }
+
+    // Write the current buffer back out to the PNG the editor was
+    // opened on, then evict any cached RHITexture the AssetDatabase
+    // holds for the same guid so the next Scene view frame re-decodes
+    // from disk + immediately shows the edit.
+    void SavePixelEditor() {
+        if (m_pixelEditorPixels.empty()) return;
+        if (!SavePngViaWIC(m_pixelEditorAbsPath,
+                           uint32_t(m_pixelEditorW),
+                           uint32_t(m_pixelEditorH),
+                           m_pixelEditorPixels.data())) {
+            return;
+        }
+        m_assetDb.EvictTexture(m_pixelEditorAsset);
+        m_pixelEditorDirty = false;
+    }
+
     void OpenControllerEditor(const SceneEditor::AssetGuid& guid) {
         m_controllerEditorAsset    = guid;
         m_controllerEditorOpen     = true;
@@ -6217,6 +6295,69 @@ private:
         if (wpath.empty()) return;
         ShellExecuteW(nullptr, L"open", wpath.c_str(),
                       nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
+    // Save a top-to-bottom RGBA8 buffer as a PNG. Used by the Pixel
+    // Editor to write edits back out to the same on-disk file the
+    // AssetDatabase / SpriteRenderer read from. Uses WIC so we don't
+    // have to vendor a PNG encoder; CoInitializeEx is already called
+    // at editor startup (OnStart).
+    static bool SavePngViaWIC(const std::string& path,
+                              uint32_t w, uint32_t h,
+                              const uint8_t* rgba) {
+        if (!rgba || w == 0 || h == 0) return false;
+        std::wstring wpath;
+        const int n = MultiByteToWideChar(CP_UTF8, 0, path.c_str(),
+                                          int(path.size()),
+                                          nullptr, 0);
+        if (n <= 0) return false;
+        wpath.resize(size_t(n));
+        MultiByteToWideChar(CP_UTF8, 0, path.c_str(), int(path.size()),
+                            wpath.data(), n);
+        IWICImagingFactory* factory = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                       CLSCTX_INPROC_SERVER,
+                                       IID_PPV_ARGS(&factory));
+        if (FAILED(hr) || !factory) return false;
+        IWICStream* stream = nullptr;
+        IWICBitmapEncoder* encoder = nullptr;
+        IWICBitmapFrameEncode* frame = nullptr;
+        IPropertyBag2* propBag = nullptr;
+        bool ok = false;
+        do {
+            hr = factory->CreateStream(&stream);
+            if (FAILED(hr)) break;
+            hr = stream->InitializeFromFilename(wpath.c_str(),
+                                                GENERIC_WRITE);
+            if (FAILED(hr)) break;
+            hr = factory->CreateEncoder(GUID_ContainerFormatPng,
+                                        nullptr, &encoder);
+            if (FAILED(hr)) break;
+            hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+            if (FAILED(hr)) break;
+            hr = encoder->CreateNewFrame(&frame, &propBag);
+            if (FAILED(hr)) break;
+            hr = frame->Initialize(propBag);
+            if (FAILED(hr)) break;
+            hr = frame->SetSize(w, h);
+            if (FAILED(hr)) break;
+            WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppRGBA;
+            hr = frame->SetPixelFormat(&fmt);
+            if (FAILED(hr)) break;
+            if (fmt != GUID_WICPixelFormat32bppRGBA) break;
+            hr = frame->WritePixels(h, w * 4, w * h * 4,
+                                    const_cast<BYTE*>(rgba));
+            if (FAILED(hr)) break;
+            if (FAILED(frame->Commit())) break;
+            if (FAILED(encoder->Commit())) break;
+            ok = true;
+        } while (0);
+        if (propBag) propBag->Release();
+        if (frame) frame->Release();
+        if (encoder) encoder->Release();
+        if (stream) stream->Release();
+        factory->Release();
+        return ok;
     }
 
     // Same underlying ShellExecute call as OpenScriptExternally --
@@ -7757,6 +7898,435 @@ private:
 
         if (dirty) m_assetDb.SaveTileset(m_tilesetEditorAsset);
         ImGui::End();
+    }
+
+    // Photoshop-lite pixel editor. Tools column on the left (Pencil /
+    // Eraser / Fill / Picker / Select), scrollable/zoomable canvas in
+    // the middle, colour palette on the right.
+    void DrawPixelEditorWindow() {
+        if (!m_pixelEditorOpen) return;
+        if (m_pixelEditorActivate) {
+            ImGui::SetNextWindowSize(ImVec2(900, 640),
+                                     ImGuiCond_Appearing);
+            ImGui::SetNextWindowFocus();
+            m_pixelEditorActivate = false;
+        }
+        const std::string title = "Pixel Editor - " +
+            m_pixelEditorRelPath + "###pixeleditor";
+        const ImGuiWindowFlags wf = m_pixelEditorDirty
+            ? ImGuiWindowFlags_UnsavedDocument : 0;
+        if (!ImGui::Begin(title.c_str(), &m_pixelEditorOpen, wf)) {
+            ImGui::End();
+            return;
+        }
+        ShrinkFloatingCollapseIcon();
+        if (m_pixelEditorW <= 0 || m_pixelEditorH <= 0 ||
+            m_pixelEditorPixels.empty()) {
+            ImGui::TextDisabled("(no image loaded)");
+            ImGui::End();
+            return;
+        }
+        // ---- Toolbar --------------------------------------------
+        ImGui::BeginDisabled(!m_pixelEditorDirty);
+        if (ImGui::Button("Save")) SavePixelEditor();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m_pixelEditorUndo.empty());
+        if (ImGui::Button("Undo") && !m_pixelEditorUndo.empty()) {
+            m_pixelEditorRedo.push_back(m_pixelEditorPixels);
+            m_pixelEditorPixels = std::move(m_pixelEditorUndo.back());
+            m_pixelEditorUndo.pop_back();
+            m_pixelEditorTexDirty = true;
+            m_pixelEditorDirty = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m_pixelEditorRedo.empty());
+        if (ImGui::Button("Redo") && !m_pixelEditorRedo.empty()) {
+            m_pixelEditorUndo.push_back(m_pixelEditorPixels);
+            m_pixelEditorPixels = std::move(m_pixelEditorRedo.back());
+            m_pixelEditorRedo.pop_back();
+            m_pixelEditorTexDirty = true;
+            m_pixelEditorDirty = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled(" | %dx%d  zoom %.0fx  tool: %s",
+            m_pixelEditorW, m_pixelEditorH, m_pixelEditorZoom,
+            PixelToolName(m_pixelEditorTool));
+        ImGui::Separator();
+        // ---- Layout: left tools | canvas | right colour --------
+        const float sideW = 44.0f;
+        const float rightW = 200.0f;
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        // Left tool column.
+        ImGui::BeginChild("##pxtools", ImVec2(sideW, avail.y), true);
+        auto ToolBtn = [&](const char* label, PixelTool t) {
+            const bool on = (m_pixelEditorTool == t);
+            if (on) ImGui::PushStyleColor(
+                ImGuiCol_Button, MenuActiveColor());
+            if (ImGui::Button(label, ImVec2(-FLT_MIN, 28.0f))) {
+                m_pixelEditorTool = t;
+            }
+            if (on) ImGui::PopStyleColor();
+        };
+        ToolBtn("P",  PixelTool::Pencil);
+        ToolBtn("E",  PixelTool::Eraser);
+        ToolBtn("F",  PixelTool::Fill);
+        ToolBtn("I",  PixelTool::Picker);
+        ToolBtn("S",  PixelTool::Select);
+        ImGui::EndChild();
+        ImGui::SameLine();
+        // Canvas column (fills the middle).
+        const float canvasW = std::max(80.0f,
+            avail.x - sideW - rightW - 12.0f);
+        ImGui::BeginChild("##pxcanvas", ImVec2(canvasW, avail.y),
+                          true, ImGuiWindowFlags_NoScrollbar |
+                                 ImGuiWindowFlags_NoScrollWithMouse);
+        DrawPixelEditorCanvas();
+        ImGui::EndChild();
+        ImGui::SameLine();
+        // Right colour column.
+        ImGui::BeginChild("##pxcolor", ImVec2(rightW, avail.y), true);
+        ImGui::TextDisabled("Colour");
+        float c[4] = {
+            m_pixelEditorColor.x, m_pixelEditorColor.y,
+            m_pixelEditorColor.z, m_pixelEditorColor.w };
+        if (ImGui::ColorPicker4("##pxc", c,
+                ImGuiColorEditFlags_NoSidePreview |
+                ImGuiColorEditFlags_NoSmallPreview |
+                ImGuiColorEditFlags_AlphaBar)) {
+            m_pixelEditorColor = ImVec4{c[0], c[1], c[2], c[3]};
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("Tools");
+        ImGui::BulletText("P = Pencil");
+        ImGui::BulletText("E = Eraser");
+        ImGui::BulletText("F = Fill (bucket)");
+        ImGui::BulletText("I = Colour picker");
+        ImGui::BulletText("S = Rect select");
+        ImGui::Separator();
+        ImGui::TextDisabled("Mouse wheel zoom");
+        ImGui::TextDisabled("MMB drag pan");
+        ImGui::TextDisabled("Ctrl+Z / Ctrl+Y undo/redo");
+        ImGui::EndChild();
+        // Global shortcuts (Ctrl+Z/Y, Ctrl+S).
+        const ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false) &&
+            !m_pixelEditorUndo.empty()) {
+            m_pixelEditorRedo.push_back(m_pixelEditorPixels);
+            m_pixelEditorPixels = std::move(m_pixelEditorUndo.back());
+            m_pixelEditorUndo.pop_back();
+            m_pixelEditorTexDirty = true;
+            m_pixelEditorDirty = true;
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false) &&
+            !m_pixelEditorRedo.empty()) {
+            m_pixelEditorUndo.push_back(m_pixelEditorPixels);
+            m_pixelEditorPixels = std::move(m_pixelEditorRedo.back());
+            m_pixelEditorRedo.pop_back();
+            m_pixelEditorTexDirty = true;
+            m_pixelEditorDirty = true;
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+            SavePixelEditor();
+        }
+        ImGui::End();
+    }
+
+    static const char* PixelToolName(PixelTool t) {
+        switch (t) {
+        case PixelTool::Pencil: return "Pencil";
+        case PixelTool::Eraser: return "Eraser";
+        case PixelTool::Fill:   return "Fill";
+        case PixelTool::Picker: return "Picker";
+        case PixelTool::Select: return "Select";
+        }
+        return "?";
+    }
+
+    // Draw the canvas + handle every tool interaction. Called inside
+    // the ##pxcanvas child window so mouse input is scoped to the
+    // canvas region.
+    void DrawPixelEditorCanvas() {
+        const ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+        const ImVec2 origin     = ImGui::GetCursorScreenPos();
+        // Content rect for hit-testing.
+        ImGui::InvisibleButton("##pxhit", canvasSize,
+            ImGuiButtonFlags_MouseButtonLeft |
+            ImGuiButtonFlags_MouseButtonRight |
+            ImGuiButtonFlags_MouseButtonMiddle);
+        const bool hovered = ImGui::IsItemHovered();
+        const ImGuiIO& io = ImGui::GetIO();
+        // Wheel zoom, centred on the pixel under the cursor.
+        if (hovered && io.MouseWheel != 0.0f) {
+            const float oldZ = m_pixelEditorZoom;
+            m_pixelEditorZoom = std::clamp(
+                m_pixelEditorZoom * (io.MouseWheel > 0 ? 1.25f : 0.8f),
+                1.0f, 64.0f);
+            // Keep the pixel under the cursor stable.
+            const ImVec2 mp = io.MousePos;
+            const float dx = (mp.x - (origin.x + canvasSize.x * 0.5f
+                + m_pixelEditorPan.x)) / oldZ;
+            const float dy = (mp.y - (origin.y + canvasSize.y * 0.5f
+                + m_pixelEditorPan.y)) / oldZ;
+            m_pixelEditorPan.x -= dx * (m_pixelEditorZoom - oldZ);
+            m_pixelEditorPan.y -= dy * (m_pixelEditorZoom - oldZ);
+        }
+        // Middle-mouse pan.
+        if (hovered &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+            m_pixelEditorPan.x += io.MouseDelta.x;
+            m_pixelEditorPan.y += io.MouseDelta.y;
+        }
+        // Reupload texture if the buffer changed since last frame.
+        if (m_pixelEditorTexDirty && m_pixelEditorTex) {
+            m_pixelEditorTex->UpdatePixels(m_pixelEditorPixels.data());
+            m_pixelEditorTexDirty = false;
+        }
+        // Compute where to draw the image.
+        const float z = m_pixelEditorZoom;
+        const float imgW = float(m_pixelEditorW) * z;
+        const float imgH = float(m_pixelEditorH) * z;
+        const ImVec2 imgMin(
+            origin.x + (canvasSize.x - imgW) * 0.5f + m_pixelEditorPan.x,
+            origin.y + (canvasSize.y - imgH) * 0.5f + m_pixelEditorPan.y);
+        const ImVec2 imgMax(imgMin.x + imgW, imgMin.y + imgH);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        // Background (grey) so the canvas rect is visible.
+        dl->AddRectFilled(origin,
+            ImVec2(origin.x + canvasSize.x,
+                   origin.y + canvasSize.y),
+            IM_COL32(38, 38, 42, 255));
+        // Checkerboard behind the image (transparency preview).
+        const float checkSz = std::max(4.0f, z);
+        {
+            const int cols = int((imgMax.x - imgMin.x) / checkSz) + 2;
+            const int rows = int((imgMax.y - imgMin.y) / checkSz) + 2;
+            for (int y = 0; y < rows; ++y)
+            for (int x = 0; x < cols; ++x) {
+                const bool dark = ((x + y) & 1) != 0;
+                const ImVec2 a(imgMin.x + x * checkSz,
+                               imgMin.y + y * checkSz);
+                ImVec2 b(a.x + checkSz, a.y + checkSz);
+                if (a.x >= imgMax.x || a.y >= imgMax.y) continue;
+                b.x = std::min(b.x, imgMax.x);
+                b.y = std::min(b.y, imgMax.y);
+                dl->AddRectFilled(a, b, dark
+                    ? IM_COL32(70, 70, 76, 255)
+                    : IM_COL32(96, 96, 104, 255));
+            }
+        }
+        // Draw the image.
+        if (m_pixelEditorTex) {
+            const ImTextureID texId =
+                static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
+                    m_pixelEditorTex->GetNativeView()));
+            dl->AddImage(texId, imgMin, imgMax);
+        }
+        // Convert mouse position to pixel coords.
+        auto MouseToPixel = [&](int& px, int& py) -> bool {
+            if (!hovered) return false;
+            const ImVec2 mp = io.MousePos;
+            const float fx = (mp.x - imgMin.x) / z;
+            const float fy = (mp.y - imgMin.y) / z;
+            if (fx < 0 || fy < 0) return false;
+            px = int(fx); py = int(fy);
+            return px >= 0 && px < m_pixelEditorW &&
+                   py >= 0 && py < m_pixelEditorH;
+        };
+        // Selection rect visualisation (drawn regardless of tool so
+        // you can pick another tool and still see the marching-ants
+        // border).
+        if (m_pixelEditorSelW > 0 && m_pixelEditorSelH > 0) {
+            const ImVec2 a(imgMin.x + m_pixelEditorSelX * z,
+                           imgMin.y + m_pixelEditorSelY * z);
+            const ImVec2 b(a.x + m_pixelEditorSelW * z,
+                           a.y + m_pixelEditorSelH * z);
+            dl->AddRect(a, b, IM_COL32(255, 255, 0, 200), 0, 0, 2.0f);
+        }
+        // Tool interactions.
+        HandlePixelEditorTools(MouseToPixel);
+        // Hover cell outline.
+        int hx = -1, hy = -1;
+        if (MouseToPixel(hx, hy)) {
+            const ImVec2 a(imgMin.x + hx * z, imgMin.y + hy * z);
+            dl->AddRect(a, ImVec2(a.x + z, a.y + z),
+                        IM_COL32(255, 255, 255, 200), 0, 0, 1.5f);
+        }
+    }
+
+    // Per-tool mouse handling. Called from DrawPixelEditorCanvas so
+    // MouseToPixel already has the imgMin / zoom baked in.
+    template <typename Fn>
+    void HandlePixelEditorTools(Fn MouseToPixel) {
+        int px = 0, py = 0;
+        const bool over = MouseToPixel(px, py);
+        auto SetPx = [&](int x, int y, uint8_t r, uint8_t g,
+                          uint8_t b, uint8_t a) {
+            if (x < 0 || y < 0 ||
+                x >= m_pixelEditorW || y >= m_pixelEditorH) return;
+            const size_t o = (size_t(y) * m_pixelEditorW + x) * 4;
+            m_pixelEditorPixels[o    ] = r;
+            m_pixelEditorPixels[o + 1] = g;
+            m_pixelEditorPixels[o + 2] = b;
+            m_pixelEditorPixels[o + 3] = a;
+            m_pixelEditorTexDirty = true;
+            m_pixelEditorDirty = true;
+        };
+        auto GetPx = [&](int x, int y, uint8_t& r, uint8_t& g,
+                          uint8_t& b, uint8_t& a) {
+            const size_t o = (size_t(y) * m_pixelEditorW + x) * 4;
+            r = m_pixelEditorPixels[o    ];
+            g = m_pixelEditorPixels[o + 1];
+            b = m_pixelEditorPixels[o + 2];
+            a = m_pixelEditorPixels[o + 3];
+        };
+        const uint8_t cr = uint8_t(m_pixelEditorColor.x * 255.0f + 0.5f);
+        const uint8_t cg = uint8_t(m_pixelEditorColor.y * 255.0f + 0.5f);
+        const uint8_t cb = uint8_t(m_pixelEditorColor.z * 255.0f + 0.5f);
+        const uint8_t ca = uint8_t(m_pixelEditorColor.w * 255.0f + 0.5f);
+        // Snapshot on stroke start.
+        const bool leftDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        const bool leftClicked = ImGui::IsMouseClicked(
+            ImGuiMouseButton_Left);
+        if (leftClicked && over &&
+            (m_pixelEditorTool == PixelTool::Pencil ||
+             m_pixelEditorTool == PixelTool::Eraser ||
+             m_pixelEditorTool == PixelTool::Fill)) {
+            PixelEditorPushUndo();
+        }
+        // Draw between the previous and current pixel positions so a
+        // quick drag doesn't leave gaps.
+        auto DrawLineBetween = [&](int x0, int y0, int x1, int y1,
+                                    bool erase) {
+            // Bresenham line.
+            const int dx = std::abs(x1 - x0);
+            const int dy = -std::abs(y1 - y0);
+            const int sx = x0 < x1 ? 1 : -1;
+            const int sy = y0 < y1 ? 1 : -1;
+            int err = dx + dy;
+            int x = x0, y = y0;
+            while (true) {
+                if (erase) SetPx(x, y, 0, 0, 0, 0);
+                else       SetPx(x, y, cr, cg, cb, ca);
+                if (x == x1 && y == y1) break;
+                const int e2 = 2 * err;
+                if (e2 >= dy) { err += dy; x += sx; }
+                if (e2 <= dx) { err += dx; y += sy; }
+            }
+        };
+        switch (m_pixelEditorTool) {
+        case PixelTool::Pencil:
+        case PixelTool::Eraser: {
+            const bool erase = (m_pixelEditorTool == PixelTool::Eraser);
+            if (leftDown && over) {
+                if (m_pixelEditorLastPx >= 0) {
+                    DrawLineBetween(m_pixelEditorLastPx,
+                                    m_pixelEditorLastPy,
+                                    px, py, erase);
+                } else {
+                    if (erase) SetPx(px, py, 0, 0, 0, 0);
+                    else       SetPx(px, py, cr, cg, cb, ca);
+                }
+                m_pixelEditorLastPx = px;
+                m_pixelEditorLastPy = py;
+            }
+            if (!leftDown) {
+                m_pixelEditorLastPx = -1;
+                m_pixelEditorLastPy = -1;
+            }
+            break;
+        }
+        case PixelTool::Fill: {
+            if (leftClicked && over) {
+                uint8_t sr, sg, sb, sa;
+                GetPx(px, py, sr, sg, sb, sa);
+                if (sr != cr || sg != cg || sb != cb || sa != ca) {
+                    PixelEditorFloodFill(px, py, sr, sg, sb, sa,
+                                         cr, cg, cb, ca);
+                }
+            }
+            break;
+        }
+        case PixelTool::Picker: {
+            if (leftClicked && over) {
+                uint8_t r, g, b, a;
+                GetPx(px, py, r, g, b, a);
+                m_pixelEditorColor = ImVec4{
+                    r / 255.0f, g / 255.0f,
+                    b / 255.0f, a / 255.0f };
+            }
+            break;
+        }
+        case PixelTool::Select: {
+            if (leftClicked && over) {
+                m_pixelEditorSelX = px;
+                m_pixelEditorSelY = py;
+                m_pixelEditorSelW = 1;
+                m_pixelEditorSelH = 1;
+                m_pixelEditorSelDragging = true;
+            }
+            if (m_pixelEditorSelDragging && leftDown && over) {
+                const int x0 = m_pixelEditorSelX;
+                const int y0 = m_pixelEditorSelY;
+                const int x1 = px;
+                const int y1 = py;
+                const int lo_x = std::min(x0, x1);
+                const int lo_y = std::min(y0, y1);
+                const int hi_x = std::max(x0, x1);
+                const int hi_y = std::max(y0, y1);
+                m_pixelEditorSelX = lo_x;
+                m_pixelEditorSelY = lo_y;
+                m_pixelEditorSelW = hi_x - lo_x + 1;
+                m_pixelEditorSelH = hi_y - lo_y + 1;
+            }
+            if (!leftDown) m_pixelEditorSelDragging = false;
+            // Delete key clears the pixels in the selection.
+            if (m_pixelEditorSelW > 0 && m_pixelEditorSelH > 0 &&
+                ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+                PixelEditorPushUndo();
+                for (int y = m_pixelEditorSelY;
+                     y < m_pixelEditorSelY + m_pixelEditorSelH; ++y)
+                for (int x = m_pixelEditorSelX;
+                     x < m_pixelEditorSelX + m_pixelEditorSelW; ++x) {
+                    SetPx(x, y, 0, 0, 0, 0);
+                }
+            }
+            break;
+        }
+        }
+    }
+
+    // 4-connected flood fill. Uses an explicit stack so a very large
+    // fill doesn't blow the OS thread stack.
+    void PixelEditorFloodFill(int sx, int sy,
+                               uint8_t sr, uint8_t sg,
+                               uint8_t sb, uint8_t sa,
+                               uint8_t nr, uint8_t ng,
+                               uint8_t nb, uint8_t na) {
+        std::vector<std::pair<int,int>> stack;
+        stack.push_back({sx, sy});
+        while (!stack.empty()) {
+            const auto [x, y] = stack.back(); stack.pop_back();
+            if (x < 0 || y < 0 ||
+                x >= m_pixelEditorW || y >= m_pixelEditorH) continue;
+            const size_t o = (size_t(y) * m_pixelEditorW + x) * 4;
+            if (m_pixelEditorPixels[o    ] != sr ||
+                m_pixelEditorPixels[o + 1] != sg ||
+                m_pixelEditorPixels[o + 2] != sb ||
+                m_pixelEditorPixels[o + 3] != sa) continue;
+            m_pixelEditorPixels[o    ] = nr;
+            m_pixelEditorPixels[o + 1] = ng;
+            m_pixelEditorPixels[o + 2] = nb;
+            m_pixelEditorPixels[o + 3] = na;
+            stack.push_back({x + 1, y});
+            stack.push_back({x - 1, y});
+            stack.push_back({x, y + 1});
+            stack.push_back({x, y - 1});
+        }
+        m_pixelEditorTexDirty = true;
+        m_pixelEditorDirty    = true;
     }
 
     void DrawSpriteEditorWindow() {
@@ -14972,12 +15542,13 @@ private:
                 ? &m_assetDb.Entries()[node.entryIndex]
                 : nullptr;
         const bool selected = (e && m_selectedAsset == e->guid);
-        // Only Script rows currently have a right-click popup; other
-        // file types keep popupOnMe = false so nothing overrides
-        // their normal hover state.
-        const std::string filePopupName =
-            (e && e->typeName == "Script")
-                ? ("##filectx##" + e->relPath) : std::string{};
+        // Script + Texture rows both surface a right-click "Edit..."
+        // menu; other file types keep popupOnMe = false so nothing
+        // overrides their normal hover state.
+        const bool hasFilePopup = e &&
+            (e->typeName == "Script" || e->typeName == "Texture");
+        const std::string filePopupName = hasFilePopup
+            ? ("##filectx##" + e->relPath) : std::string{};
         const bool popupOnMe = !filePopupName.empty() &&
                                ImGui::IsPopupOpen(filePopupName.c_str());
         if (popupOnMe) {
@@ -15047,6 +15618,24 @@ private:
                 const std::string abs = m_assetDb.AssetsRoot() + "/" + e->relPath;
                 if (ImGui::MenuItem("Edit...")) {
                     OpenScriptEditor(abs, e->relPath);
+                }
+                if (ImGui::MenuItem("Open with default program")) {
+                    OpenScriptExternally(abs);
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleColor(2);
+        }
+        if (e && e->typeName == "Texture") {
+            // Textures get "Edit..." (opens the raster Pixel Editor)
+            // and "Open with default program" (whatever the OS has
+            // registered for .png -- Photoshop, Paint, etc.).
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
+            if (ImGui::BeginPopupContextItem(filePopupName.c_str())) {
+                const std::string abs = m_assetDb.AssetsRoot() + "/" + e->relPath;
+                if (ImGui::MenuItem("Edit...")) {
+                    OpenPixelEditor(e->guid);
                 }
                 if (ImGui::MenuItem("Open with default program")) {
                     OpenScriptExternally(abs);
@@ -15215,6 +15804,36 @@ private:
     bool                m_spriteEditorOpen     = false;
     bool                m_spriteEditorActivate = false;
     SceneEditor::AssetGuid m_spriteEditorAsset;
+    // Pixel Editor (Photoshop-lite raster editor for the raw PNG
+    // pixels of a Texture asset). Shares the AssetGuid + rel/abs path
+    // pair with the loaded PNG so Save writes back to the same file
+    // + EvictTexture forces the Scene view to re-read.
+    bool                m_pixelEditorOpen      = false;
+    bool                m_pixelEditorActivate  = false;
+    bool                m_pixelEditorDirty     = false;
+    bool                m_pixelEditorTexDirty  = false;
+    SceneEditor::AssetGuid m_pixelEditorAsset;
+    std::string         m_pixelEditorAbsPath;
+    std::string         m_pixelEditorRelPath;
+    int                 m_pixelEditorW = 0;
+    int                 m_pixelEditorH = 0;
+    std::vector<uint8_t> m_pixelEditorPixels;
+    std::unique_ptr<NaraGame::RHITexture> m_pixelEditorTex;
+    // Bounded snapshot history; every stroke pushes onto Undo +
+    // clears Redo.
+    std::vector<std::vector<uint8_t>> m_pixelEditorUndo;
+    std::vector<std::vector<uint8_t>> m_pixelEditorRedo;
+    float               m_pixelEditorZoom = 8.0f;
+    ImVec2              m_pixelEditorPan{0, 0};
+    PixelTool           m_pixelEditorTool = PixelTool::Pencil;
+    ImVec4              m_pixelEditorColor{1, 1, 1, 1};
+    int                 m_pixelEditorLastPx = -1;
+    int                 m_pixelEditorLastPy = -1;
+    int                 m_pixelEditorSelX = 0;
+    int                 m_pixelEditorSelY = 0;
+    int                 m_pixelEditorSelW = 0;
+    int                 m_pixelEditorSelH = 0;
+    bool                m_pixelEditorSelDragging = false;
     // Tileset Editor follows the same activation pattern.
     bool                m_tilesetEditorOpen     = false;
     bool                m_tilesetEditorActivate = false;
