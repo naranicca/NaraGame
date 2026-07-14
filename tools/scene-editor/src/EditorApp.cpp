@@ -8117,12 +8117,27 @@ private:
                     : IM_COL32(96, 96, 104, 255));
             }
         }
-        // Draw the image.
+        // Draw the image with the nearest-neighbour sampler so each
+        // canvas pixel maps to a crisp square of screen pixels when
+        // zoomed in -- ImGui's default sampler is bilinear, which
+        // would blur the edges of every canvas pixel. Wrap the
+        // AddImage in a pair of platform-io callbacks that flip the
+        // active D3D11 sampler and then restore linear for the rest
+        // of the UI.
         if (m_pixelEditorTex) {
             const ImTextureID texId =
                 static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
                     m_pixelEditorTex->GetNativeView()));
+            const ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+            if (pio.DrawCallback_SetSamplerNearest) {
+                dl->AddCallback(pio.DrawCallback_SetSamplerNearest,
+                                nullptr);
+            }
             dl->AddImage(texId, imgMin, imgMax);
+            if (pio.DrawCallback_SetSamplerLinear) {
+                dl->AddCallback(pio.DrawCallback_SetSamplerLinear,
+                                nullptr);
+            }
         }
         // Convert mouse position to pixel coords.
         auto MouseToPixel = [&](int& px, int& py) -> bool {
