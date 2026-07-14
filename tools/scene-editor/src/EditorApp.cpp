@@ -6341,12 +6341,24 @@ private:
             if (FAILED(hr)) break;
             hr = frame->SetSize(w, h);
             if (FAILED(hr)) break;
-            WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppRGBA;
+            // WIC's PNG encoder does not accept 32bppRGBA -- asking
+            // for it silently negotiates to 32bppBGRA. Feed BGRA
+            // directly so the format request succeeds; convert from
+            // our source RGBA into a temporary buffer by swapping R
+            // and B bytes.
+            WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
             hr = frame->SetPixelFormat(&fmt);
             if (FAILED(hr)) break;
-            if (fmt != GUID_WICPixelFormat32bppRGBA) break;
-            hr = frame->WritePixels(h, w * 4, w * h * 4,
-                                    const_cast<BYTE*>(rgba));
+            if (fmt != GUID_WICPixelFormat32bppBGRA) break;
+            std::vector<uint8_t> bgra(size_t(w) * h * 4);
+            for (size_t i = 0; i < bgra.size(); i += 4) {
+                bgra[i    ] = rgba[i + 2]; // B
+                bgra[i + 1] = rgba[i + 1]; // G
+                bgra[i + 2] = rgba[i    ]; // R
+                bgra[i + 3] = rgba[i + 3]; // A
+            }
+            hr = frame->WritePixels(h, w * 4, UINT(bgra.size()),
+                                    bgra.data());
             if (FAILED(hr)) break;
             if (FAILED(frame->Commit())) break;
             if (FAILED(encoder->Commit())) break;
