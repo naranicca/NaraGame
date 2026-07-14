@@ -7973,27 +7973,41 @@ private:
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         // Left tool column.
         ImGui::BeginChild("##pxtools", ImVec2(sideW, avail.y), true);
-        auto ToolBtn = [&](const char* label, PixelTool t) {
+        auto ToolBtn = [&](const char* id, const char* tip,
+                            PixelTool t) {
             const bool on = (m_pixelEditorTool == t);
+            const float sz = 32.0f;
+            const ImVec2 pos = ImGui::GetCursorScreenPos();
             if (on) ImGui::PushStyleColor(
                 ImGuiCol_Button, MenuActiveColor());
-            if (ImGui::Button(label, ImVec2(-FLT_MIN, 28.0f))) {
-                m_pixelEditorTool = t;
-            }
+            // Empty-label button so InvisibleButton-style hitbox +
+            // theme background come for free; the glyph is
+            // hand-drawn via DrawList below so we don't rely on the
+            // font having icon characters.
+            const bool clicked =
+                ImGui::Button(id, ImVec2(-FLT_MIN, sz));
             if (on) ImGui::PopStyleColor();
+            if (clicked) m_pixelEditorTool = t;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const float bw = ImGui::GetItemRectSize().x;
+            DrawPixelToolIcon(dl, ImVec2(pos.x, pos.y),
+                              ImVec2(pos.x + bw, pos.y + sz), t);
         };
-        ToolBtn("P",  PixelTool::Pencil);
-        ToolBtn("E",  PixelTool::Eraser);
-        ToolBtn("F",  PixelTool::Fill);
-        ToolBtn("I",  PixelTool::Picker);
-        ToolBtn("S",  PixelTool::Select);
+        ToolBtn("##pxT_pencil",  "Pencil (P)",           PixelTool::Pencil);
+        ToolBtn("##pxT_eraser",  "Eraser (E)",           PixelTool::Eraser);
+        ToolBtn("##pxT_fill",    "Fill / bucket (F)",    PixelTool::Fill);
+        ToolBtn("##pxT_picker",  "Colour picker (I)",    PixelTool::Picker);
+        ToolBtn("##pxT_select",  "Rect select (S)",      PixelTool::Select);
         ImGui::EndChild();
         ImGui::SameLine();
-        // Canvas column (fills the middle).
+        // Canvas column (fills the middle) -- scrollbars on both axes
+        // so a zoomed-in image can be panned via the scrollbars in
+        // addition to the middle-mouse drag.
         const float canvasW = std::max(80.0f,
             avail.x - sideW - rightW - 12.0f);
         ImGui::BeginChild("##pxcanvas", ImVec2(canvasW, avail.y),
-                          true, ImGuiWindowFlags_NoScrollbar |
+                          true, ImGuiWindowFlags_HorizontalScrollbar |
                                  ImGuiWindowFlags_NoScrollWithMouse);
         DrawPixelEditorCanvas();
         ImGui::EndChild();
@@ -8057,58 +8071,188 @@ private:
         return "?";
     }
 
+    // Draw a small hand-drawn glyph for one of the Pixel Editor
+    // tools inside the given button rect. Uses simple line + filled
+    // shape primitives so we don't depend on the font having icon
+    // characters or on shipping any icon assets.
+    static void DrawPixelToolIcon(ImDrawList* dl, ImVec2 mn, ImVec2 mx,
+                                   PixelTool t) {
+        const float cx = (mn.x + mx.x) * 0.5f;
+        const float cy = (mn.y + mx.y) * 0.5f;
+        const float s  = std::min(mx.x - mn.x, mx.y - mn.y) * 0.5f;
+        const ImU32 fg = ImGui::GetColorU32(ImGuiCol_Text);
+        const float th = std::max(1.5f, s * 0.15f);
+        switch (t) {
+        case PixelTool::Pencil: {
+            // Diagonal pencil body from upper-right to lower-left
+            // with a small triangular tip.
+            const ImVec2 top(cx + s * 0.55f, cy - s * 0.55f);
+            const ImVec2 mid(cx - s * 0.30f, cy + s * 0.30f);
+            const ImVec2 tip(cx - s * 0.60f, cy + s * 0.60f);
+            dl->AddLine(top, mid, fg, th);
+            dl->AddTriangleFilled(mid,
+                                  ImVec2(mid.x - s * 0.15f, mid.y + s * 0.30f),
+                                  tip, fg);
+            break;
+        }
+        case PixelTool::Eraser: {
+            // Two-tone eraser block: an angled rectangle rendered as
+            // two stacked quads.
+            const ImVec2 a(cx - s * 0.55f, cy + s * 0.20f);
+            const ImVec2 b(cx + s * 0.20f, cy + s * 0.55f);
+            const ImVec2 c(cx + s * 0.55f, cy - s * 0.20f);
+            const ImVec2 d(cx - s * 0.20f, cy - s * 0.55f);
+            dl->AddQuad(a, b, c, d, fg, th);
+            // Diagonal band splitting the "rubber" half from the
+            // "holder" half.
+            const ImVec2 m1((a.x + d.x) * 0.5f, (a.y + d.y) * 0.5f);
+            const ImVec2 m2((b.x + c.x) * 0.5f, (b.y + c.y) * 0.5f);
+            dl->AddLine(m1, m2, fg, th);
+            break;
+        }
+        case PixelTool::Fill: {
+            // Bucket: an upside-down trapezoid + a droplet dot below.
+            const ImVec2 tl(cx - s * 0.55f, cy - s * 0.40f);
+            const ImVec2 tr(cx + s * 0.55f, cy - s * 0.40f);
+            const ImVec2 br(cx + s * 0.35f, cy + s * 0.35f);
+            const ImVec2 bl(cx - s * 0.35f, cy + s * 0.35f);
+            dl->AddLine(tl, tr, fg, th);
+            dl->AddLine(tr, br, fg, th);
+            dl->AddLine(br, bl, fg, th);
+            dl->AddLine(bl, tl, fg, th);
+            dl->AddCircleFilled(ImVec2(cx + s * 0.25f, cy + s * 0.65f),
+                                std::max(1.5f, s * 0.13f), fg);
+            break;
+        }
+        case PixelTool::Picker: {
+            // Eyedropper: a diagonal shaft with a diamond bulb at
+            // the lower-left tip.
+            const ImVec2 top(cx + s * 0.55f, cy - s * 0.55f);
+            const ImVec2 mid(cx - s * 0.10f, cy + s * 0.10f);
+            const ImVec2 tip(cx - s * 0.50f, cy + s * 0.50f);
+            dl->AddLine(top, mid, fg, th);
+            dl->AddCircleFilled(tip,
+                                std::max(1.5f, s * 0.20f), fg);
+            // Small squeeze bulb at the top.
+            dl->AddCircleFilled(top,
+                                std::max(1.5f, s * 0.14f), fg);
+            break;
+        }
+        case PixelTool::Select: {
+            // Dashed rectangle -- draw four short segments per edge
+            // to fake marching-ants.
+            const ImVec2 tl(cx - s * 0.55f, cy - s * 0.55f);
+            const ImVec2 br(cx + s * 0.55f, cy + s * 0.55f);
+            const int seg = 5;
+            for (int i = 0; i < seg; i += 2) {
+                const float t0 = float(i)     / seg;
+                const float t1 = float(i + 1) / seg;
+                dl->AddLine(
+                    ImVec2(tl.x + (br.x - tl.x) * t0, tl.y),
+                    ImVec2(tl.x + (br.x - tl.x) * t1, tl.y), fg, th);
+                dl->AddLine(
+                    ImVec2(tl.x + (br.x - tl.x) * t0, br.y),
+                    ImVec2(tl.x + (br.x - tl.x) * t1, br.y), fg, th);
+                dl->AddLine(
+                    ImVec2(tl.x, tl.y + (br.y - tl.y) * t0),
+                    ImVec2(tl.x, tl.y + (br.y - tl.y) * t1), fg, th);
+                dl->AddLine(
+                    ImVec2(br.x, tl.y + (br.y - tl.y) * t0),
+                    ImVec2(br.x, tl.y + (br.y - tl.y) * t1), fg, th);
+            }
+            break;
+        }
+        }
+    }
+
     // Draw the canvas + handle every tool interaction. Called inside
-    // the ##pxcanvas child window so mouse input is scoped to the
-    // canvas region.
+    // the ##pxcanvas child window (which has HorizontalScrollbar
+    // enabled, so the ImGui-provided scrollbars appear whenever the
+    // zoomed image is larger than the visible canvas).
     void DrawPixelEditorCanvas() {
-        const ImVec2 canvasSize = ImGui::GetContentRegionAvail();
-        const ImVec2 origin     = ImGui::GetCursorScreenPos();
-        // Content rect for hit-testing.
-        ImGui::InvisibleButton("##pxhit", canvasSize,
+        const ImGuiIO& io = ImGui::GetIO();
+        // Zoom via wheel first so the reserve size below uses the
+        // NEW zoom. We handle scroll compensation manually below.
+        const float zoomBefore = m_pixelEditorZoom;
+        const bool wheelHovered =
+            ImGui::IsWindowHovered() && io.MouseWheel != 0.0f;
+        if (wheelHovered) {
+            m_pixelEditorZoom = std::clamp(
+                m_pixelEditorZoom * (io.MouseWheel > 0 ? 1.25f : 0.8f),
+                1.0f, 64.0f);
+        }
+        const float z = m_pixelEditorZoom;
+        const float imgW = float(m_pixelEditorW) * z;
+        const float imgH = float(m_pixelEditorH) * z;
+        // Reserve enough content that scrollbars appear when the
+        // zoomed image outgrows the visible canvas; the max() branch
+        // centres the image inside a mostly-empty canvas when zoomed
+        // out.
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const float reserveW = std::max(imgW, avail.x);
+        const float reserveH = std::max(imgH, avail.y);
+        const ImVec2 startScreen = ImGui::GetCursorScreenPos();
+        // Image placement inside the reserved area -- centred so
+        // panning naturally reveals areas outside the visible canvas
+        // once zoomed in.
+        const ImVec2 imgMin(
+            startScreen.x + (reserveW - imgW) * 0.5f,
+            startScreen.y + (reserveH - imgH) * 0.5f);
+        const ImVec2 imgMax(imgMin.x + imgW, imgMin.y + imgH);
+        // Zoom-around-cursor: after a wheel event, adjust scroll so
+        // the pixel that was under the mouse stays put. Compute the
+        // pixel coord under the mouse using the OLD zoom, then set
+        // scroll such that it appears at the same screen position
+        // with the NEW zoom.
+        if (wheelHovered && zoomBefore != m_pixelEditorZoom) {
+            const ImVec2 mp = io.MousePos;
+            // Where the image top-left would sit BEFORE the wheel:
+            const float oldImgW = float(m_pixelEditorW) * zoomBefore;
+            const float oldImgH = float(m_pixelEditorH) * zoomBefore;
+            const float oldReserveW = std::max(oldImgW, avail.x);
+            const float oldReserveH = std::max(oldImgH, avail.y);
+            const float oldImgMinX = startScreen.x
+                + (oldReserveW - oldImgW) * 0.5f
+                - ImGui::GetScrollX() + ImGui::GetScrollX();
+            const float oldImgMinY = startScreen.y
+                + (oldReserveH - oldImgH) * 0.5f
+                - ImGui::GetScrollY() + ImGui::GetScrollY();
+            // Pixel under the cursor (fractional):
+            const float pxU = (mp.x - oldImgMinX) / zoomBefore;
+            const float pyU = (mp.y - oldImgMinY) / zoomBefore;
+            // New scroll so that same pixel projects to same mp:
+            const float targetX = pxU * z + (reserveW - imgW) * 0.5f
+                                  - (mp.x - startScreen.x);
+            const float targetY = pyU * z + (reserveH - imgH) * 0.5f
+                                  - (mp.y - startScreen.y);
+            ImGui::SetScrollX(std::max(0.0f, targetX));
+            ImGui::SetScrollY(std::max(0.0f, targetY));
+        }
+        // Middle-mouse drag pans by adjusting the scroll position.
+        if (ImGui::IsWindowHovered() &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+            ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
+            ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+        }
+        // Reserve the space so ImGui knows the scrollable content
+        // size + advance the cursor past the canvas region for
+        // subsequent widgets.
+        ImGui::InvisibleButton("##pxhit",
+            ImVec2(reserveW, reserveH),
             ImGuiButtonFlags_MouseButtonLeft |
             ImGuiButtonFlags_MouseButtonRight |
             ImGuiButtonFlags_MouseButtonMiddle);
         const bool hovered = ImGui::IsItemHovered();
-        const ImGuiIO& io = ImGui::GetIO();
-        // Wheel zoom, centred on the pixel under the cursor.
-        if (hovered && io.MouseWheel != 0.0f) {
-            const float oldZ = m_pixelEditorZoom;
-            m_pixelEditorZoom = std::clamp(
-                m_pixelEditorZoom * (io.MouseWheel > 0 ? 1.25f : 0.8f),
-                1.0f, 64.0f);
-            // Keep the pixel under the cursor stable.
-            const ImVec2 mp = io.MousePos;
-            const float dx = (mp.x - (origin.x + canvasSize.x * 0.5f
-                + m_pixelEditorPan.x)) / oldZ;
-            const float dy = (mp.y - (origin.y + canvasSize.y * 0.5f
-                + m_pixelEditorPan.y)) / oldZ;
-            m_pixelEditorPan.x -= dx * (m_pixelEditorZoom - oldZ);
-            m_pixelEditorPan.y -= dy * (m_pixelEditorZoom - oldZ);
-        }
-        // Middle-mouse pan.
-        if (hovered &&
-            ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
-            m_pixelEditorPan.x += io.MouseDelta.x;
-            m_pixelEditorPan.y += io.MouseDelta.y;
-        }
         // Reupload texture if the buffer changed since last frame.
         if (m_pixelEditorTexDirty && m_pixelEditorTex) {
             m_pixelEditorTex->UpdatePixels(m_pixelEditorPixels.data());
             m_pixelEditorTexDirty = false;
         }
-        // Compute where to draw the image.
-        const float z = m_pixelEditorZoom;
-        const float imgW = float(m_pixelEditorW) * z;
-        const float imgH = float(m_pixelEditorH) * z;
-        const ImVec2 imgMin(
-            origin.x + (canvasSize.x - imgW) * 0.5f + m_pixelEditorPan.x,
-            origin.y + (canvasSize.y - imgH) * 0.5f + m_pixelEditorPan.y);
-        const ImVec2 imgMax(imgMin.x + imgW, imgMin.y + imgH);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         // Background (grey) so the canvas rect is visible.
-        dl->AddRectFilled(origin,
-            ImVec2(origin.x + canvasSize.x,
-                   origin.y + canvasSize.y),
+        dl->AddRectFilled(startScreen,
+            ImVec2(startScreen.x + reserveW,
+                   startScreen.y + reserveH),
             IM_COL32(38, 38, 42, 255));
         // Checkerboard behind the image (transparency preview).
         const float checkSz = std::max(4.0f, z);
