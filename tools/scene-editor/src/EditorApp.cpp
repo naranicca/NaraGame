@@ -8304,8 +8304,11 @@ private:
             ImVec2(startScreen.x + reserveW,
                    startScreen.y + reserveH),
             IM_COL32(38, 38, 42, 255));
-        // Checkerboard behind the image (transparency preview).
-        const float checkSz = std::max(4.0f, z);
+        // Checkerboard behind the image (transparency preview) --
+        // fixed 8x8 screen pixels regardless of zoom so the pattern
+        // stays a stable visual reference rather than scaling with
+        // the image.
+        const float checkSz = 8.0f;
         {
             const int cols = int((imgMax.x - imgMin.x) / checkSz) + 2;
             const int rows = int((imgMax.y - imgMin.y) / checkSz) + 2;
