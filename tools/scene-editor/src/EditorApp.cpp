@@ -6494,6 +6494,19 @@ private:
                 ImGuiInputTextFlags_AllowTabInput)) {
             m_scriptEditorDirty = true;
         }
+        // Ctrl+S while this window (or its InputTextMultiline child)
+        // has focus writes the buffer to disk. HandleGlobalShortcuts
+        // early-returns on WantTextInput, so nothing else in the
+        // editor eats the shortcut while the script is being
+        // edited.
+        if (ImGui::IsWindowFocused(
+                ImGuiFocusedFlags_ChildWindows |
+                ImGuiFocusedFlags_RootAndChildWindows) &&
+            ImGui::GetIO().KeyCtrl &&
+            ImGui::IsKeyPressed(ImGuiKey_S, false) &&
+            m_scriptEditorDirty && !m_scriptEditorTruncated) {
+            SaveScriptEditor();
+        }
         ImGui::End();
     }
 
