@@ -8344,8 +8344,8 @@ private:
                     b.x = std::min(b.x, imgMax.x);
                     b.y = std::min(b.y, imgMax.y);
                     dl->AddRectFilled(a, b, dark
-                        ? IM_COL32(70, 70, 76, 255)
-                        : IM_COL32(96, 96, 104, 255));
+                        ? IM_COL32(209, 209, 209, 255)
+                        : IM_COL32(237, 237, 237, 255));
                 }
             }
         }
