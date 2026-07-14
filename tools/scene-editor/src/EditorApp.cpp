@@ -12646,8 +12646,8 @@ private:
         const auto prevFilter = imp.filterMode;
         bool changed = false;
 
-        changed |= ImGui::DragFloat("Pixels Per Unit", &imp.pixelsPerUnit,
-                                    0.5f, 1.0f, 4096.0f, "%.2f");
+        changed |= SpinDragFloat("Pixels Per Unit", &imp.pixelsPerUnit,
+                                 0.5f, 1.0f, 4096.0f, "%.2f");
         const char* pivotNames[] = { "Center", "TopLeft", "TopRight",
                                      "BottomLeft", "BottomRight",
                                      "Custom" };
