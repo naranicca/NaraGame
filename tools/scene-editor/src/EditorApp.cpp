@@ -8192,13 +8192,18 @@ private:
         const float reserveW = std::max(imgW, avail.x);
         const float reserveH = std::max(imgH, avail.y);
         const ImVec2 startScreen = ImGui::GetCursorScreenPos();
-        // Image placement inside the reserved area -- centred so
-        // panning naturally reveals areas outside the visible canvas
-        // once zoomed in.
-        const ImVec2 imgMin(
-            startScreen.x + (reserveW - imgW) * 0.5f,
-            startScreen.y + (reserveH - imgH) * 0.5f);
-        const ImVec2 imgMax(imgMin.x + imgW, imgMin.y + imgH);
+        // Extra offset to apply to this frame's image position when
+        // the wheel / middle-mouse drag just moved the scroll target
+        // -- ImGui's SetScrollX only takes effect NEXT frame, so if
+        // we drew at startScreen (which reflects the current,
+        // still-old scroll) + newImgTL, the image would flash at the
+        // wrong screen location for one frame before snapping to the
+        // right place once scroll caught up. Subtracting the scroll
+        // delta from imgMin renders the current frame as if the
+        // scroll had already advanced. imgMin itself is defined
+        // AFTER the scroll math below so we can bake the delta in.
+        float scrollDeltaX = 0.0f;
+        float scrollDeltaY = 0.0f;
         // Zoom-around-cursor: hold the pixel under the mouse in
         // place across the wheel event.
         //
@@ -8250,19 +8255,35 @@ private:
                                           - ImGui::GetScrollX();
             const float visibleFromTLy = mouseContentY
                                           - ImGui::GetScrollY();
-            const float scrollX_new =
-                pixelContentX_new - visibleFromTLx;
-            const float scrollY_new =
-                pixelContentY_new - visibleFromTLy;
-            ImGui::SetScrollX(std::max(0.0f, scrollX_new));
-            ImGui::SetScrollY(std::max(0.0f, scrollY_new));
+            const float scrollX_target = std::max(0.0f,
+                pixelContentX_new - visibleFromTLx);
+            const float scrollY_target = std::max(0.0f,
+                pixelContentY_new - visibleFromTLy);
+            scrollDeltaX = scrollX_target - ImGui::GetScrollX();
+            scrollDeltaY = scrollY_target - ImGui::GetScrollY();
+            ImGui::SetScrollX(scrollX_target);
+            ImGui::SetScrollY(scrollY_target);
         }
         // Middle-mouse drag pans by adjusting the scroll position.
+        // Same one-frame lag applies, so also fold the drag delta
+        // into scrollDelta so this frame renders at the new spot.
         if (ImGui::IsWindowHovered() &&
             ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
-            ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
-            ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+            const float sx = ImGui::GetScrollX() - io.MouseDelta.x;
+            const float sy = ImGui::GetScrollY() - io.MouseDelta.y;
+            scrollDeltaX += (sx - ImGui::GetScrollX());
+            scrollDeltaY += (sy - ImGui::GetScrollY());
+            ImGui::SetScrollX(sx);
+            ImGui::SetScrollY(sy);
         }
+        // Image placement inside the reserved area -- centred so
+        // panning naturally reveals areas outside the visible canvas
+        // once zoomed in. Subtract scrollDelta so the wheel /
+        // middle-mouse frame doesn't render at the pre-scroll spot.
+        const ImVec2 imgMin(
+            startScreen.x + (reserveW - imgW) * 0.5f - scrollDeltaX,
+            startScreen.y + (reserveH - imgH) * 0.5f - scrollDeltaY);
+        const ImVec2 imgMax(imgMin.x + imgW, imgMin.y + imgH);
         // Reserve the space so ImGui knows the scrollable content
         // size + advance the cursor past the canvas region for
         // subsequent widgets.
