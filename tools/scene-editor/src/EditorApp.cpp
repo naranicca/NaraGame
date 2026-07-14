@@ -8231,25 +8231,24 @@ private:
             const float oldReserveH = std::max(oldImgH, avail.y);
             const float oldImgTLx = (oldReserveW - oldImgW) * 0.5f;
             const float oldImgTLy = (oldReserveH - oldImgH) * 0.5f;
-            // Mouse position in OLD content-space, and the pixel it
-            // was pointing at.
-            const float mouseContentX =
-                (mp.x - startScreen.x) + ImGui::GetScrollX();
-            const float mouseContentY =
-                (mp.y - startScreen.y) + ImGui::GetScrollY();
+            // Content position of the mouse. GetCursorScreenPos
+            // already returns `windowVisibleTL - scroll`, so
+            // `mp - startScreen == mouse_in_visible + scroll ==
+            // content_position` -- no need to add scroll again.
+            const float mouseContentX = mp.x - startScreen.x;
+            const float mouseContentY = mp.y - startScreen.y;
             const float pxU = (mouseContentX - oldImgTLx) / zoomBefore;
             const float pyU = (mouseContentY - oldImgTLy) / zoomBefore;
-            // Where that same pixel will sit in NEW content-space +
-            // the scroll that would put it back under the cursor
-            // (i.e. at the same offset from the window's visible
-            // top-left as `mp - startScreen - scroll_old` was).
+            // Where that same pixel sits in NEW content-space, and
+            // the scroll that puts it back at the same window-
+            // visible offset the mouse currently has.
             const float newImgTLx = (reserveW - imgW) * 0.5f;
             const float newImgTLy = (reserveH - imgH) * 0.5f;
             const float pixelContentX_new = newImgTLx + pxU * z;
             const float pixelContentY_new = newImgTLy + pyU * z;
-            const float visibleFromTLx = mp.x - startScreen.x
+            const float visibleFromTLx = mouseContentX
                                           - ImGui::GetScrollX();
-            const float visibleFromTLy = mp.y - startScreen.y
+            const float visibleFromTLy = mouseContentY
                                           - ImGui::GetScrollY();
             const float scrollX_new =
                 pixelContentX_new - visibleFromTLx;
