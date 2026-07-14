@@ -8508,6 +8508,11 @@ private:
         }
         case PixelTool::Select: {
             if (leftClicked && over) {
+                // Latch the click as the anchor -- from here on the
+                // selection rect spans [min(anchor, cursor),
+                // max(anchor, cursor)] regardless of drag direction.
+                m_pixelEditorSelAnchorX = px;
+                m_pixelEditorSelAnchorY = py;
                 m_pixelEditorSelX = px;
                 m_pixelEditorSelY = py;
                 m_pixelEditorSelW = 1;
@@ -8515,14 +8520,12 @@ private:
                 m_pixelEditorSelDragging = true;
             }
             if (m_pixelEditorSelDragging && leftDown && over) {
-                const int x0 = m_pixelEditorSelX;
-                const int y0 = m_pixelEditorSelY;
-                const int x1 = px;
-                const int y1 = py;
-                const int lo_x = std::min(x0, x1);
-                const int lo_y = std::min(y0, y1);
-                const int hi_x = std::max(x0, x1);
-                const int hi_y = std::max(y0, y1);
+                const int ax = m_pixelEditorSelAnchorX;
+                const int ay = m_pixelEditorSelAnchorY;
+                const int lo_x = std::min(ax, px);
+                const int lo_y = std::min(ay, py);
+                const int hi_x = std::max(ax, px);
+                const int hi_y = std::max(ay, py);
                 m_pixelEditorSelX = lo_x;
                 m_pixelEditorSelY = lo_y;
                 m_pixelEditorSelW = hi_x - lo_x + 1;
@@ -16080,6 +16083,11 @@ private:
     int                 m_pixelEditorSelY = 0;
     int                 m_pixelEditorSelW = 0;
     int                 m_pixelEditorSelH = 0;
+    // Anchor pixel captured on mouse-down + held for the whole
+    // drag. Kept separate from SelX/Y so a left / up drag doesn't
+    // slowly move the anchor along with the selection's top-left.
+    int                 m_pixelEditorSelAnchorX = 0;
+    int                 m_pixelEditorSelAnchorY = 0;
     bool                m_pixelEditorSelDragging = false;
     // Tileset Editor follows the same activation pattern.
     bool                m_tilesetEditorOpen     = false;
