@@ -8199,34 +8199,64 @@ private:
             startScreen.x + (reserveW - imgW) * 0.5f,
             startScreen.y + (reserveH - imgH) * 0.5f);
         const ImVec2 imgMax(imgMin.x + imgW, imgMin.y + imgH);
-        // Zoom-around-cursor: after a wheel event, adjust scroll so
-        // the pixel that was under the mouse stays put. Compute the
-        // pixel coord under the mouse using the OLD zoom, then set
-        // scroll such that it appears at the same screen position
-        // with the NEW zoom.
+        // Zoom-around-cursor: hold the pixel under the mouse in
+        // place across the wheel event.
+        //
+        // Coordinate model (all in the child window's content space
+        // -- pixels, not screen units):
+        //   * scroll (ImGui's GetScrollX/Y) is the content position
+        //     of the visible top-left corner.
+        //   * mouseContent = (mouse screen pos) - (window visible
+        //     top-left) + scroll. GetCursorScreenPos returns
+        //     `windowVisibleTL - scroll`, so
+        //     `mouse - startScreen == mouse - windowVisibleTL +
+        //     scroll` == mouseContent already.
+        //   * The image's top-left in content = (reserve - img) / 2.
+        //   * A pixel (px, py) sits at
+        //     imgTL + (px, py) * zoom.
+        // After a wheel event, keep the same pixel (px, py) at the
+        // same mouseContent by choosing the new scroll such that
+        // `mouseContent == (newImgTL + px*newZoom) - newScroll +
+        // scroll` collapses to
+        //     newScroll = newImgTL + px*newZoom - (mouse - startScreen)
+        //                 + (implicit scroll term that cancels).
         if (wheelHovered && zoomBefore != m_pixelEditorZoom) {
             const ImVec2 mp = io.MousePos;
-            // Where the image top-left would sit BEFORE the wheel:
+            // Where the image top-left sat this frame (uses old zoom
+            // + old reserve). startScreen already accounts for the
+            // CURRENT scroll, so mouseContent below is straightforward.
             const float oldImgW = float(m_pixelEditorW) * zoomBefore;
             const float oldImgH = float(m_pixelEditorH) * zoomBefore;
             const float oldReserveW = std::max(oldImgW, avail.x);
             const float oldReserveH = std::max(oldImgH, avail.y);
-            const float oldImgMinX = startScreen.x
-                + (oldReserveW - oldImgW) * 0.5f
-                - ImGui::GetScrollX() + ImGui::GetScrollX();
-            const float oldImgMinY = startScreen.y
-                + (oldReserveH - oldImgH) * 0.5f
-                - ImGui::GetScrollY() + ImGui::GetScrollY();
-            // Pixel under the cursor (fractional):
-            const float pxU = (mp.x - oldImgMinX) / zoomBefore;
-            const float pyU = (mp.y - oldImgMinY) / zoomBefore;
-            // New scroll so that same pixel projects to same mp:
-            const float targetX = pxU * z + (reserveW - imgW) * 0.5f
-                                  - (mp.x - startScreen.x);
-            const float targetY = pyU * z + (reserveH - imgH) * 0.5f
-                                  - (mp.y - startScreen.y);
-            ImGui::SetScrollX(std::max(0.0f, targetX));
-            ImGui::SetScrollY(std::max(0.0f, targetY));
+            const float oldImgTLx = (oldReserveW - oldImgW) * 0.5f;
+            const float oldImgTLy = (oldReserveH - oldImgH) * 0.5f;
+            // Mouse position in OLD content-space, and the pixel it
+            // was pointing at.
+            const float mouseContentX =
+                (mp.x - startScreen.x) + ImGui::GetScrollX();
+            const float mouseContentY =
+                (mp.y - startScreen.y) + ImGui::GetScrollY();
+            const float pxU = (mouseContentX - oldImgTLx) / zoomBefore;
+            const float pyU = (mouseContentY - oldImgTLy) / zoomBefore;
+            // Where that same pixel will sit in NEW content-space +
+            // the scroll that would put it back under the cursor
+            // (i.e. at the same offset from the window's visible
+            // top-left as `mp - startScreen - scroll_old` was).
+            const float newImgTLx = (reserveW - imgW) * 0.5f;
+            const float newImgTLy = (reserveH - imgH) * 0.5f;
+            const float pixelContentX_new = newImgTLx + pxU * z;
+            const float pixelContentY_new = newImgTLy + pyU * z;
+            const float visibleFromTLx = mp.x - startScreen.x
+                                          - ImGui::GetScrollX();
+            const float visibleFromTLy = mp.y - startScreen.y
+                                          - ImGui::GetScrollY();
+            const float scrollX_new =
+                pixelContentX_new - visibleFromTLx;
+            const float scrollY_new =
+                pixelContentY_new - visibleFromTLy;
+            ImGui::SetScrollX(std::max(0.0f, scrollX_new));
+            ImGui::SetScrollY(std::max(0.0f, scrollY_new));
         }
         // Middle-mouse drag pans by adjusting the scroll position.
         if (ImGui::IsWindowHovered() &&
