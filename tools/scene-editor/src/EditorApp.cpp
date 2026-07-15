@@ -8102,6 +8102,13 @@ private:
                 ImGuiColorEditFlags_AlphaBar)) {
             m_pixelEditorColor = ImVec4{c[0], c[1], c[2], c[3]};
         }
+        ImGui::Separator();
+        NGCheckbox("Grid", &m_pixelEditorGridShow);
+        ImGui::BeginDisabled(!m_pixelEditorGridShow);
+        SpinDragInt("Grid size", &m_pixelEditorGridSize,
+                    0.5f, 1, 256);
+        if (m_pixelEditorGridSize < 1) m_pixelEditorGridSize = 1;
+        ImGui::EndDisabled();
         ImGui::EndChild();
         // Global shortcuts (Ctrl+Z/Y, Ctrl+S).
         const ImGuiIO& io = ImGui::GetIO();
@@ -8436,6 +8443,47 @@ private:
             if (pio.DrawCallback_SetSamplerLinear) {
                 dl->AddCallback(pio.DrawCallback_SetSamplerLinear,
                                 nullptr);
+            }
+        }
+        // Optional grid overlay. Clip the iteration to the visible
+        // rectangle so a large zoom + small gridSize doesn't submit
+        // millions of AddLine calls per frame (same bounding logic
+        // as the checkerboard above).
+        if (m_pixelEditorGridShow && m_pixelEditorGridSize >= 1) {
+            const float gs = float(m_pixelEditorGridSize) * z;
+            const float visMinX = startScreen.x + ImGui::GetScrollX()
+                                   + scrollDeltaX;
+            const float visMinY = startScreen.y + ImGui::GetScrollY()
+                                   + scrollDeltaY;
+            const float visMaxX = visMinX + avail.x;
+            const float visMaxY = visMinY + avail.y;
+            const float drawMinX = std::max(imgMin.x, visMinX);
+            const float drawMinY = std::max(imgMin.y, visMinY);
+            const float drawMaxX = std::min(imgMax.x, visMaxX);
+            const float drawMaxY = std::min(imgMax.y, visMaxY);
+            if (gs >= 2.0f && drawMinX < drawMaxX &&
+                drawMinY < drawMaxY) {
+                const ImU32 lineCol = IM_COL32(80, 80, 90, 180);
+                const int startCol = std::max(0, int(std::ceil(
+                    (drawMinX - imgMin.x) / gs)));
+                const int endCol   = int(std::floor(
+                    (drawMaxX - imgMin.x) / gs));
+                const int startRow = std::max(0, int(std::ceil(
+                    (drawMinY - imgMin.y) / gs)));
+                const int endRow   = int(std::floor(
+                    (drawMaxY - imgMin.y) / gs));
+                for (int c = startCol; c <= endCol; ++c) {
+                    const float x = imgMin.x + c * gs;
+                    dl->AddLine(ImVec2(x, drawMinY),
+                                ImVec2(x, drawMaxY),
+                                lineCol, 1.0f);
+                }
+                for (int rr = startRow; rr <= endRow; ++rr) {
+                    const float yy = imgMin.y + rr * gs;
+                    dl->AddLine(ImVec2(drawMinX, yy),
+                                ImVec2(drawMaxX, yy),
+                                lineCol, 1.0f);
+                }
             }
         }
         // Convert mouse position to pixel coords.
@@ -16168,6 +16216,11 @@ private:
     int                 m_pixelEditorSelAnchorX = 0;
     int                 m_pixelEditorSelAnchorY = 0;
     bool                m_pixelEditorSelDragging = false;
+    // Grid overlay -- off by default so the checker keeps reading
+    // clean; when enabled, draws a 1px line every gridSize image
+    // pixels across the canvas.
+    bool                m_pixelEditorGridShow = false;
+    int                 m_pixelEditorGridSize = 16;
     // Tileset Editor follows the same activation pattern.
     bool                m_tilesetEditorOpen     = false;
     bool                m_tilesetEditorActivate = false;
