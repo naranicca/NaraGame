@@ -4704,6 +4704,36 @@ private:
         m_spriteEditorActivate = true;
     }
 
+    // Set up common Pixel Editor state that both the existing-file
+    // path (OpenPixelEditor) and the blank-canvas path (DoNewSprite)
+    // share: allocate the RGBA buffer, create the editor-owned
+    // RHITexture, reset tool state.
+    void PixelEditorReset(int w, int h,
+                          const std::vector<uint8_t>& pixels) {
+        m_pixelEditorW      = w;
+        m_pixelEditorH      = h;
+        m_pixelEditorPixels = pixels;
+        NaraGame::Image seed;
+        seed.width  = uint32_t(w);
+        seed.height = uint32_t(h);
+        seed.pixels = pixels;
+        m_pixelEditorTex = NaraGame::CreateTexture(
+            GetDevice(), seed, NaraGame::TextureFilter::Point);
+        m_pixelEditorDirty       = false;
+        m_pixelEditorTexDirty    = false;
+        m_pixelEditorUndo.clear();
+        m_pixelEditorRedo.clear();
+        m_pixelEditorZoom        = 8.0f;
+        m_pixelEditorPan         = ImVec2{0, 0};
+        m_pixelEditorTool        = PixelTool::Pencil;
+        m_pixelEditorColor       = ImVec4{1, 1, 1, 1};
+        m_pixelEditorSelW        = 0;
+        m_pixelEditorSelH        = 0;
+        m_pixelEditorSelDragging = false;
+        m_pixelEditorOpen        = true;
+        m_pixelEditorActivate    = true;
+    }
+
     // Pixel Editor -- load the PNG at `guid` into an editable RGBA
     // buffer, spin up an editor-owned RHITexture that mirrors it, and
     // reset tool state. Called from the Project panel's right-click
@@ -4715,32 +4745,27 @@ private:
             m_assetDb.AssetsRoot() + "/" + e->relPath;
         NaraGame::Image img = NaraGame::LoadImageFile(abs);
         if (!img.Valid()) return;
-        m_pixelEditorAsset   = guid;
-        m_pixelEditorAbsPath = abs;
-        m_pixelEditorRelPath = e->relPath;
-        m_pixelEditorW       = int(img.width);
-        m_pixelEditorH       = int(img.height);
-        m_pixelEditorPixels  = std::move(img.pixels);
-        // Editor-owned texture we upload our in-memory pixels into so
-        // the canvas can render via ImGui::Image without touching the
-        // AssetDatabase's cached texture (that one belongs to the
-        // Scene view).
-        NaraGame::Image seed;
-        seed.width  = uint32_t(m_pixelEditorW);
-        seed.height = uint32_t(m_pixelEditorH);
-        seed.pixels = m_pixelEditorPixels;
-        m_pixelEditorTex = NaraGame::CreateTexture(
-            GetDevice(), seed, NaraGame::TextureFilter::Point);
-        m_pixelEditorDirty    = false;
-        m_pixelEditorTexDirty = false;
-        m_pixelEditorUndo.clear();
-        m_pixelEditorRedo.clear();
-        m_pixelEditorZoom     = 8.0f;
-        m_pixelEditorPan      = ImVec2{0, 0};
-        m_pixelEditorTool     = PixelTool::Pencil;
-        m_pixelEditorColor    = ImVec4{1, 1, 1, 1};
-        m_pixelEditorOpen     = true;
-        m_pixelEditorActivate = true;
+        m_pixelEditorAsset       = guid;
+        m_pixelEditorAbsPath     = abs;
+        m_pixelEditorRelPath     = e->relPath;
+        m_pixelEditorSaveInitDir.clear();
+        PixelEditorReset(int(img.width), int(img.height), img.pixels);
+    }
+
+    // New-sprite path. Same window as OpenPixelEditor but no backing
+    // file yet: allocate a transparent w*h buffer + defer the actual
+    // filename until the first Save (which then shows a Save-As
+    // dialog defaulted to `initialDir`).
+    void OpenBlankPixelEditor(int w, int h,
+                               const std::string& initialDir) {
+        if (w <= 0 || h <= 0) return;
+        std::vector<uint8_t> blank(size_t(w) * h * 4, 0);
+        m_pixelEditorAsset       = SceneEditor::AssetGuid{};
+        m_pixelEditorAbsPath.clear();
+        m_pixelEditorRelPath     = "Untitled";
+        m_pixelEditorSaveInitDir = initialDir;
+        PixelEditorReset(w, h, blank);
+        m_pixelEditorDirty = true;  // so Save/UnsavedDocument light up
     }
 
     // Push the current pixel buffer onto the undo stack (bounded so a
@@ -4757,17 +4782,57 @@ private:
     // Write the current buffer back out to the PNG the editor was
     // opened on, then evict any cached RHITexture the AssetDatabase
     // holds for the same guid so the next Scene view frame re-decodes
-    // from disk + immediately shows the edit.
+    // from disk + immediately shows the edit. When the buffer has no
+    // backing file yet (New Sprite flow) show a Save As dialog first.
     void SavePixelEditor() {
         if (m_pixelEditorPixels.empty()) return;
+        if (m_pixelEditorAbsPath.empty()) {
+            namespace fs = std::filesystem;
+            const std::string dir = m_pixelEditorSaveInitDir.empty()
+                ? (m_project.IsOpen()
+                    ? (m_project.AssetsDir() + "/Sprites")
+                    : std::string{})
+                : m_pixelEditorSaveInitDir;
+            if (!dir.empty()) {
+                std::error_code ec;
+                fs::create_directories(fs::path(dir), ec);
+            }
+            const std::string path = PickFileDialog(
+                m_hwnd, CLSID_FileSaveDialog, L"New Sprite",
+                L"PNG Image (*.png)", L"*.png", L"png", dir);
+            if (path.empty()) return;
+            m_pixelEditorAbsPath = path;
+            m_pixelEditorRelPath = RelToAssets(path);
+        }
         if (!SavePngViaWIC(m_pixelEditorAbsPath,
                            uint32_t(m_pixelEditorW),
                            uint32_t(m_pixelEditorH),
                            m_pixelEditorPixels.data())) {
             return;
         }
+        // Fresh file: pick up the newly-generated .meta + guid so
+        // subsequent saves route through the same EvictTexture path
+        // an existing-file edit would.
+        if (!m_pixelEditorAsset.IsValid()) {
+            m_assetDb.Rescan();
+            if (const auto* entry =
+                    m_assetDb.FindByPath(m_pixelEditorRelPath)) {
+                m_pixelEditorAsset = entry->guid;
+            }
+        }
         m_assetDb.EvictTexture(m_pixelEditorAsset);
         m_pixelEditorDirty = false;
+    }
+
+    // "New Sprite..." flow. Opens the Pixel Editor with a
+    // transparent 256x256 buffer; the Save button routes through
+    // SavePixelEditor's Save-As branch and creates the PNG on disk
+    // at that point.
+    void DoNewSprite(const std::string& initialDir = {}) {
+        const std::string dir = initialDir.empty() && m_project.IsOpen()
+            ? (m_project.AssetsDir() + "/Sprites")
+            : initialDir;
+        OpenBlankPixelEditor(256, 256, dir);
     }
 
     void OpenControllerEditor(const SceneEditor::AssetGuid& guid) {
@@ -15642,6 +15707,8 @@ private:
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, MenuHoverColor());
         ImGui::PushStyleColor(ImGuiCol_HeaderActive,  MenuActiveColor());
         if (ImGui::BeginPopup("##project_new")) {
+            if (ImGui::MenuItem("Sprite..."))
+                DoNewSprite();
             if (ImGui::MenuItem("Script..."))
                 DoNewScript();
             if (ImGui::MenuItem("Tileset..."))
@@ -15753,6 +15820,8 @@ private:
                     const std::string prefix = std::string(cat) + "/";
                     return folderRel.rfind(prefix, 0) == 0;
                 };
+                const bool showSprite     = folderRel.empty() ||
+                                             inCategory("Sprites");
                 const bool showScript     = folderRel.empty() ||
                                              inCategory("Scripts");
                 const bool showTileset    = folderRel.empty() ||
@@ -15762,6 +15831,10 @@ private:
                 const bool showController = folderRel.empty() ||
                                              inCategory("Animations");
                 bool anyNew = false;
+                if (showSprite) {
+                    if (ImGui::MenuItem("New Sprite...")) DoNewSprite(abs);
+                    anyNew = true;
+                }
                 if (showScript) {
                     if (ImGui::MenuItem("New Script...")) DoNewScript(abs);
                     anyNew = true;
@@ -16067,6 +16140,10 @@ private:
     SceneEditor::AssetGuid m_pixelEditorAsset;
     std::string         m_pixelEditorAbsPath;
     std::string         m_pixelEditorRelPath;
+    // Default folder the Save-As dialog opens in when the editor
+    // was started via "New Sprite..." (no backing file yet). Empty
+    // for existing-file edits, since those already have a path.
+    std::string         m_pixelEditorSaveInitDir;
     int                 m_pixelEditorW = 0;
     int                 m_pixelEditorH = 0;
     std::vector<uint8_t> m_pixelEditorPixels;
