@@ -188,13 +188,16 @@ void ApplyEditorTheme(EditorTheme theme, float uiScale) {
     // Rounded-rectangle affordances for buttons + input frames. Set
     // BEFORE ScaleAllSizes so the corner radius is expressed in
     // 1x units + then scales with the rest of the UI. GrabRounding
-    // matches so slider grabs read consistently with buttons; Popup
-    // + WindowRounding stay 0 so docked panels keep sharp edges.
+    // matches so slider grabs read consistently with buttons.
+    // Popup + Window rounding round off menus / modals / floating
+    // tool windows; docked panels have their corners clipped by
+    // the surrounding dock node so this doesn't affect them.
     ImGuiStyle& style     = ImGui::GetStyle();
     style.FrameRounding   = 4.0f;
     style.GrabRounding    = 4.0f;
     style.TabRounding     = 4.0f;
-    style.PopupRounding   = 4.0f;
+    style.PopupRounding   = 6.0f;
+    style.WindowRounding  = 6.0f;
     // Neutral gray palette for buttons + input frames. ImGui's
     // default paints both families in the same blue as selection /
     // active tint, so they visually compete with real selection
