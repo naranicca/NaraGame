@@ -10665,20 +10665,42 @@ private:
             const ImVec2 wMin = w->Pos;
             const ImVec2 wMax(w->Pos.x + w->Size.x,
                               w->Pos.y + w->Size.y);
-            // The foreground layer sits above EVERY window,
-            // including the popup's own parent menu -- so a
-            // submenu's left/top shadow would paint a grey band
-            // across the parent it visually sits next to. Collect
-            // the parent-popup chain (submenu -> parent menu ->
-            // menu-bar window) and later clip the shadow OUT of
-            // those rects so the overlap area stays clean.
-            ImVec2 suppressMin[8];
-            ImVec2 suppressMax[8];
+            // The foreground layer sits above EVERY window, so a
+            // shadow can bleed onto windows it should never touch.
+            // Two suppression sets keep it honest:
+            //
+            // (a) Windows rendered ABOVE this one (later in
+            //     g.Windows, which is sorted back-to-front). A
+            //     shadow physically falls on things BELOW its
+            //     window, so anything drawn later must occlude it
+            //     -- without this, a parent menu's right-side
+            //     shadow paints across the submenu that opened
+            //     from it.
+            //
+            // (b) The popup's parent-menu chain (drawn BEFORE this
+            //     window, so not covered by (a)). A submenu's
+            //     left/top shadow over the parent it extends from
+            //     reads as a glitch, so clip it out too.
+            ImVec2 suppressMin[16];
+            ImVec2 suppressMax[16];
             int suppressCount = 0;
+            for (int j = i + 1;
+                 j < g.Windows.Size && suppressCount < 16; ++j) {
+                ImGuiWindow* o = g.Windows[j];
+                if (!o || !o->WasActive || o->Hidden) continue;
+                if (o->Flags & ImGuiWindowFlags_ChildWindow) continue;
+                if (o->Flags & ImGuiWindowFlags_NoBackground) continue;
+                if (o->Viewport != w->Viewport) continue;
+                suppressMin[suppressCount] = o->Pos;
+                suppressMax[suppressCount] =
+                    ImVec2(o->Pos.x + o->Size.x,
+                           o->Pos.y + o->Size.y);
+                ++suppressCount;
+            }
             if (f & (ImGuiWindowFlags_Popup |
                      ImGuiWindowFlags_ChildMenu)) {
                 for (ImGuiWindow* p = w->ParentWindow;
-                     p && suppressCount < 8;
+                     p && suppressCount < 16;
                      p = p->ParentWindow) {
                     const bool menuLike =
                         (p->Flags & (ImGuiWindowFlags_Popup |
@@ -10730,15 +10752,16 @@ private:
             // rect (parent menus). Axis-aligned subtraction of one
             // rect from another yields at most 4 rects, so the
             // region list stays tiny for realistic menu depths.
-            ImVec2 regMin[32];
-            ImVec2 regMax[32];
+            constexpr int kMaxRegions = 64;
+            ImVec2 regMin[kMaxRegions];
+            ImVec2 regMax[kMaxRegions];
             int    regCount = 0;
             regMin[0] = ImVec2(wMin.x - blur, wMin.y - blur);
             regMax[0] = ImVec2(wMax.x + blur, wMax.y + blur + offY);
             regCount  = 1;
             for (int s = 0; s < suppressCount; ++s) {
-                ImVec2 nMin[32];
-                ImVec2 nMax[32];
+                ImVec2 nMin[kMaxRegions];
+                ImVec2 nMax[kMaxRegions];
                 int    nCount = 0;
                 const ImVec2 sMin = suppressMin[s];
                 const ImVec2 sMax = suppressMax[s];
@@ -10749,20 +10772,20 @@ private:
                         sMin.x < b.x && sMax.x > a.x &&
                         sMin.y < b.y && sMax.y > a.y;
                     if (!overlap) {
-                        if (nCount < 32) {
+                        if (nCount < kMaxRegions) {
                             nMin[nCount] = a; nMax[nCount] = b;
                             ++nCount;
                         }
                         continue;
                     }
                     // Top band.
-                    if (sMin.y > a.y && nCount < 32) {
+                    if (sMin.y > a.y && nCount < kMaxRegions) {
                         nMin[nCount] = a;
                         nMax[nCount] = ImVec2(b.x, sMin.y);
                         ++nCount;
                     }
                     // Bottom band.
-                    if (sMax.y < b.y && nCount < 32) {
+                    if (sMax.y < b.y && nCount < kMaxRegions) {
                         nMin[nCount] = ImVec2(a.x, sMax.y);
                         nMax[nCount] = b;
                         ++nCount;
@@ -10770,13 +10793,15 @@ private:
                     const float y0 = std::max(a.y, sMin.y);
                     const float y1 = std::min(b.y, sMax.y);
                     // Left band.
-                    if (sMin.x > a.x && y1 > y0 && nCount < 32) {
+                    if (sMin.x > a.x && y1 > y0 &&
+                        nCount < kMaxRegions) {
                         nMin[nCount] = ImVec2(a.x, y0);
                         nMax[nCount] = ImVec2(sMin.x, y1);
                         ++nCount;
                     }
                     // Right band.
-                    if (sMax.x < b.x && y1 > y0 && nCount < 32) {
+                    if (sMax.x < b.x && y1 > y0 &&
+                        nCount < kMaxRegions) {
                         nMin[nCount] = ImVec2(sMax.x, y0);
                         nMax[nCount] = ImVec2(b.x, y1);
                         ++nCount;
