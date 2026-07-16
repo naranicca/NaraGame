@@ -10564,7 +10564,8 @@ private:
     // ImGui's current window to the submenu popup, so
     // GetWindowDrawList() at this point would target the popup, not
     // the row we need to overpaint.
-    static void ShrinkSubmenuArrow(ImDrawList* parentDL) {
+    static void ShrinkSubmenuArrow(ImDrawList* parentDL,
+                                    bool menuOpen) {
         const ImRect& bb   = ImGui::GetCurrentContext()->LastItemData.Rect;
         const float fs     = ImGui::GetFontSize();
         const bool hovered = ImGui::IsItemHovered();
@@ -10581,10 +10582,20 @@ private:
             int(pbg.y * 255.0f + 0.5f),
             int(pbg.z * 255.0f + 0.5f), 255);
         dl->AddRectFilled(cMin, cMax, popupBg);
-        // Re-lay the hover highlight so we don't punch a hole in it.
+        // Re-lay the row's current highlight so we don't punch a
+        // hole in it. Three states mirror how ImGui paints the
+        // parent row itself:
+        //   cursor on the row            -> HeaderHovered (blue)
+        //   submenu open, cursor inside  -> Header (grey; the
+        //     "this menu is open" highlight Selectable renders
+        //     when the item is flagged selected)
+        //   neither                      -> bare PopupBg
         if (hovered) {
             dl->AddRectFilled(cMin, cMax,
                 ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+        } else if (menuOpen) {
+            dl->AddRectFilled(cMin, cMax,
+                ImGui::GetColorU32(ImGuiCol_Header));
         }
         // Half-scale arrow centred in the patch.
         const ImU32 textCol = ImGui::GetColorU32(ImGuiCol_Text);
@@ -10605,7 +10616,7 @@ private:
         // return doesn't pull us into the submenu's context.
         ImDrawList* parentDL = ImGui::GetWindowDrawList();
         const bool open = ImGui::BeginMenu(label, enabled);
-        ShrinkSubmenuArrow(parentDL);
+        ShrinkSubmenuArrow(parentDL, open);
         return open;
     }
 
