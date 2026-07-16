@@ -9774,9 +9774,19 @@ private:
             ImGui::OpenPopup("Editor Preferences");
             m_openEditorPrefsModal = false;
         }
-        if (!ImGui::BeginPopupModal("Editor Preferences", nullptr,
+        // Route the popup's "open" state through a local so the
+        // title-bar X button (enabled by passing p_open) closes the
+        // modal like a normal window. Popup content stays inside
+        // BeginPopupModal so the modal-blocking backdrop still
+        // covers the rest of the UI.
+        bool open = true;
+        if (!ImGui::BeginPopupModal("Editor Preferences", &open,
                                     ImGuiWindowFlags_AlwaysAutoResize)) {
             return;
+        }
+        if (!open) {
+            // X clicked -- close without saving.
+            ImGui::CloseCurrentPopup();
         }
 
         // --- Theme ---
@@ -9815,14 +9825,20 @@ private:
                             DetectUiScale(m_hwnd));
 
         ImGui::Separator();
-        if (ImGui::Button("Save & Close")) {
+        // Right-align the OK button on the last row so the modal
+        // reads as a standard confirm dialog. GetContentRegionAvail
+        // gives the remaining row width; subtract the button width
+        // and slide the cursor over.
+        const ImVec2 okSize(88.0f, 0.0f);
+        const float avail = ImGui::GetContentRegionAvail().x;
+        if (avail > okSize.x) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                  (avail - okSize.x));
+        }
+        if (ImGui::Button("OK", okSize)) {
             m_prefs.uiScale = m_uiScale;
             m_prefs.theme   = m_theme;
             SaveEditorPrefs(m_prefs);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Close (don't save)")) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
