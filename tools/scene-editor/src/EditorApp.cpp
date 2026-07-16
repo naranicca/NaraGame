@@ -7995,7 +7995,13 @@ private:
     // Eraser / Fill / Picker / Select), scrollable/zoomable canvas in
     // the middle, colour palette on the right.
     void DrawPixelEditorWindow() {
-        if (!m_pixelEditorOpen) return;
+        if (!m_pixelEditorOpen) {
+            // Even with the editor hidden, still run the confirm-
+            // close popup if it was queued (a Cancel on the modal
+            // will re-set m_pixelEditorOpen=true from here).
+            DrawPixelEditorCloseConfirmModal();
+            return;
+        }
         if (m_pixelEditorActivate) {
             ImGui::SetNextWindowSize(ImVec2(900, 640),
                                      ImGuiCond_Appearing);
@@ -8006,8 +8012,25 @@ private:
             m_pixelEditorRelPath + "###pixeleditor";
         const ImGuiWindowFlags wf = m_pixelEditorDirty
             ? ImGuiWindowFlags_UnsavedDocument : 0;
-        if (!ImGui::Begin(title.c_str(), &m_pixelEditorOpen, wf)) {
+        // Route the X-button through a local so we can intercept a
+        // close attempt when the buffer is dirty and pop a
+        // confirmation dialog first. The window's persistent-open
+        // state (m_pixelEditorOpen) stays true until the user
+        // actually confirms discard / save.
+        bool wantOpen = true;
+        const bool visible = ImGui::Begin(title.c_str(), &wantOpen, wf);
+        if (!wantOpen) {
+            // User clicked the X. If dirty, pop the confirm popup
+            // + keep the editor visible. Otherwise close.
+            if (m_pixelEditorDirty) {
+                m_pixelEditorPendingConfirmClose = true;
+            } else {
+                m_pixelEditorOpen = false;
+            }
+        }
+        if (!visible) {
             ImGui::End();
+            DrawPixelEditorCloseConfirmModal();
             return;
         }
         ShrinkFloatingCollapseIcon();
@@ -8015,6 +8038,7 @@ private:
             m_pixelEditorPixels.empty()) {
             ImGui::TextDisabled("(no image loaded)");
             ImGui::End();
+            DrawPixelEditorCloseConfirmModal();
             return;
         }
         // ---- Toolbar --------------------------------------------
@@ -8133,6 +8157,56 @@ private:
             SavePixelEditor();
         }
         ImGui::End();
+        DrawPixelEditorCloseConfirmModal();
+    }
+
+    // "Unsaved changes -- save before closing?" popup. Runs at the
+    // frame's top level (after the parent window's End) because
+    // BeginPopupModal can't be nested inside a regular window
+    // that's about to be closed by the same event.
+    void DrawPixelEditorCloseConfirmModal() {
+        const char* popupId = "Unsaved changes##pxconfirm";
+        if (m_pixelEditorPendingConfirmClose) {
+            ImGui::OpenPopup(popupId);
+            m_pixelEditorPendingConfirmClose = false;
+        }
+        // Centre on the display.
+        const ImVec2 ds = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f),
+                                ImGuiCond_Appearing,
+                                ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopupModal(popupId, nullptr,
+                ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoSavedSettings)) {
+            const std::string& name = m_pixelEditorRelPath.empty()
+                ? std::string("Untitled") : m_pixelEditorRelPath;
+            ImGui::Text("%s has unsaved changes.", name.c_str());
+            ImGui::TextDisabled("Save before closing?");
+            ImGui::Separator();
+            if (ImGui::Button("Save", ImVec2(90, 0))) {
+                SavePixelEditor();
+                // If Save actually succeeded (buffer no longer
+                // dirty), proceed with the close. If the user
+                // cancelled the Save-As dialog for a fresh sprite,
+                // stay open + leave the popup up so they can
+                // choose again.
+                if (!m_pixelEditorDirty) {
+                    m_pixelEditorOpen = false;
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Discard", ImVec2(90, 0))) {
+                m_pixelEditorDirty = false;
+                m_pixelEditorOpen  = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(90, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
     }
 
     static const char* PixelToolName(PixelTool t) {
@@ -16416,6 +16490,11 @@ private:
     int                 m_pixelEditorResizeStartH = 0;
     ImVec2              m_pixelEditorResizeStartMouse{0, 0};
     std::vector<uint8_t> m_pixelEditorResizeStartBuffer;
+    // Set when the user clicks the window's X while the buffer has
+    // unsaved edits; the next frame the confirm-close popup opens
+    // (BeginPopupModal must run at the frame's top-level, after
+    // the parent window's End).
+    bool                m_pixelEditorPendingConfirmClose = false;
     // Tileset Editor follows the same activation pattern.
     bool                m_tilesetEditorOpen     = false;
     bool                m_tilesetEditorActivate = false;
