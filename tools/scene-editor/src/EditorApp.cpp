@@ -10665,6 +10665,33 @@ private:
             const ImVec2 wMin = w->Pos;
             const ImVec2 wMax(w->Pos.x + w->Size.x,
                               w->Pos.y + w->Size.y);
+            // The foreground layer sits above EVERY window,
+            // including the popup's own parent menu -- so a
+            // submenu's left/top shadow would paint a grey band
+            // across the parent it visually sits next to. Collect
+            // the parent-popup chain (submenu -> parent menu ->
+            // menu-bar window) and later clip the shadow OUT of
+            // those rects so the overlap area stays clean.
+            ImVec2 suppressMin[8];
+            ImVec2 suppressMax[8];
+            int suppressCount = 0;
+            if (f & (ImGuiWindowFlags_Popup |
+                     ImGuiWindowFlags_ChildMenu)) {
+                for (ImGuiWindow* p = w->ParentWindow;
+                     p && suppressCount < 8;
+                     p = p->ParentWindow) {
+                    const bool menuLike =
+                        (p->Flags & (ImGuiWindowFlags_Popup |
+                                     ImGuiWindowFlags_ChildMenu |
+                                     ImGuiWindowFlags_MenuBar)) != 0;
+                    if (!menuLike) break;
+                    suppressMin[suppressCount] = p->Pos;
+                    suppressMax[suppressCount] =
+                        ImVec2(p->Pos.x + p->Size.x,
+                               p->Pos.y + p->Size.y);
+                    ++suppressCount;
+                }
+            }
             const float rounding = w->WindowRounding > 0.0f
                 ? w->WindowRounding
                 : ImGui::GetStyle().PopupRounding;
@@ -10698,30 +10725,68 @@ private:
             const ImVec2 pTR(wMax.x - rr, wMin.y + rr);
             const ImVec2 pBR(wMax.x - rr, wMax.y - rr);
             const ImVec2 pBL(wMin.x + rr, wMax.y - rr);
-            // Straight strips only span the straight portion
-            // (skip the rr on each end) so the corner sectors
-            // pick up the missing area.
-            if (topH > 0.5f && wMax.x - rr > wMin.x + rr) {
-                dl->AddRectFilledMultiColor(
-                    ImVec2(pTL.x, wMin.y - topH),
-                    ImVec2(pTR.x, wMin.y),
-                    clear, clear, opTop, opTop);
-            }
-            if (wMax.x - rr > wMin.x + rr) {
-                dl->AddRectFilledMultiColor(
-                    ImVec2(pBL.x, wMax.y),
-                    ImVec2(pBR.x, wMax.y + botH),
-                    opBot, opBot, clear, clear);
-            }
-            if (wMax.y - rr > wMin.y + rr) {
-                dl->AddRectFilledMultiColor(
-                    ImVec2(wMin.x - blur, pTL.y),
-                    ImVec2(wMin.x,        pBL.y),
-                    clear, opSide, opSide, clear);
-                dl->AddRectFilledMultiColor(
-                    ImVec2(wMax.x,        pTR.y),
-                    ImVec2(wMax.x + blur, pBR.y),
-                    opSide, clear, clear, opSide);
+            // Compute the clip regions the shadow may draw into:
+            // the shadow's bounding box minus every suppression
+            // rect (parent menus). Axis-aligned subtraction of one
+            // rect from another yields at most 4 rects, so the
+            // region list stays tiny for realistic menu depths.
+            ImVec2 regMin[32];
+            ImVec2 regMax[32];
+            int    regCount = 0;
+            regMin[0] = ImVec2(wMin.x - blur, wMin.y - blur);
+            regMax[0] = ImVec2(wMax.x + blur, wMax.y + blur + offY);
+            regCount  = 1;
+            for (int s = 0; s < suppressCount; ++s) {
+                ImVec2 nMin[32];
+                ImVec2 nMax[32];
+                int    nCount = 0;
+                const ImVec2 sMin = suppressMin[s];
+                const ImVec2 sMax = suppressMax[s];
+                for (int rgi = 0; rgi < regCount; ++rgi) {
+                    const ImVec2 a = regMin[rgi];
+                    const ImVec2 b = regMax[rgi];
+                    const bool overlap =
+                        sMin.x < b.x && sMax.x > a.x &&
+                        sMin.y < b.y && sMax.y > a.y;
+                    if (!overlap) {
+                        if (nCount < 32) {
+                            nMin[nCount] = a; nMax[nCount] = b;
+                            ++nCount;
+                        }
+                        continue;
+                    }
+                    // Top band.
+                    if (sMin.y > a.y && nCount < 32) {
+                        nMin[nCount] = a;
+                        nMax[nCount] = ImVec2(b.x, sMin.y);
+                        ++nCount;
+                    }
+                    // Bottom band.
+                    if (sMax.y < b.y && nCount < 32) {
+                        nMin[nCount] = ImVec2(a.x, sMax.y);
+                        nMax[nCount] = b;
+                        ++nCount;
+                    }
+                    const float y0 = std::max(a.y, sMin.y);
+                    const float y1 = std::min(b.y, sMax.y);
+                    // Left band.
+                    if (sMin.x > a.x && y1 > y0 && nCount < 32) {
+                        nMin[nCount] = ImVec2(a.x, y0);
+                        nMax[nCount] = ImVec2(sMin.x, y1);
+                        ++nCount;
+                    }
+                    // Right band.
+                    if (sMax.x < b.x && y1 > y0 && nCount < 32) {
+                        nMin[nCount] = ImVec2(sMax.x, y0);
+                        nMax[nCount] = ImVec2(b.x, y1);
+                        ++nCount;
+                    }
+                }
+                for (int c = 0; c < nCount; ++c) {
+                    regMin[c] = nMin[c];
+                    regMax[c] = nMax[c];
+                }
+                regCount = nCount;
             }
             // Corner triangle-fan sectors. Each sector fans out
             // from `pivot` through a 90-degree arc, with the
@@ -10765,15 +10830,56 @@ private:
                     dl->PrimWriteIdx(base + 3);
                 }
             };
-            const float outerR = rr + blur;
-            const float topOuterR = rr + topH;
-            // TL: 180° -> 270° (arc goes from left edge up to top edge).
-            if (topH > 0.5f) {
-                DrawCornerFan(pTL, IM_PI, IM_PI * 1.5f, topOuterR, opTop);
-                DrawCornerFan(pTR, IM_PI * 1.5f, IM_PI * 2.0f, topOuterR, opTop);
+            // Emit the whole shadow (strips + corner fans). Called
+            // once per allowed clip region so the geometry never
+            // rasterises over a suppressed (parent menu) rect --
+            // vertices are unchanged, the scissor does the cut, so
+            // gradients stay continuous across region seams.
+            auto EmitShadow = [&]() {
+                // Straight strips only span the straight portion
+                // (skip the rr on each end) so the corner sectors
+                // pick up the missing area.
+                if (topH > 0.5f && wMax.x - rr > wMin.x + rr) {
+                    dl->AddRectFilledMultiColor(
+                        ImVec2(pTL.x, wMin.y - topH),
+                        ImVec2(pTR.x, wMin.y),
+                        clear, clear, opTop, opTop);
+                }
+                if (wMax.x - rr > wMin.x + rr) {
+                    dl->AddRectFilledMultiColor(
+                        ImVec2(pBL.x, wMax.y),
+                        ImVec2(pBR.x, wMax.y + botH),
+                        opBot, opBot, clear, clear);
+                }
+                if (wMax.y - rr > wMin.y + rr) {
+                    dl->AddRectFilledMultiColor(
+                        ImVec2(wMin.x - blur, pTL.y),
+                        ImVec2(wMin.x,        pBL.y),
+                        clear, opSide, opSide, clear);
+                    dl->AddRectFilledMultiColor(
+                        ImVec2(wMax.x,        pTR.y),
+                        ImVec2(wMax.x + blur, pBR.y),
+                        opSide, clear, clear, opSide);
+                }
+                const float outerR    = rr + blur;
+                const float topOuterR = rr + topH;
+                // TL: 180° -> 270° (left edge up to top edge).
+                if (topH > 0.5f) {
+                    DrawCornerFan(pTL, IM_PI, IM_PI * 1.5f,
+                                  topOuterR, opTop);
+                    DrawCornerFan(pTR, IM_PI * 1.5f, IM_PI * 2.0f,
+                                  topOuterR, opTop);
+                }
+                DrawCornerFan(pBR, 0.0f,        IM_PI * 0.5f,
+                              outerR, opBot);
+                DrawCornerFan(pBL, IM_PI * 0.5f, IM_PI,
+                              outerR, opBot);
+            };
+            for (int rgi = 0; rgi < regCount; ++rgi) {
+                dl->PushClipRect(regMin[rgi], regMax[rgi], false);
+                EmitShadow();
+                dl->PopClipRect();
             }
-            DrawCornerFan(pBR, 0.0f,        IM_PI * 0.5f, outerR, opBot);
-            DrawCornerFan(pBL, IM_PI * 0.5f, IM_PI,       outerR, opBot);
         }
     }
 
