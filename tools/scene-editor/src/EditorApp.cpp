@@ -827,6 +827,13 @@ public:
         DrawScriptEditorWindow();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
 
+        // Mac-style drop shadow behind floating windows, popups,
+        // and menus. Runs after all user Begin/End pairs (so every
+        // shadow-worthy window's final rect is captured) but
+        // before Render so the shadow commands land in this
+        // frame's draw data.
+        DrawMacStyleWindowShadows();
+
         ImGui::Render();
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
@@ -10613,6 +10620,108 @@ private:
     // title-bar colour + redraw the icon at the smaller scale. Called
     // AFTER ImGui::Begin() for each docked panel; a no-op for
     // non-docked windows or when the menu button isn't shown.
+    // Mac-style soft drop shadow. Iterates the frame's window list
+    // + submits a ring of translucent rounded rects OUTSIDE each
+    // shadow-worthy window (popups, modals, tool-tips, floating
+    // tool windows) to the viewport's foreground drawlist. Docked
+    // panels are skipped because dock nodes clip children flush;
+    // child windows are skipped because they're rendered inside
+    // their parent already. The shadow is rendered on the
+    // foreground layer, which sits above the popup — but because
+    // we only draw OUTSIDE the popup's rect, the popup itself is
+    // never covered. The dark rects DO cover whatever the viewport
+    // shows in that ring area, which is exactly the "shadow under
+    // the window" reading.
+    static void DrawMacStyleWindowShadows() {
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        for (int i = 0; i < g.Windows.Size; ++i) {
+            ImGuiWindow* w = g.Windows[i];
+            if (!w || !w->WasActive || w->Hidden) continue;
+            const ImGuiWindowFlags f = w->Flags;
+            // Skip child windows (embedded via BeginChild) and any
+            // window that doesn't paint its own background.
+            if (f & ImGuiWindowFlags_ChildWindow) continue;
+            if (f & ImGuiWindowFlags_NoBackground) continue;
+            // Skip docked panels -- the dock node clips their
+            // corners flush, so the shadow wouldn't line up.
+            if (w->DockIsActive) continue;
+            // Skip the dock host itself + the top-level dockspace
+            // window (its rect covers the whole viewport, no
+            // meaningful shadow ring).
+            if (w->DockNodeAsHost) continue;
+            if (f & ImGuiWindowFlags_NoDocking &&
+                (f & ImGuiWindowFlags_NoResize) &&
+                (f & ImGuiWindowFlags_NoTitleBar) &&
+                (f & ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+                // Heuristic: the DockSpaceOverViewport shell.
+                continue;
+            }
+            // Grab the viewport's foreground drawlist so the
+            // shadow renders above the target window's own
+            // drawlist (multi-viewport puts each popup on its own
+            // viewport, so this stays scoped).
+            ImDrawList* dl =
+                ImGui::GetForegroundDrawList(w->Viewport);
+            const ImVec2 wMin = w->Pos;
+            const ImVec2 wMax(w->Pos.x + w->Size.x,
+                              w->Pos.y + w->Size.y);
+            const float rounding = w->WindowRounding > 0.0f
+                ? w->WindowRounding
+                : ImGui::GetStyle().PopupRounding;
+            // Mac drops the shadow slightly below-and-to-the-
+            // right, with the offset small enough to still read
+            // as "under" the window rather than "next to" it.
+            const float offY   = 4.0f;
+            const int   layers = 6;
+            const float layerStep = 2.0f;
+            (void)rounding;
+            for (int L = layers; L >= 1; --L) {
+                const float spread = float(L) * layerStep;
+                const float alpha  = 0.06f *
+                    (1.0f - float(L - 1) / float(layers));
+                const ImU32 col = IM_COL32(0, 0, 0,
+                    int(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f));
+                // 4 side strips PLUS 4 corner pie-slices; the
+                // strips don't overlap the window body + the
+                // corners are filled with quarter-arc convex
+                // polygons so nothing lands inside the window
+                // rect (which would darken the content).
+                const float topY    = wMin.y + offY;
+                const float botY    = wMax.y + offY;
+                // Top strip.
+                dl->AddRectFilled(
+                    ImVec2(wMin.x, topY - spread),
+                    ImVec2(wMax.x, topY), col);
+                // Bottom strip.
+                dl->AddRectFilled(
+                    ImVec2(wMin.x, botY),
+                    ImVec2(wMax.x, botY + spread), col);
+                // Left strip.
+                dl->AddRectFilled(
+                    ImVec2(wMin.x - spread, topY),
+                    ImVec2(wMin.x, botY), col);
+                // Right strip.
+                dl->AddRectFilled(
+                    ImVec2(wMax.x, topY),
+                    ImVec2(wMax.x + spread, botY), col);
+                // Corner pie-slices. Each: quarter arc from the
+                // corner point out to `spread` radius, closed
+                // back to the corner point so PathFillConvex
+                // covers a soft "L" region.
+                auto Corner = [&](ImVec2 pivot, float a0, float a1) {
+                    dl->PathClear();
+                    dl->PathLineTo(pivot);
+                    dl->PathArcTo(pivot, spread, a0, a1, 12);
+                    dl->PathFillConvex(col);
+                };
+                Corner(ImVec2(wMin.x, topY), IM_PI,       IM_PI * 1.5f); // TL
+                Corner(ImVec2(wMax.x, topY), IM_PI * 1.5f, IM_PI * 2.0f); // TR
+                Corner(ImVec2(wMax.x, botY), 0.0f,        IM_PI * 0.5f);  // BR
+                Corner(ImVec2(wMin.x, botY), IM_PI * 0.5f, IM_PI);        // BL
+            }
+        }
+    }
+
     static void ShrinkPanelCollapseIcon() {
         ImGuiWindow* w = ImGui::GetCurrentWindow();
         if (!w || !w->DockNode) return;
