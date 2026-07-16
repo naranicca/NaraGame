@@ -4824,15 +4824,16 @@ private:
         m_pixelEditorDirty = false;
     }
 
-    // "New Sprite..." flow. Opens the Pixel Editor with a
-    // transparent 256x256 buffer; the Save button routes through
-    // SavePixelEditor's Save-As branch and creates the PNG on disk
-    // at that point.
+    // "New Sprite..." flow. Opens the Pixel Editor with a small
+    // transparent buffer + resize handles so the user can drag the
+    // canvas out to whatever size they need (MS Paint style). The
+    // Save button routes through SavePixelEditor's Save-As branch
+    // and creates the PNG on disk at that point.
     void DoNewSprite(const std::string& initialDir = {}) {
         const std::string dir = initialDir.empty() && m_project.IsOpen()
             ? (m_project.AssetsDir() + "/Sprites")
             : initialDir;
-        OpenBlankPixelEditor(256, 256, dir);
+        OpenBlankPixelEditor(64, 64, dir);
     }
 
     void OpenControllerEditor(const SceneEditor::AssetGuid& guid) {
@@ -8368,7 +8369,22 @@ private:
             ImGuiButtonFlags_MouseButtonMiddle);
         const bool hovered = ImGui::IsItemHovered();
         // Reupload texture if the buffer changed since last frame.
-        if (m_pixelEditorTexDirty && m_pixelEditorTex) {
+        // Recreate the whole texture instead of UpdatePixels-ing
+        // when the image dimensions changed (canvas resize path);
+        // UpdatePixels asserts on size mismatch.
+        const bool sizeChanged =
+            m_pixelEditorTex &&
+            (int(m_pixelEditorTex->Width())  != m_pixelEditorW ||
+             int(m_pixelEditorTex->Height()) != m_pixelEditorH);
+        if (sizeChanged || !m_pixelEditorTex) {
+            NaraGame::Image seed;
+            seed.width  = uint32_t(m_pixelEditorW);
+            seed.height = uint32_t(m_pixelEditorH);
+            seed.pixels = m_pixelEditorPixels;
+            m_pixelEditorTex = NaraGame::CreateTexture(
+                GetDevice(), seed, NaraGame::TextureFilter::Point);
+            m_pixelEditorTexDirty = false;
+        } else if (m_pixelEditorTexDirty) {
             m_pixelEditorTex->UpdatePixels(m_pixelEditorPixels.data());
             m_pixelEditorTexDirty = false;
         }
@@ -8507,15 +8523,186 @@ private:
                            a.y + m_pixelEditorSelH * z);
             dl->AddRect(a, b, IM_COL32(255, 255, 0, 200), 0, 0, 2.0f);
         }
-        // Tool interactions.
-        HandlePixelEditorTools(MouseToPixel);
-        // Hover cell outline.
-        int hx = -1, hy = -1;
-        if (MouseToPixel(hx, hy)) {
-            const ImVec2 a(imgMin.x + hx * z, imgMin.y + hy * z);
-            dl->AddRect(a, ImVec2(a.x + z, a.y + z),
-                        IM_COL32(255, 255, 255, 200), 0, 0, 1.5f);
+        // Canvas-resize handles. Handled BEFORE the tool dispatch so
+        // a click on a handle pre-empts the paint stroke it would
+        // otherwise trigger. Returns true when a handle drag is in
+        // progress this frame; the tool handler is skipped in that
+        // case so the pencil / eraser / etc. don't fire on release.
+        const bool resizing = HandlePixelEditorResizeHandles(
+            imgMin, imgMax, io);
+        if (!resizing) {
+            // Tool interactions.
+            HandlePixelEditorTools(MouseToPixel);
+            // Hover cell outline.
+            int hx = -1, hy = -1;
+            if (MouseToPixel(hx, hy)) {
+                const ImVec2 a(imgMin.x + hx * z,
+                               imgMin.y + hy * z);
+                dl->AddRect(a, ImVec2(a.x + z, a.y + z),
+                            IM_COL32(255, 255, 255, 200),
+                            0, 0, 1.5f);
+            }
         }
+        // Draw handles AFTER everything else so they sit on top of
+        // the image + hover outline.
+        DrawPixelEditorResizeHandles(imgMin, imgMax);
+    }
+
+    // Screen-space rect of one of the 8 canvas-resize handles.
+    // idx encoding: 0..2 = TL, T, TR; 3, 4 = L, R; 5..7 = BL, B, BR.
+    static void PixelEditorHandleRect(int idx,
+                                       ImVec2 imgMin, ImVec2 imgMax,
+                                       ImVec2& mn, ImVec2& mx) {
+        const float hs = 10.0f;  // handle screen size
+        float hx = imgMin.x, hy = imgMin.y;
+        switch (idx) {
+        case 0: hx = imgMin.x;                       hy = imgMin.y; break;
+        case 1: hx = (imgMin.x + imgMax.x) * 0.5f;    hy = imgMin.y; break;
+        case 2: hx = imgMax.x;                       hy = imgMin.y; break;
+        case 3: hx = imgMin.x;                       hy = (imgMin.y + imgMax.y) * 0.5f; break;
+        case 4: hx = imgMax.x;                       hy = (imgMin.y + imgMax.y) * 0.5f; break;
+        case 5: hx = imgMin.x;                       hy = imgMax.y; break;
+        case 6: hx = (imgMin.x + imgMax.x) * 0.5f;    hy = imgMax.y; break;
+        case 7: hx = imgMax.x;                       hy = imgMax.y; break;
+        }
+        mn = ImVec2(hx - hs * 0.5f, hy - hs * 0.5f);
+        mx = ImVec2(hx + hs * 0.5f, hy + hs * 0.5f);
+    }
+
+    // Draw 8 small filled squares on the image edges + corners so
+    // the user has something visible to grab for the MS Paint-style
+    // resize. Handles hovered / actively-dragged get an accent
+    // colour, others are white with a thin border.
+    void DrawPixelEditorResizeHandles(ImVec2 imgMin, ImVec2 imgMax) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        for (int i = 0; i < 8; ++i) {
+            ImVec2 mn, mx;
+            PixelEditorHandleRect(i, imgMin, imgMax, mn, mx);
+            const bool active =
+                (m_pixelEditorResizeHandle == i);
+            const bool hover = !active &&
+                mp.x >= mn.x && mp.x <= mx.x &&
+                mp.y >= mn.y && mp.y <= mx.y;
+            const ImU32 fill = active
+                ? IM_COL32( 66, 150, 250, 255)
+                : (hover ? IM_COL32(160, 200, 255, 255)
+                         : IM_COL32(255, 255, 255, 240));
+            dl->AddRectFilled(mn, mx, fill);
+            dl->AddRect(mn, mx, IM_COL32(30, 30, 30, 255));
+        }
+    }
+
+    // Returns true when a handle is being dragged this frame (so
+    // the caller can skip the tool dispatch). Handles the whole
+    // press -> live-resize -> release cycle in one place.
+    bool HandlePixelEditorResizeHandles(ImVec2 imgMin, ImVec2 imgMax,
+                                         const ImGuiIO& io) {
+        const bool leftDown =
+            ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        // Start: mouse pressed AND cursor over a handle rect.
+        if (m_pixelEditorResizeHandle == -1) {
+            if (!ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                return false;
+            }
+            for (int i = 0; i < 8; ++i) {
+                ImVec2 mn, mx;
+                PixelEditorHandleRect(i, imgMin, imgMax, mn, mx);
+                if (io.MousePos.x >= mn.x && io.MousePos.x <= mx.x &&
+                    io.MousePos.y >= mn.y && io.MousePos.y <= mx.y) {
+                    m_pixelEditorResizeHandle    = i;
+                    m_pixelEditorResizeStartW    = m_pixelEditorW;
+                    m_pixelEditorResizeStartH    = m_pixelEditorH;
+                    m_pixelEditorResizeStartMouse = io.MousePos;
+                    m_pixelEditorResizeStartBuffer = m_pixelEditorPixels;
+                    PixelEditorPushUndo();
+                    return true;
+                }
+            }
+            return false;
+        }
+        // In-progress: compute new dimensions from screen-space
+        // delta and rebuild the buffer from the captured start
+        // snapshot.
+        const int idx = m_pixelEditorResizeHandle;
+        const bool leftEdge   = (idx == 0 || idx == 3 || idx == 5);
+        const bool rightEdge  = (idx == 2 || idx == 4 || idx == 7);
+        const bool topEdge    = (idx == 0 || idx == 1 || idx == 2);
+        const bool bottomEdge = (idx == 5 || idx == 6 || idx == 7);
+        const float z = m_pixelEditorZoom;
+        const float dxScr =
+            io.MousePos.x - m_pixelEditorResizeStartMouse.x;
+        const float dyScr =
+            io.MousePos.y - m_pixelEditorResizeStartMouse.y;
+        const int dxPx = int(std::round(dxScr / z));
+        const int dyPx = int(std::round(dyScr / z));
+        int newW = m_pixelEditorResizeStartW;
+        int newH = m_pixelEditorResizeStartH;
+        int offsetX = 0;
+        int offsetY = 0;
+        if (leftEdge) {
+            newW    = m_pixelEditorResizeStartW - dxPx;
+            offsetX = -dxPx;  // start-buffer origin shifts in new
+        } else if (rightEdge) {
+            newW = m_pixelEditorResizeStartW + dxPx;
+        }
+        if (topEdge) {
+            newH    = m_pixelEditorResizeStartH - dyPx;
+            offsetY = -dyPx;
+        } else if (bottomEdge) {
+            newH = m_pixelEditorResizeStartH + dyPx;
+        }
+        newW = std::max(1, newW);
+        newH = std::max(1, newH);
+        if (newW != m_pixelEditorW || newH != m_pixelEditorH) {
+            RebuildPixelBufferForResize(newW, newH, offsetX, offsetY);
+        }
+        if (!leftDown) {
+            m_pixelEditorResizeHandle = -1;
+            m_pixelEditorResizeStartBuffer.clear();
+            m_pixelEditorResizeStartBuffer.shrink_to_fit();
+        }
+        return true;
+    }
+
+    // Allocate a fresh newW*newH*4 RGBA buffer, blit the captured
+    // start-buffer content at (offsetX, offsetY), and swap into the
+    // live pixel buffer. Pixels that fall outside the new bounds
+    // are dropped; pixels not covered by the copy stay transparent.
+    void RebuildPixelBufferForResize(int newW, int newH,
+                                      int offsetX, int offsetY) {
+        std::vector<uint8_t> next(size_t(newW) * newH * 4, 0);
+        const int srcW = m_pixelEditorResizeStartW;
+        const int srcH = m_pixelEditorResizeStartH;
+        for (int sy = 0; sy < srcH; ++sy) {
+            const int dy = sy + offsetY;
+            if (dy < 0 || dy >= newH) continue;
+            for (int sx = 0; sx < srcW; ++sx) {
+                const int dx = sx + offsetX;
+                if (dx < 0 || dx >= newW) continue;
+                const size_t so =
+                    (size_t(sy) * srcW + sx) * 4;
+                const size_t doff =
+                    (size_t(dy) * newW + dx) * 4;
+                next[doff    ] = m_pixelEditorResizeStartBuffer[so    ];
+                next[doff + 1] = m_pixelEditorResizeStartBuffer[so + 1];
+                next[doff + 2] = m_pixelEditorResizeStartBuffer[so + 2];
+                next[doff + 3] = m_pixelEditorResizeStartBuffer[so + 3];
+            }
+        }
+        m_pixelEditorPixels = std::move(next);
+        m_pixelEditorW      = newW;
+        m_pixelEditorH      = newH;
+        // Anything the tool state referenced by pixel coords may
+        // now be out of bounds; simplest safe response is to drop
+        // the current selection.
+        m_pixelEditorSelW        = 0;
+        m_pixelEditorSelH        = 0;
+        m_pixelEditorSelDragging = false;
+        m_pixelEditorDirty       = true;
+        // Force the render path to recreate the RHITexture (it uses
+        // sizeChanged check based on Width/Height).
+        m_pixelEditorTexDirty    = true;
     }
 
     // Per-tool mouse handling. Called from DrawPixelEditorCanvas so
@@ -16221,6 +16408,14 @@ private:
     // pixels across the canvas.
     bool                m_pixelEditorGridShow = false;
     int                 m_pixelEditorGridSize = 16;
+    // Canvas-resize state (MS Paint-style handles at the 4 corners
+    // + 4 edge midpoints). ResizeHandle in [0,7]: 0..2 = TL/T/TR,
+    // 3/4 = L/R, 5..7 = BL/B/BR. -1 = not resizing.
+    int                 m_pixelEditorResizeHandle = -1;
+    int                 m_pixelEditorResizeStartW = 0;
+    int                 m_pixelEditorResizeStartH = 0;
+    ImVec2              m_pixelEditorResizeStartMouse{0, 0};
+    std::vector<uint8_t> m_pixelEditorResizeStartBuffer;
     // Tileset Editor follows the same activation pattern.
     bool                m_tilesetEditorOpen     = false;
     bool                m_tilesetEditorActivate = false;
