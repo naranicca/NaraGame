@@ -10673,6 +10673,11 @@ private:
                 // Heuristic: the DockSpaceOverViewport shell.
                 continue;
             }
+            // Skip the main menu bar strip -- it's a fixed chrome
+            // element flush with the viewport top, not a floating
+            // surface, so a drop shadow under it reads as a stray
+            // dark line across the panels below.
+            if (std::strcmp(w->Name, "##MainMenuBar") == 0) continue;
             // Grab the viewport's foreground drawlist so the
             // shadow renders above the target window's own
             // drawlist (multi-viewport puts each popup on its own
