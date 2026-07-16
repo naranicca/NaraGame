@@ -8128,6 +8128,23 @@ private:
             m_pixelEditorColor = ImVec4{c[0], c[1], c[2], c[3]};
         }
         ImGui::Separator();
+        ImGui::TextDisabled("Canvas size");
+        // Direct-input resize. SpinDragInt returns true on any
+        // value change (drag delta, spinner tick, typed input);
+        // apply immediately so the canvas visibly reflects the
+        // spinner as the user drags. The drag / spinner path
+        // clamps to [1, 4096] and only fires on real changes, so
+        // we don't need extra debouncing.
+        int draftW = m_pixelEditorW;
+        int draftH = m_pixelEditorH;
+        const bool wChanged =
+            SpinDragInt("Width",  &draftW, 1.0f, 1, 4096);
+        const bool hChanged =
+            SpinDragInt("Height", &draftH, 1.0f, 1, 4096);
+        if (wChanged || hChanged) {
+            ResizePixelBufferAnchoredTopLeft(draftW, draftH);
+        }
+        ImGui::Separator();
         NGCheckbox("Grid", &m_pixelEditorGridShow);
         ImGui::BeginDisabled(!m_pixelEditorGridShow);
         SpinDragInt("Grid size", &m_pixelEditorGridSize,
@@ -8739,29 +8756,27 @@ private:
         return true;
     }
 
-    // Allocate a fresh newW*newH*4 RGBA buffer, blit the captured
-    // start-buffer content at (offsetX, offsetY), and swap into the
-    // live pixel buffer. Pixels that fall outside the new bounds
-    // are dropped; pixels not covered by the copy stay transparent.
-    void RebuildPixelBufferForResize(int newW, int newH,
-                                      int offsetX, int offsetY) {
+    // Allocate a fresh newW*newH*4 RGBA buffer, blit `src` into it
+    // at (offsetX, offsetY), and swap into the live pixel buffer.
+    // Pixels that fall outside the new bounds are dropped; pixels
+    // not covered by the copy stay transparent.
+    void ApplyPixelBufferResize(int newW, int newH,
+                                 int offsetX, int offsetY,
+                                 int srcW, int srcH,
+                                 const std::vector<uint8_t>& src) {
         std::vector<uint8_t> next(size_t(newW) * newH * 4, 0);
-        const int srcW = m_pixelEditorResizeStartW;
-        const int srcH = m_pixelEditorResizeStartH;
         for (int sy = 0; sy < srcH; ++sy) {
             const int dy = sy + offsetY;
             if (dy < 0 || dy >= newH) continue;
             for (int sx = 0; sx < srcW; ++sx) {
                 const int dx = sx + offsetX;
                 if (dx < 0 || dx >= newW) continue;
-                const size_t so =
-                    (size_t(sy) * srcW + sx) * 4;
-                const size_t doff =
-                    (size_t(dy) * newW + dx) * 4;
-                next[doff    ] = m_pixelEditorResizeStartBuffer[so    ];
-                next[doff + 1] = m_pixelEditorResizeStartBuffer[so + 1];
-                next[doff + 2] = m_pixelEditorResizeStartBuffer[so + 2];
-                next[doff + 3] = m_pixelEditorResizeStartBuffer[so + 3];
+                const size_t so   = (size_t(sy) * srcW + sx) * 4;
+                const size_t doff = (size_t(dy) * newW + dx) * 4;
+                next[doff    ] = src[so    ];
+                next[doff + 1] = src[so + 1];
+                next[doff + 2] = src[so + 2];
+                next[doff + 3] = src[so + 3];
             }
         }
         m_pixelEditorPixels = std::move(next);
@@ -8777,6 +8792,31 @@ private:
         // Force the render path to recreate the RHITexture (it uses
         // sizeChanged check based on Width/Height).
         m_pixelEditorTexDirty    = true;
+    }
+
+    // Handle-drag path: reads from the pre-drag snapshot every
+    // frame so a wobbly drag doesn't accumulate copy errors.
+    void RebuildPixelBufferForResize(int newW, int newH,
+                                      int offsetX, int offsetY) {
+        ApplyPixelBufferResize(newW, newH, offsetX, offsetY,
+            m_pixelEditorResizeStartW,
+            m_pixelEditorResizeStartH,
+            m_pixelEditorResizeStartBuffer);
+    }
+
+    // Direct-input path used by the Canvas size spinners: takes
+    // a snapshot of the current buffer, then rebuilds anchored to
+    // the top-left (extra pixels appear right/bottom; cropped
+    // pixels are lost from those edges). No undo push here --
+    // SpinDragInt already snapshots on drag activation + spinner
+    // initial click, so it's a single undo per editing session.
+    void ResizePixelBufferAnchoredTopLeft(int newW, int newH) {
+        if (newW < 1) newW = 1;
+        if (newH < 1) newH = 1;
+        if (newW == m_pixelEditorW && newH == m_pixelEditorH) return;
+        std::vector<uint8_t> src = m_pixelEditorPixels;
+        ApplyPixelBufferResize(newW, newH, 0, 0,
+            m_pixelEditorW, m_pixelEditorH, src);
     }
 
     // Per-tool mouse handling. Called from DrawPixelEditorCanvas so
