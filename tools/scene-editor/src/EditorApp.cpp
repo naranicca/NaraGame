@@ -10763,79 +10763,90 @@ private:
             const ImVec2 qTR(shMax.x - rr, shMin.y + rr);
             const ImVec2 qBR(shMax.x - rr, shMax.y - rr);
             const ImVec2 qBL(shMin.x + rr, shMax.y - rr);
-            // The window occludes its own (shifted) shadow.
+            // The window occludes its own (shifted) shadow. Record
+            // its index -- the corner-notch pass below needs to run
+            // WITHOUT this one entry (the notches live inside the
+            // window's bounding rect but outside its rounded
+            // pixels).
+            const int ownIdx = suppressCount;
             if (suppressCount < 16) {
                 suppressMin[suppressCount] = wMin;
                 suppressMax[suppressCount] = wMax;
                 ++suppressCount;
             }
-            // Compute the clip regions the shadow may draw into:
-            // the shadow's bounding box minus every suppression
-            // rect (own window + parent menus + windows above).
-            // Axis-aligned subtraction of one rect from another
-            // yields at most 4 rects, so the region list stays
-            // small for realistic stacking depths.
+            // Region machinery: subtract every suppression rect
+            // (except skipIdx) from a seed rect. Axis-aligned
+            // subtraction of one rect from another yields at most
+            // 4 rects, so the region list stays small for realistic
+            // stacking depths. Results land in regMin/regMax.
             constexpr int kMaxRegions = 64;
             ImVec2 regMin[kMaxRegions];
             ImVec2 regMax[kMaxRegions];
-            int    regCount = 0;
-            regMin[0] = ImVec2(shMin.x - blur, shMin.y - blur);
-            regMax[0] = ImVec2(shMax.x + blur, shMax.y + blur);
-            regCount  = 1;
-            for (int s = 0; s < suppressCount; ++s) {
-                ImVec2 nMin[kMaxRegions];
-                ImVec2 nMax[kMaxRegions];
-                int    nCount = 0;
-                const ImVec2 sMin = suppressMin[s];
-                const ImVec2 sMax = suppressMax[s];
-                for (int rgi = 0; rgi < regCount; ++rgi) {
-                    const ImVec2 a = regMin[rgi];
-                    const ImVec2 b = regMax[rgi];
-                    const bool overlap =
-                        sMin.x < b.x && sMax.x > a.x &&
-                        sMin.y < b.y && sMax.y > a.y;
-                    if (!overlap) {
-                        if (nCount < kMaxRegions) {
-                            nMin[nCount] = a; nMax[nCount] = b;
+            auto SubtractRegions = [&](ImVec2 seedMin, ImVec2 seedMax,
+                                        int skipIdx) -> int {
+                regMin[0] = seedMin;
+                regMax[0] = seedMax;
+                int count = 1;
+                for (int s = 0; s < suppressCount; ++s) {
+                    if (s == skipIdx) continue;
+                    ImVec2 nMin[kMaxRegions];
+                    ImVec2 nMax[kMaxRegions];
+                    int    nCount = 0;
+                    const ImVec2 sMin = suppressMin[s];
+                    const ImVec2 sMax = suppressMax[s];
+                    for (int rgi = 0; rgi < count; ++rgi) {
+                        const ImVec2 a = regMin[rgi];
+                        const ImVec2 b = regMax[rgi];
+                        const bool overlap =
+                            sMin.x < b.x && sMax.x > a.x &&
+                            sMin.y < b.y && sMax.y > a.y;
+                        if (!overlap) {
+                            if (nCount < kMaxRegions) {
+                                nMin[nCount] = a; nMax[nCount] = b;
+                                ++nCount;
+                            }
+                            continue;
+                        }
+                        // Top band.
+                        if (sMin.y > a.y && nCount < kMaxRegions) {
+                            nMin[nCount] = a;
+                            nMax[nCount] = ImVec2(b.x, sMin.y);
                             ++nCount;
                         }
-                        continue;
+                        // Bottom band.
+                        if (sMax.y < b.y && nCount < kMaxRegions) {
+                            nMin[nCount] = ImVec2(a.x, sMax.y);
+                            nMax[nCount] = b;
+                            ++nCount;
+                        }
+                        const float y0 = std::max(a.y, sMin.y);
+                        const float y1 = std::min(b.y, sMax.y);
+                        // Left band.
+                        if (sMin.x > a.x && y1 > y0 &&
+                            nCount < kMaxRegions) {
+                            nMin[nCount] = ImVec2(a.x, y0);
+                            nMax[nCount] = ImVec2(sMin.x, y1);
+                            ++nCount;
+                        }
+                        // Right band.
+                        if (sMax.x < b.x && y1 > y0 &&
+                            nCount < kMaxRegions) {
+                            nMin[nCount] = ImVec2(sMax.x, y0);
+                            nMax[nCount] = ImVec2(b.x, y1);
+                            ++nCount;
+                        }
                     }
-                    // Top band.
-                    if (sMin.y > a.y && nCount < kMaxRegions) {
-                        nMin[nCount] = a;
-                        nMax[nCount] = ImVec2(b.x, sMin.y);
-                        ++nCount;
+                    for (int c = 0; c < nCount; ++c) {
+                        regMin[c] = nMin[c];
+                        regMax[c] = nMax[c];
                     }
-                    // Bottom band.
-                    if (sMax.y < b.y && nCount < kMaxRegions) {
-                        nMin[nCount] = ImVec2(a.x, sMax.y);
-                        nMax[nCount] = b;
-                        ++nCount;
-                    }
-                    const float y0 = std::max(a.y, sMin.y);
-                    const float y1 = std::min(b.y, sMax.y);
-                    // Left band.
-                    if (sMin.x > a.x && y1 > y0 &&
-                        nCount < kMaxRegions) {
-                        nMin[nCount] = ImVec2(a.x, y0);
-                        nMax[nCount] = ImVec2(sMin.x, y1);
-                        ++nCount;
-                    }
-                    // Right band.
-                    if (sMax.x < b.x && y1 > y0 &&
-                        nCount < kMaxRegions) {
-                        nMin[nCount] = ImVec2(sMax.x, y0);
-                        nMax[nCount] = ImVec2(b.x, y1);
-                        ++nCount;
-                    }
+                    count = nCount;
                 }
-                for (int c = 0; c < nCount; ++c) {
-                    regMin[c] = nMin[c];
-                    regMax[c] = nMax[c];
-                }
-                regCount = nCount;
-            }
+                return count;
+            };
+            int regCount = SubtractRegions(
+                ImVec2(shMin.x - blur, shMin.y - blur),
+                ImVec2(shMax.x + blur, shMax.y + blur), -1);
             // Corner triangle-fan sectors. Each sector fans out
             // from `pivot` through a 90-degree arc, with the
             // inner ring at radius rr (matching the window's
@@ -10947,6 +10958,105 @@ private:
                 dl->PushClipRect(regMin[rgi], regMax[rgi], false);
                 EmitShadow();
                 dl->PopClipRect();
+            }
+            // Corner notches. The own-window suppression above uses
+            // the square bounding rect, but the window's pixels are
+            // rounded -- so the little square-minus-quarter-disc
+            // notch at each corner is background that still needs
+            // shadow, and the main pass just clipped it out. Fill
+            // each notch with triangles fanning from the window's
+            // own corner arc out to the bounding-rect corner, with
+            // per-vertex alpha sampled from the shifted-rounded-
+            // rect distance field the strips/fans encode -- so the
+            // notch shading continues the surrounding gradient
+            // exactly. Clipped against the OTHER suppression rects
+            // (skip ownIdx) so notches still respect windows above
+            // us / parent menus.
+            if (rr > 0.5f) {
+                const ImVec2 shC((shMin.x + shMax.x) * 0.5f,
+                                 (shMin.y + shMax.y) * 0.5f);
+                const float shHx = (shMax.x - shMin.x) * 0.5f - rr;
+                const float shHy = (shMax.y - shMin.y) * 0.5f - rr;
+                auto NotchCol = [&](ImVec2 p) -> ImU32 {
+                    const float qx = std::max(
+                        std::fabs(p.x - shC.x) - shHx, 0.0f);
+                    const float qy = std::max(
+                        std::fabs(p.y - shC.y) - shHy, 0.0f);
+                    const float d =
+                        std::sqrt(qx * qx + qy * qy) - rr;
+                    const float t = 1.0f - std::clamp(
+                        d / blur, 0.0f, 1.0f);
+                    return IM_COL32(0, 0, 0,
+                                    int(46.0f * t + 0.5f));
+                };
+                auto EmitNotch = [&](ImVec2 pivot, ImVec2 k,
+                                      float a0, float a1) {
+                    const int segs = 8;
+                    const ImVec2 uv = dl->_Data->TexUvWhitePixel;
+                    const ImU32 kCol = NotchCol(k);
+                    for (int sgi = 0; sgi < segs; ++sgi) {
+                        const float t0 = a0 + (a1 - a0) *
+                            (float(sgi)     / segs);
+                        const float t1 = a0 + (a1 - a0) *
+                            (float(sgi + 1) / segs);
+                        const ImVec2 A(
+                            pivot.x + std::cos(t0) * rr,
+                            pivot.y + std::sin(t0) * rr);
+                        const ImVec2 B(
+                            pivot.x + std::cos(t1) * rr,
+                            pivot.y + std::sin(t1) * rr);
+                        const ImDrawIdx base =
+                            static_cast<ImDrawIdx>(
+                                dl->_VtxCurrentIdx);
+                        dl->PrimReserve(3, 3);
+                        dl->PrimWriteVtx(A, uv, NotchCol(A));
+                        dl->PrimWriteVtx(B, uv, NotchCol(B));
+                        dl->PrimWriteVtx(k, uv, kCol);
+                        dl->PrimWriteIdx(base + 0);
+                        dl->PrimWriteIdx(base + 1);
+                        dl->PrimWriteIdx(base + 2);
+                    }
+                };
+                struct NotchDef {
+                    ImVec2 sqMin, sqMax, pivot, k;
+                    float a0, a1;
+                };
+                const NotchDef notches[4] = {
+                    // TL
+                    { ImVec2(wMin.x, wMin.y),
+                      ImVec2(wMin.x + rr, wMin.y + rr),
+                      ImVec2(wMin.x + rr, wMin.y + rr),
+                      ImVec2(wMin.x, wMin.y),
+                      IM_PI, IM_PI * 1.5f },
+                    // TR
+                    { ImVec2(wMax.x - rr, wMin.y),
+                      ImVec2(wMax.x, wMin.y + rr),
+                      ImVec2(wMax.x - rr, wMin.y + rr),
+                      ImVec2(wMax.x, wMin.y),
+                      IM_PI * 1.5f, IM_PI * 2.0f },
+                    // BR
+                    { ImVec2(wMax.x - rr, wMax.y - rr),
+                      ImVec2(wMax.x, wMax.y),
+                      ImVec2(wMax.x - rr, wMax.y - rr),
+                      ImVec2(wMax.x, wMax.y),
+                      0.0f, IM_PI * 0.5f },
+                    // BL
+                    { ImVec2(wMin.x, wMax.y - rr),
+                      ImVec2(wMin.x + rr, wMax.y),
+                      ImVec2(wMin.x + rr, wMax.y - rr),
+                      ImVec2(wMin.x, wMax.y),
+                      IM_PI * 0.5f, IM_PI },
+                };
+                for (const NotchDef& n : notches) {
+                    const int nRegs = SubtractRegions(
+                        n.sqMin, n.sqMax, ownIdx);
+                    for (int rgi = 0; rgi < nRegs; ++rgi) {
+                        dl->PushClipRect(regMin[rgi],
+                                         regMax[rgi], false);
+                        EmitNotch(n.pivot, n.k, n.a0, n.a1);
+                        dl->PopClipRect();
+                    }
+                }
             }
         }
     }
