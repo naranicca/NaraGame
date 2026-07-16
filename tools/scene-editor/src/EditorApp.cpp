@@ -10668,73 +10668,112 @@ private:
             const float rounding = w->WindowRounding > 0.0f
                 ? w->WindowRounding
                 : ImGui::GetStyle().PopupRounding;
-            // Mac-style drop shadow. Instead of stacking many
-            // constant-alpha rings (visible banding on a light
-            // background) we use AddRectFilledMultiColor to draw
-            // 4 side strips + 4 corner quads that share a single
-            // opaque colour at the window edge and fade linearly
-            // to clear at the outer edge. Vertex-colour
-            // interpolation gives a smooth gradient with no
-            // stepping artefacts.
+            // Mac-style drop shadow. Uses vertex-colour gradients
+            // (no banding) and tracks the window's rounded
+            // corners so the ring hugs the actual pixel shape
+            // rather than the bounding rect.
             //
-            // Offset shifts the shadow slightly down, so:
-            //  - top strip is thinner than blur (blur - offY)
-            //  - bottom strip is thicker (blur + offY)
-            //  - bottom colour is slightly darker than top so the
-            //    window reads as "lit from above".
-            (void)rounding;
+            // Straight-edge shadow: 4 gradient strips inset by
+            // `rounding` so they only cover the straight portion
+            // of each side.
+            // Corner shadow: 4 triangle-fan sectors, each with an
+            // inner ring at radius=rounding (opaque) and an
+            // outer ring at radius=rounding+blur (clear).
+            //
+            // Offset shifts the shadow slightly down, so bottom
+            // side is thicker + a touch darker.
             const float offY = 4.0f;
             const float blur = 12.0f;
-            const ImU32 clear   = IM_COL32(0, 0, 0, 0);
-            const ImU32 opTop   = IM_COL32(0, 0, 0, 32);
-            const ImU32 opSide  = IM_COL32(0, 0, 0, 40);
-            const ImU32 opBot   = IM_COL32(0, 0, 0, 52);
-            const float topH = std::max(0.0f, blur - offY);
-            const float botH = blur + offY;
-            // Top strip (only if the offset lets the shadow
-            // extend above the window at all).
-            if (topH > 0.5f) {
+            const float rr   = std::max(0.0f, rounding);
+            const ImU32 clear  = IM_COL32(0, 0, 0, 0);
+            const ImU32 opTop  = IM_COL32(0, 0, 0, 32);
+            const ImU32 opSide = IM_COL32(0, 0, 0, 40);
+            const ImU32 opBot  = IM_COL32(0, 0, 0, 52);
+            const float topH   = std::max(0.0f, blur - offY);
+            const float botH   = blur + offY;
+            // Corner-ring centres are the rounded corner arc
+            // centres, i.e. inset from wMin/wMax by rr on both
+            // axes.
+            const ImVec2 pTL(wMin.x + rr, wMin.y + rr);
+            const ImVec2 pTR(wMax.x - rr, wMin.y + rr);
+            const ImVec2 pBR(wMax.x - rr, wMax.y - rr);
+            const ImVec2 pBL(wMin.x + rr, wMax.y - rr);
+            // Straight strips only span the straight portion
+            // (skip the rr on each end) so the corner sectors
+            // pick up the missing area.
+            if (topH > 0.5f && wMax.x - rr > wMin.x + rr) {
                 dl->AddRectFilledMultiColor(
-                    ImVec2(wMin.x, wMin.y - topH),
-                    ImVec2(wMax.x, wMin.y),
+                    ImVec2(pTL.x, wMin.y - topH),
+                    ImVec2(pTR.x, wMin.y),
                     clear, clear, opTop, opTop);
-                // TL corner: opaque at window corner, clear at
-                // the outer diagonal corner.
-                dl->AddRectFilledMultiColor(
-                    ImVec2(wMin.x - blur, wMin.y - topH),
-                    ImVec2(wMin.x,        wMin.y),
-                    clear, clear, opTop, clear);
-                // TR corner.
-                dl->AddRectFilledMultiColor(
-                    ImVec2(wMax.x,        wMin.y - topH),
-                    ImVec2(wMax.x + blur, wMin.y),
-                    clear, clear, clear, opTop);
             }
-            // Bottom strip.
-            dl->AddRectFilledMultiColor(
-                ImVec2(wMin.x, wMax.y),
-                ImVec2(wMax.x, wMax.y + botH),
-                opBot, opBot, clear, clear);
-            // BL corner.
-            dl->AddRectFilledMultiColor(
-                ImVec2(wMin.x - blur, wMax.y),
-                ImVec2(wMin.x,        wMax.y + botH),
-                clear, opBot, clear, clear);
-            // BR corner.
-            dl->AddRectFilledMultiColor(
-                ImVec2(wMax.x,        wMax.y),
-                ImVec2(wMax.x + blur, wMax.y + botH),
-                opBot, clear, clear, clear);
-            // Left strip.
-            dl->AddRectFilledMultiColor(
-                ImVec2(wMin.x - blur, wMin.y),
-                ImVec2(wMin.x,        wMax.y),
-                clear, opSide, opSide, clear);
-            // Right strip.
-            dl->AddRectFilledMultiColor(
-                ImVec2(wMax.x,        wMin.y),
-                ImVec2(wMax.x + blur, wMax.y),
-                opSide, clear, clear, opSide);
+            if (wMax.x - rr > wMin.x + rr) {
+                dl->AddRectFilledMultiColor(
+                    ImVec2(pBL.x, wMax.y),
+                    ImVec2(pBR.x, wMax.y + botH),
+                    opBot, opBot, clear, clear);
+            }
+            if (wMax.y - rr > wMin.y + rr) {
+                dl->AddRectFilledMultiColor(
+                    ImVec2(wMin.x - blur, pTL.y),
+                    ImVec2(wMin.x,        pBL.y),
+                    clear, opSide, opSide, clear);
+                dl->AddRectFilledMultiColor(
+                    ImVec2(wMax.x,        pTR.y),
+                    ImVec2(wMax.x + blur, pBR.y),
+                    opSide, clear, clear, opSide);
+            }
+            // Corner triangle-fan sectors. Each sector fans out
+            // from `pivot` through a 90-degree arc, with the
+            // inner ring at radius rr (matching the window's
+            // rounded corner) held at opaque and the outer ring
+            // at radius rr+blur held at clear. Segments give the
+            // arc its curve.
+            auto DrawCornerFan = [&](ImVec2 pivot, float a0, float a1,
+                                      float outerR, ImU32 opCol) {
+                const int segs = 10;
+                for (int i = 0; i < segs; ++i) {
+                    const float t0   = float(i)     / segs;
+                    const float t1   = float(i + 1) / segs;
+                    const float ang0 = a0 + (a1 - a0) * t0;
+                    const float ang1 = a0 + (a1 - a0) * t1;
+                    const float c0 = std::cos(ang0);
+                    const float s0 = std::sin(ang0);
+                    const float c1 = std::cos(ang1);
+                    const float s1 = std::sin(ang1);
+                    const ImVec2 iA(pivot.x + c0 * rr,      pivot.y + s0 * rr);
+                    const ImVec2 iB(pivot.x + c1 * rr,      pivot.y + s1 * rr);
+                    const ImVec2 oA(pivot.x + c0 * outerR,  pivot.y + s0 * outerR);
+                    const ImVec2 oB(pivot.x + c1 * outerR,  pivot.y + s1 * outerR);
+                    // Quad (iA, iB, oB, oA) with iA/iB opaque,
+                    // oA/oB clear. AddRectFilledMultiColor only
+                    // does axis-aligned rects, so drop to
+                    // PrimReserve for a manual quad.
+                    const ImDrawIdx base =
+                        static_cast<ImDrawIdx>(dl->_VtxCurrentIdx);
+                    dl->PrimReserve(6, 4);
+                    const ImVec2 uv = dl->_Data->TexUvWhitePixel;
+                    dl->PrimWriteVtx(iA, uv, opCol);
+                    dl->PrimWriteVtx(iB, uv, opCol);
+                    dl->PrimWriteVtx(oB, uv, clear);
+                    dl->PrimWriteVtx(oA, uv, clear);
+                    dl->PrimWriteIdx(base + 0);
+                    dl->PrimWriteIdx(base + 1);
+                    dl->PrimWriteIdx(base + 2);
+                    dl->PrimWriteIdx(base + 0);
+                    dl->PrimWriteIdx(base + 2);
+                    dl->PrimWriteIdx(base + 3);
+                }
+            };
+            const float outerR = rr + blur;
+            const float topOuterR = rr + topH;
+            // TL: 180° -> 270° (arc goes from left edge up to top edge).
+            if (topH > 0.5f) {
+                DrawCornerFan(pTL, IM_PI, IM_PI * 1.5f, topOuterR, opTop);
+                DrawCornerFan(pTR, IM_PI * 1.5f, IM_PI * 2.0f, topOuterR, opTop);
+            }
+            DrawCornerFan(pBR, 0.0f,        IM_PI * 0.5f, outerR, opBot);
+            DrawCornerFan(pBL, IM_PI * 0.5f, IM_PI,       outerR, opBot);
         }
     }
 
