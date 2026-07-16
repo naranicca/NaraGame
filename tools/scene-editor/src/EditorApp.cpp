@@ -10640,7 +10640,13 @@ private:
             const ImGuiWindowFlags f = w->Flags;
             // Skip child windows (embedded via BeginChild) and any
             // window that doesn't paint its own background.
-            if (f & ImGuiWindowFlags_ChildWindow) continue;
+            // EXCEPTION: submenus opened from another menu carry
+            // ImGuiWindowFlags_ChildWindow (so hovering can cross
+            // between parent and child), but they're visually
+            // free-floating popups and deserve a shadow like any
+            // other menu.
+            if ((f & ImGuiWindowFlags_ChildWindow) &&
+                !(f & ImGuiWindowFlags_ChildMenu)) continue;
             if (f & ImGuiWindowFlags_NoBackground) continue;
             // Skip docked panels -- the dock node clips their
             // corners flush, so the shadow wouldn't line up.
@@ -10688,7 +10694,13 @@ private:
                  j < g.Windows.Size && suppressCount < 16; ++j) {
                 ImGuiWindow* o = g.Windows[j];
                 if (!o || !o->WasActive || o->Hidden) continue;
-                if (o->Flags & ImGuiWindowFlags_ChildWindow) continue;
+                // Same child-window exception as the shadow filter
+                // above: submenus are flagged ChildWindow but
+                // occlude like any other popup -- without this the
+                // parent menu's right-side shadow paints across
+                // the submenu that opened from it.
+                if ((o->Flags & ImGuiWindowFlags_ChildWindow) &&
+                    !(o->Flags & ImGuiWindowFlags_ChildMenu)) continue;
                 if (o->Flags & ImGuiWindowFlags_NoBackground) continue;
                 if (o->Viewport != w->Viewport) continue;
                 suppressMin[suppressCount] = o->Pos;
