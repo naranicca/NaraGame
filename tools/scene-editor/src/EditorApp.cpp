@@ -10671,53 +10671,60 @@ private:
             // Mac drops the shadow slightly below-and-to-the-
             // right, with the offset small enough to still read
             // as "under" the window rather than "next to" it.
-            const float offY   = 4.0f;
-            const int   layers = 6;
-            const float layerStep = 2.0f;
+            //
+            // Think of the shadow as a soft-blurred copy of the
+            // window rect, shifted by (0, offY). For each falloff
+            // layer L we consider a "shadow rect" expanded by
+            // spread=L*step in all 4 directions:
+            //   shTop    = wMin.y + offY - spread
+            //   shBot    = wMax.y + offY + spread
+            //   shLeft   = wMin.x        - spread
+            //   shRight  = wMax.x        + spread
+            // The visible dark area is the intersection of that
+            // shadow rect with everything OUTSIDE the window rect
+            // (drawing inside would darken the window content).
+            // We approximate that ring with 4 strips whose union
+            // never overlaps (wMin..wMax, wMin.y..wMax.y):
+            //   Top strip:    full-width, y in [shTop, wMin.y]
+            //   Bottom strip: full-width, y in [wMax.y, shBot]
+            //   Left strip:   window-height y range, x in [shLeft, wMin.x]
+            //   Right strip:  window-height y range, x in [wMax.x, shRight]
+            // Full-width top/bottom means the corner regions get
+            // exactly the same darkness as the vertical sides
+            // -- soft convex shape without double-stacking at
+            // the corners. Skip strips whose axis has no shadow
+            // (top strip when spread < offY, since the shadow's
+            // top edge sits BELOW the window's top edge).
             (void)rounding;
+            const float offY      = 4.0f;
+            const int   layers    = 6;
+            const float layerStep = 2.0f;
             for (int L = layers; L >= 1; --L) {
                 const float spread = float(L) * layerStep;
-                const float alpha  = 0.06f *
+                const float alpha  = 0.05f *
                     (1.0f - float(L - 1) / float(layers));
                 const ImU32 col = IM_COL32(0, 0, 0,
                     int(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f));
-                // 4 side strips PLUS 4 corner pie-slices; the
-                // strips don't overlap the window body + the
-                // corners are filled with quarter-arc convex
-                // polygons so nothing lands inside the window
-                // rect (which would darken the content).
-                const float topY    = wMin.y + offY;
-                const float botY    = wMax.y + offY;
-                // Top strip.
+                const float shTop   = wMin.y + offY - spread;
+                const float shBot   = wMax.y + offY + spread;
+                const float shLeft  = wMin.x        - spread;
+                const float shRight = wMax.x        + spread;
+                if (shTop < wMin.y) {
+                    dl->AddRectFilled(
+                        ImVec2(shLeft, shTop),
+                        ImVec2(shRight, wMin.y), col);
+                }
+                if (shBot > wMax.y) {
+                    dl->AddRectFilled(
+                        ImVec2(shLeft, wMax.y),
+                        ImVec2(shRight, shBot), col);
+                }
                 dl->AddRectFilled(
-                    ImVec2(wMin.x, topY - spread),
-                    ImVec2(wMax.x, topY), col);
-                // Bottom strip.
+                    ImVec2(shLeft, wMin.y),
+                    ImVec2(wMin.x, wMax.y), col);
                 dl->AddRectFilled(
-                    ImVec2(wMin.x, botY),
-                    ImVec2(wMax.x, botY + spread), col);
-                // Left strip.
-                dl->AddRectFilled(
-                    ImVec2(wMin.x - spread, topY),
-                    ImVec2(wMin.x, botY), col);
-                // Right strip.
-                dl->AddRectFilled(
-                    ImVec2(wMax.x, topY),
-                    ImVec2(wMax.x + spread, botY), col);
-                // Corner pie-slices. Each: quarter arc from the
-                // corner point out to `spread` radius, closed
-                // back to the corner point so PathFillConvex
-                // covers a soft "L" region.
-                auto Corner = [&](ImVec2 pivot, float a0, float a1) {
-                    dl->PathClear();
-                    dl->PathLineTo(pivot);
-                    dl->PathArcTo(pivot, spread, a0, a1, 12);
-                    dl->PathFillConvex(col);
-                };
-                Corner(ImVec2(wMin.x, topY), IM_PI,       IM_PI * 1.5f); // TL
-                Corner(ImVec2(wMax.x, topY), IM_PI * 1.5f, IM_PI * 2.0f); // TR
-                Corner(ImVec2(wMax.x, botY), 0.0f,        IM_PI * 0.5f);  // BR
-                Corner(ImVec2(wMin.x, botY), IM_PI * 0.5f, IM_PI);        // BL
+                    ImVec2(wMax.x, wMin.y),
+                    ImVec2(shRight, wMax.y), col);
             }
         }
     }
