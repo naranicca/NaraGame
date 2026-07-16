@@ -10668,64 +10668,73 @@ private:
             const float rounding = w->WindowRounding > 0.0f
                 ? w->WindowRounding
                 : ImGui::GetStyle().PopupRounding;
-            // Mac drops the shadow slightly below-and-to-the-
-            // right, with the offset small enough to still read
-            // as "under" the window rather than "next to" it.
+            // Mac-style drop shadow. Instead of stacking many
+            // constant-alpha rings (visible banding on a light
+            // background) we use AddRectFilledMultiColor to draw
+            // 4 side strips + 4 corner quads that share a single
+            // opaque colour at the window edge and fade linearly
+            // to clear at the outer edge. Vertex-colour
+            // interpolation gives a smooth gradient with no
+            // stepping artefacts.
             //
-            // Think of the shadow as a soft-blurred copy of the
-            // window rect, shifted by (0, offY). For each falloff
-            // layer L we consider a "shadow rect" expanded by
-            // spread=L*step in all 4 directions:
-            //   shTop    = wMin.y + offY - spread
-            //   shBot    = wMax.y + offY + spread
-            //   shLeft   = wMin.x        - spread
-            //   shRight  = wMax.x        + spread
-            // The visible dark area is the intersection of that
-            // shadow rect with everything OUTSIDE the window rect
-            // (drawing inside would darken the window content).
-            // We approximate that ring with 4 strips whose union
-            // never overlaps (wMin..wMax, wMin.y..wMax.y):
-            //   Top strip:    full-width, y in [shTop, wMin.y]
-            //   Bottom strip: full-width, y in [wMax.y, shBot]
-            //   Left strip:   window-height y range, x in [shLeft, wMin.x]
-            //   Right strip:  window-height y range, x in [wMax.x, shRight]
-            // Full-width top/bottom means the corner regions get
-            // exactly the same darkness as the vertical sides
-            // -- soft convex shape without double-stacking at
-            // the corners. Skip strips whose axis has no shadow
-            // (top strip when spread < offY, since the shadow's
-            // top edge sits BELOW the window's top edge).
+            // Offset shifts the shadow slightly down, so:
+            //  - top strip is thinner than blur (blur - offY)
+            //  - bottom strip is thicker (blur + offY)
+            //  - bottom colour is slightly darker than top so the
+            //    window reads as "lit from above".
             (void)rounding;
-            const float offY      = 4.0f;
-            const int   layers    = 6;
-            const float layerStep = 2.0f;
-            for (int L = layers; L >= 1; --L) {
-                const float spread = float(L) * layerStep;
-                const float alpha  = 0.05f *
-                    (1.0f - float(L - 1) / float(layers));
-                const ImU32 col = IM_COL32(0, 0, 0,
-                    int(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f));
-                const float shTop   = wMin.y + offY - spread;
-                const float shBot   = wMax.y + offY + spread;
-                const float shLeft  = wMin.x        - spread;
-                const float shRight = wMax.x        + spread;
-                if (shTop < wMin.y) {
-                    dl->AddRectFilled(
-                        ImVec2(shLeft, shTop),
-                        ImVec2(shRight, wMin.y), col);
-                }
-                if (shBot > wMax.y) {
-                    dl->AddRectFilled(
-                        ImVec2(shLeft, wMax.y),
-                        ImVec2(shRight, shBot), col);
-                }
-                dl->AddRectFilled(
-                    ImVec2(shLeft, wMin.y),
-                    ImVec2(wMin.x, wMax.y), col);
-                dl->AddRectFilled(
+            const float offY = 4.0f;
+            const float blur = 12.0f;
+            const ImU32 clear   = IM_COL32(0, 0, 0, 0);
+            const ImU32 opTop   = IM_COL32(0, 0, 0, 32);
+            const ImU32 opSide  = IM_COL32(0, 0, 0, 40);
+            const ImU32 opBot   = IM_COL32(0, 0, 0, 52);
+            const float topH = std::max(0.0f, blur - offY);
+            const float botH = blur + offY;
+            // Top strip (only if the offset lets the shadow
+            // extend above the window at all).
+            if (topH > 0.5f) {
+                dl->AddRectFilledMultiColor(
+                    ImVec2(wMin.x, wMin.y - topH),
                     ImVec2(wMax.x, wMin.y),
-                    ImVec2(shRight, wMax.y), col);
+                    clear, clear, opTop, opTop);
+                // TL corner: opaque at window corner, clear at
+                // the outer diagonal corner.
+                dl->AddRectFilledMultiColor(
+                    ImVec2(wMin.x - blur, wMin.y - topH),
+                    ImVec2(wMin.x,        wMin.y),
+                    clear, clear, opTop, clear);
+                // TR corner.
+                dl->AddRectFilledMultiColor(
+                    ImVec2(wMax.x,        wMin.y - topH),
+                    ImVec2(wMax.x + blur, wMin.y),
+                    clear, clear, clear, opTop);
             }
+            // Bottom strip.
+            dl->AddRectFilledMultiColor(
+                ImVec2(wMin.x, wMax.y),
+                ImVec2(wMax.x, wMax.y + botH),
+                opBot, opBot, clear, clear);
+            // BL corner.
+            dl->AddRectFilledMultiColor(
+                ImVec2(wMin.x - blur, wMax.y),
+                ImVec2(wMin.x,        wMax.y + botH),
+                clear, opBot, clear, clear);
+            // BR corner.
+            dl->AddRectFilledMultiColor(
+                ImVec2(wMax.x,        wMax.y),
+                ImVec2(wMax.x + blur, wMax.y + botH),
+                opBot, clear, clear, clear);
+            // Left strip.
+            dl->AddRectFilledMultiColor(
+                ImVec2(wMin.x - blur, wMin.y),
+                ImVec2(wMin.x,        wMax.y),
+                clear, opSide, opSide, clear);
+            // Right strip.
+            dl->AddRectFilledMultiColor(
+                ImVec2(wMax.x,        wMin.y),
+                ImVec2(wMax.x + blur, wMax.y),
+                opSide, clear, clear, opSide);
         }
     }
 
