@@ -10740,47 +10740,47 @@ private:
             const float rounding = w->WindowRounding > 0.0f
                 ? w->WindowRounding
                 : ImGui::GetStyle().PopupRounding;
-            // Mac-style drop shadow. Uses vertex-colour gradients
-            // (no banding) and tracks the window's rounded
-            // corners so the ring hugs the actual pixel shape
-            // rather than the bounding rect.
-            //
-            // Straight-edge shadow: 4 gradient strips inset by
-            // `rounding` so they only cover the straight portion
-            // of each side.
-            // Corner shadow: 4 triangle-fan sectors, each with an
-            // inner ring at radius=rounding (opaque) and an
-            // outer ring at radius=rounding+blur (clear).
-            //
-            // Offset shifts the shadow slightly down, so bottom
-            // side is thicker + a touch darker.
+            // Mac-style drop shadow, modelled as the window rect
+            // SHIFTED down by offY and blurred by the SAME `blur`
+            // distance in every direction. Every strip and corner
+            // fan fades over `blur` measured from the shifted
+            // rounded rect, so all seams line up by construction
+            // (the old per-side extents -- thinner top, fatter
+            // bottom -- made the corner fans visibly disagree with
+            // the strips they bridge). The thin-rim-above /
+            // soft-pool-below look now comes from the window
+            // itself occluding the shifted shadow: the window rect
+            // is added to the suppression list below.
             const float offY = 4.0f;
             const float blur = 12.0f;
             const float rr   = std::max(0.0f, rounding);
-            const ImU32 clear  = IM_COL32(0, 0, 0, 0);
-            const ImU32 opTop  = IM_COL32(0, 0, 0, 32);
-            const ImU32 opSide = IM_COL32(0, 0, 0, 40);
-            const ImU32 opBot  = IM_COL32(0, 0, 0, 52);
-            const float topH   = std::max(0.0f, blur - offY);
-            const float botH   = blur + offY;
-            // Corner-ring centres are the rounded corner arc
-            // centres, i.e. inset from wMin/wMax by rr on both
-            // axes.
-            const ImVec2 pTL(wMin.x + rr, wMin.y + rr);
-            const ImVec2 pTR(wMax.x - rr, wMin.y + rr);
-            const ImVec2 pBR(wMax.x - rr, wMax.y - rr);
-            const ImVec2 pBL(wMin.x + rr, wMax.y - rr);
+            const ImU32 clear = IM_COL32(0, 0, 0, 0);
+            const ImU32 opCol = IM_COL32(0, 0, 0, 46);
+            // Shifted shadow rect + its rounded-corner arc centres.
+            const ImVec2 shMin(wMin.x, wMin.y + offY);
+            const ImVec2 shMax(wMax.x, wMax.y + offY);
+            const ImVec2 qTL(shMin.x + rr, shMin.y + rr);
+            const ImVec2 qTR(shMax.x - rr, shMin.y + rr);
+            const ImVec2 qBR(shMax.x - rr, shMax.y - rr);
+            const ImVec2 qBL(shMin.x + rr, shMax.y - rr);
+            // The window occludes its own (shifted) shadow.
+            if (suppressCount < 16) {
+                suppressMin[suppressCount] = wMin;
+                suppressMax[suppressCount] = wMax;
+                ++suppressCount;
+            }
             // Compute the clip regions the shadow may draw into:
             // the shadow's bounding box minus every suppression
-            // rect (parent menus). Axis-aligned subtraction of one
-            // rect from another yields at most 4 rects, so the
-            // region list stays tiny for realistic menu depths.
+            // rect (own window + parent menus + windows above).
+            // Axis-aligned subtraction of one rect from another
+            // yields at most 4 rects, so the region list stays
+            // small for realistic stacking depths.
             constexpr int kMaxRegions = 64;
             ImVec2 regMin[kMaxRegions];
             ImVec2 regMax[kMaxRegions];
             int    regCount = 0;
-            regMin[0] = ImVec2(wMin.x - blur, wMin.y - blur);
-            regMax[0] = ImVec2(wMax.x + blur, wMax.y + blur + offY);
+            regMin[0] = ImVec2(shMin.x - blur, shMin.y - blur);
+            regMax[0] = ImVec2(shMax.x + blur, shMax.y + blur);
             regCount  = 1;
             for (int s = 0; s < suppressCount; ++s) {
                 ImVec2 nMin[kMaxRegions];
@@ -10878,50 +10878,70 @@ private:
                     dl->PrimWriteIdx(base + 3);
                 }
             };
-            // Emit the whole shadow (strips + corner fans). Called
-            // once per allowed clip region so the geometry never
-            // rasterises over a suppressed (parent menu) rect --
-            // vertices are unchanged, the scissor does the cut, so
-            // gradients stay continuous across region seams.
+            // Emit the whole shadow (gradient strips + corner fans
+            // + the opaque interior slab that peeks below the
+            // window). Called once per allowed clip region so the
+            // geometry never rasterises over a suppressed rect --
+            // vertices are identical across calls, the scissor
+            // does the cut, so gradients stay continuous at region
+            // seams.
             auto EmitShadow = [&]() {
-                // Straight strips only span the straight portion
-                // (skip the rr on each end) so the corner sectors
-                // pick up the missing area.
-                if (topH > 0.5f && wMax.x - rr > wMin.x + rr) {
+                // Gradient strips span the straight portion of
+                // each shifted-rect side (arc centres trim the rr
+                // ends); the corner fans below pick up the rest.
+                if (qTR.x > qTL.x) {
                     dl->AddRectFilledMultiColor(
-                        ImVec2(pTL.x, wMin.y - topH),
-                        ImVec2(pTR.x, wMin.y),
-                        clear, clear, opTop, opTop);
-                }
-                if (wMax.x - rr > wMin.x + rr) {
+                        ImVec2(qTL.x, shMin.y - blur),
+                        ImVec2(qTR.x, shMin.y),
+                        clear, clear, opCol, opCol);
                     dl->AddRectFilledMultiColor(
-                        ImVec2(pBL.x, wMax.y),
-                        ImVec2(pBR.x, wMax.y + botH),
-                        opBot, opBot, clear, clear);
+                        ImVec2(qBL.x, shMax.y),
+                        ImVec2(qBR.x, shMax.y + blur),
+                        opCol, opCol, clear, clear);
                 }
-                if (wMax.y - rr > wMin.y + rr) {
+                if (qBL.y > qTL.y) {
                     dl->AddRectFilledMultiColor(
-                        ImVec2(wMin.x - blur, pTL.y),
-                        ImVec2(wMin.x,        pBL.y),
-                        clear, opSide, opSide, clear);
+                        ImVec2(shMin.x - blur, qTL.y),
+                        ImVec2(shMin.x,        qBL.y),
+                        clear, opCol, opCol, clear);
                     dl->AddRectFilledMultiColor(
-                        ImVec2(wMax.x,        pTR.y),
-                        ImVec2(wMax.x + blur, pBR.y),
-                        opSide, clear, clear, opSide);
+                        ImVec2(shMax.x,        qTR.y),
+                        ImVec2(shMax.x + blur, qBR.y),
+                        opCol, clear, clear, opCol);
                 }
-                const float outerR    = rr + blur;
-                const float topOuterR = rr + topH;
-                // TL: 180° -> 270° (left edge up to top edge).
-                if (topH > 0.5f) {
-                    DrawCornerFan(pTL, IM_PI, IM_PI * 1.5f,
-                                  topOuterR, opTop);
-                    DrawCornerFan(pTR, IM_PI * 1.5f, IM_PI * 2.0f,
-                                  topOuterR, opTop);
+                // Opaque interior of the shifted rect that shows
+                // below the window (an offY-tall slab + the two
+                // bottom corner pies inside the arc radius). The
+                // window-rect suppression clips whatever would
+                // land under the window itself, so only the
+                // peeking part renders. Without this there'd be a
+                // light gap between the window's bottom edge and
+                // where the bottom gradient starts.
+                if (offY > 0.0f) {
+                    dl->AddRectFilled(
+                        ImVec2(qBL.x, wMax.y),
+                        ImVec2(qBR.x, shMax.y), opCol);
+                    dl->PathClear();
+                    dl->PathLineTo(qBR);
+                    dl->PathArcTo(qBR, rr, 0.0f, IM_PI * 0.5f, 10);
+                    dl->PathFillConvex(opCol);
+                    dl->PathClear();
+                    dl->PathLineTo(qBL);
+                    dl->PathArcTo(qBL, rr, IM_PI * 0.5f, IM_PI, 10);
+                    dl->PathFillConvex(opCol);
                 }
-                DrawCornerFan(pBR, 0.0f,        IM_PI * 0.5f,
-                              outerR, opBot);
-                DrawCornerFan(pBL, IM_PI * 0.5f, IM_PI,
-                              outerR, opBot);
+                // Corner fans: one uniform outer radius everywhere
+                // so each fan's fade distance matches the strips
+                // on BOTH of its sides.
+                const float outerR = rr + blur;
+                DrawCornerFan(qTL, IM_PI,        IM_PI * 1.5f,
+                              outerR, opCol);
+                DrawCornerFan(qTR, IM_PI * 1.5f, IM_PI * 2.0f,
+                              outerR, opCol);
+                DrawCornerFan(qBR, 0.0f,         IM_PI * 0.5f,
+                              outerR, opCol);
+                DrawCornerFan(qBL, IM_PI * 0.5f, IM_PI,
+                              outerR, opCol);
             };
             for (int rgi = 0; rgi < regCount; ++rgi) {
                 dl->PushClipRect(regMin[rgi], regMax[rgi], false);
