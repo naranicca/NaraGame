@@ -1,6 +1,7 @@
 # NaraGame
 
-크로스 플랫폼 2D/3D 게임 엔진. Windows · macOS · Android · iOS를 목표로 하며,
+크로스 플랫폼 2D/3D 게임 엔진과, 그 위에 구축된 통합 게임 에디터 **NaraGame**.
+Windows · macOS · Android · iOS를 목표로 하며,
 플랫폼별 네이티브 그래픽 API(Direct3D / Metal / Vulkan)를 자체 RHI 계층으로 추상화해 GPU 가속을 지원합니다.
 
 주 개발 환경은 **Windows + Visual Studio 2022**이며, 현재 동작하는 백엔드는 **Direct3D 11**입니다.
@@ -12,7 +13,7 @@
 NaraGame/
 ├─ CMakeLists.txt          # 루트 빌드 정의
 ├─ CMakePresets.json       # Visual Studio / Ninja 프리셋
-├─ engine/                 # 엔진 (정적 라이브러리: NaraGame)
+├─ engine/                 # 엔진 (정적 라이브러리 타깃: NaraGameEngine, 링크: NaraGame::Engine)
 │  ├─ include/NaraGame/        # 공개 헤더 (#include "NaraGame/...")
 │  │  ├─ core/             # Application, Log, Time, Platform 감지
 │  │  ├─ math/             # 직접 구현한 수학 (Vec2/3/4, Mat4)
@@ -37,9 +38,10 @@ NaraGame/
 │  ├─ mario/               # 슈퍼마리오 클론
 │  ├─ flappy/              # 플래피버드
 │  └─ citybuilder/         # SC2K 스타일 아이소메트릭 도시 건설 (자체 README)
-├─ tools/                  # MSDF 아틀라스 도구 (gitignored)
+├─ tools/
+│  └─ editor/              # NaraGame 에디터 (실행 파일 타깃: NaraGame → NaraGame.exe)
 ├─ scripts/                # 빌드 헬퍼 (아틀라스 굽기, 셰이더 컴파일)
-├─ third_party/            # 외부 의존성 자리 (현재 비어 있음 — 직접 구현 원칙)
+├─ third_party/            # 벤더링된 의존성 (imgui, lua, 오디오 디코더, miniz)
 └─ docs/                   # 설계 문서 + 스크린샷
 ```
 
@@ -52,6 +54,20 @@ NaraGame/
 | **Flappy Bird**<br>중력/플랩, 파이프 스폰, AABB 충돌, 점수, 점진적 난이도, 메달 시스템, parallax 배경, 깃털 파티클, 하이스코어 영속화<br><img src="docs/screenshots/flappy.png" width="320"> | **Breakout**<br>벽돌 시트(단일 배치), 패들/공 아틀라스, 점수 텍스트, 파티클 디브리, 공용 물리(완전 반발 바디 + 정적 벽돌)<br><img src="docs/screenshots/breakout.png" width="320"> |
 | **Space Invaders**<br>편대 이동/가장자리 낙하, 발사/폭탄, 점수·생명·레벨, 게임오버/재시작, 하이스코어 ConfigFile 영속화<br><img src="docs/screenshots/space_invaders.png" width="320"> | **Super Mario**<br>중력/가변 점프, 타일 AABB 충돌(축별), 코인/물음표 블록(밑에서 치면 코인 팝업), 굼바(밟기·피격), 씬 스택(타이틀↔게임↔일시정지), BGM<br><img src="docs/screenshots/mario.png" width="320"> |
 | **Citybuilder** *(자체 [README](test/citybuilder/README.md))*<br>32×32 아이소메트릭 그리드, 코너 높이 지형, 슬로프 캐스케이드, 자동 연결 도로, 4종 건물 + 드롭 그림자, 카메라(줌 어라운드 커서/팬), 평문 세이브/로드<br><img src="docs/screenshots/citybuilder.png" width="320"> | |
+
+## NaraGame 에디터
+
+엔진 위에 구축된 Unity 스타일의 통합 게임 에디터입니다. 프로젝트/에셋 관리,
+씬·계층·인스펙터 패널, 타일맵 + 오토타일 페인팅, 애니메이터 컨트롤러,
+픽셀(스프라이트) 에디터, Lua 스크립팅(핫 리로드), 오디오 믹서, 게임 화면비
+그대로의 Game View, 독립 실행형 게임 빌드(File > Build Game)까지 지원합니다.
+
+```powershell
+cmake --build --preset windows-release --target NaraGame
+.\build\windows-x64\bin\Release\NaraGame.exe --project "C:\path\to\MyProject"
+```
+
+처음이라면 [마리오 스타일 플랫포머 튜토리얼](tools/editor/docs/tutorial-mario-platformer.md)을 따라 해 보세요.
 
 ## 빌드 (Windows)
 
@@ -88,8 +104,7 @@ $env:NARAGAME_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d1
 | 기반 기능 | 직접 구현 | 수학/윈도잉/입력/로깅을 외부 의존성 없이 |
 
 자세한 내용은 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 참고.
-인-엔진 타일맵 에디터 사용법은 [docs/TILESET-EDITOR.md](docs/TILESET-EDITOR.md) 참고.
-씬 에디터의 Lua 스크립팅 API는 [docs/LUA-SCRIPTING.md](docs/LUA-SCRIPTING.md) 참고.
+NaraGame 에디터의 Lua 스크립팅 API는 [docs/LUA-SCRIPTING.md](docs/LUA-SCRIPTING.md) 참고.
 
 ## 현재 상태 / 다음 단계
 
@@ -119,5 +134,6 @@ $env:NARAGAME_RHI = "vulkan"   # 이 게임을 Vulkan으로 실행 (기본: d3d1
 - [x] 회전된 컬러/텍스처 쿼드 (Renderer2D::DrawQuad 각도 오버로드) — Flappy 새 기울기에 사용
 - [x] **Per-texture 샘플러 필터** — TextureDesc::filter (Linear/Point), D3D11 백엔드가 두 샘플러를 BindTexture 시점에 선택
 - [x] **MSDF 텍스트 렌더링** — Multi-channel Signed Distance Field 아틀라스 (msdf-atlas-gen + Inter TTF). Renderer2D의 두 번째 파이프라인이 median(rgb) + fwidth(uv)로 어떤 크기에서도 sharp한 글자를 만듭니다. 다섯 게임 모두 적용
+- [x] **NaraGame 에디터** — Unity 스타일 통합 에디터 (Dear ImGui docking + D3D11). 프로젝트/에셋 데이터베이스(GUID + .meta), 씬 저장/로드(JSON), 타일맵 + 오토타일, 애니메이터 컨트롤러 그래프, 픽셀 에디터, Lua 스크립팅 + 핫 리로드, 2D 물리/파티클/오디오 미리보기, Game View, 독립 실행형 게임 빌드
 - [ ] Metal 백엔드 (macOS/iOS)
 - [ ] macOS · Android · iOS 윈도우 실제 구현
