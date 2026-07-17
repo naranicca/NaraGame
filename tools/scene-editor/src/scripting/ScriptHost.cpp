@@ -2101,12 +2101,14 @@ static int LuaStateDeleteSlot(lua_State* L) {
 // M9c15 scene.load(path_or_guid) -> bool. Queues a scene
 // swap; the host actually executes it at the end of the
 // current frame so the script callback iterating live
-// entities doesn't see them disappear mid-loop. Accepts the
-// same path resolution audio.* does: 36-char dashed GUID
-// looked up against an Audio... wait, no -- scenes get a
-// simpler rule. A relative path joins to AssetDatabase's
-// AssetsRoot(); a path that already starts with "Assets/" or
-// is absolute is used verbatim.
+// entities doesn't see them disappear mid-loop. Path rule:
+// absolute paths are used verbatim; every relative path is
+// anchored to the project via AssetDatabase's AssetsRoot()
+// (<project>/Assets). A leading "Assets/" is treated as the
+// project-relative spelling ("Assets/Scenes/L1.nscene" ->
+// <project>/Assets/Scenes/L1.nscene) rather than left to
+// resolve against the process working directory, which is
+// wherever the editor happened to be launched from.
 static int LuaSceneLoad(lua_State* L) {
     ScriptHost* host = HostFromUpvalue(L);
     if (!host) { lua_pushboolean(L, 0); return 1; }
@@ -2117,18 +2119,20 @@ static int LuaSceneLoad(lua_State* L) {
         (resolved.size() >= 2 && resolved[1] == ':') ||
         (!resolved.empty() && (resolved[0] == '/' ||
                                 resolved[0] == '\\'));
-    if (!isAbs &&
-        resolved.compare(0, 7, "Assets/") != 0 &&
-        host->BoundAssetDatabase()) {
+    if (!isAbs && host->BoundAssetDatabase()) {
         const std::string& root =
             host->BoundAssetDatabase()->AssetsRoot();
         if (!root.empty()) {
-            const char sep =
-                (root.back() == '/' || root.back() == '\\')
-                    ? '\0' : '/';
+            std::string rel = std::move(resolved);
+            if (rel.compare(0, 7, "Assets/") == 0 ||
+                rel.compare(0, 7, "Assets\\") == 0) {
+                rel.erase(0, 7);
+            }
             std::string joined = root;
-            if (sep) joined.push_back(sep);
-            joined.append(arg);
+            if (joined.back() != '/' && joined.back() != '\\') {
+                joined.push_back('/');
+            }
+            joined.append(rel);
             resolved = std::move(joined);
         }
     }
