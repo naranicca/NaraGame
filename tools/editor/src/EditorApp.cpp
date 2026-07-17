@@ -2535,6 +2535,17 @@ private:
                     // body -- to be upward (+Y).
                     const float bodyMtvY = a.oneWay ? -dy : dy;
                     if (bodyMtvY <= 1e-4f) continue;
+                    // The MTV flips upward the moment the body's
+                    // centre crosses the tile's midline -- which
+                    // also happens mid-ascent while legitimately
+                    // jumping THROUGH the platform, and used to
+                    // eject the body onto the top with its upward
+                    // velocity intact (a visible "pop"). Mario
+                    // rule: a one-way platform only ever catches
+                    // a body that is falling (or resting), never
+                    // one still on the way up.
+                    const float bodyVy = a.oneWay ? b.vy : a.vy;
+                    if (bodyVy > 1e-4f) continue;
                 }
                 const auto key =
                     a.id < b.id
