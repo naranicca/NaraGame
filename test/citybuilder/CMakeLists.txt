@@ -1,5 +1,5 @@
 add_executable(citybuilder src/CitybuilderApp.cpp)
-target_link_libraries(citybuilder PRIVATE NaraGame::NaraGame)
+target_link_libraries(citybuilder PRIVATE NaraGame::Engine)
 set_target_properties(citybuilder PROPERTIES FOLDER "test")
 
 target_compile_definitions(citybuilder PRIVATE

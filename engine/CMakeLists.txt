@@ -70,36 +70,36 @@ elseif(ANDROID)
     )
 endif()
 
-add_library(NaraGame STATIC ${NARAGAME_SOURCES})
-add_library(NaraGame::NaraGame ALIAS NaraGame)
+add_library(NaraGameEngine STATIC ${NARAGAME_SOURCES})
+add_library(NaraGame::Engine ALIAS NaraGameEngine)
 
-target_include_directories(NaraGame
+target_include_directories(NaraGameEngine
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_compile_features(NaraGame PUBLIC cxx_std_20)
+target_compile_features(NaraGameEngine PUBLIC cxx_std_20)
 
 # Keep headers visible in the Visual Studio Solution Explorer.
 file(GLOB_RECURSE NARAGAME_HEADERS CONFIGURE_DEPENDS include/*.h src/*.h)
-target_sources(NaraGame PRIVATE ${NARAGAME_HEADERS})
+target_sources(NaraGameEngine PRIVATE ${NARAGAME_HEADERS})
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${NARAGAME_SOURCES} ${NARAGAME_HEADERS})
 
 if(WIN32)
-    target_compile_definitions(NaraGame PUBLIC
+    target_compile_definitions(NaraGameEngine PUBLIC
         UNICODE _UNICODE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
     )
     # Direct3D 11 + DXGI. d3dcompiler/dxguid reserved for upcoming shader work.
     # xaudio2 for audio; ole32 for CoInitialize.
-    target_link_libraries(NaraGame PUBLIC d3d11 dxgi d3dcompiler dxguid xaudio2 ole32)
+    target_link_libraries(NaraGameEngine PUBLIC d3d11 dxgi d3dcompiler dxguid xaudio2 ole32)
 endif()
 
 if(MSVC)
-    target_compile_options(NaraGame PRIVATE /W4 /permissive- /MP)
+    target_compile_options(NaraGameEngine PRIVATE /W4 /permissive- /MP)
 else()
-    target_compile_options(NaraGame PRIVATE -Wall -Wextra)
+    target_compile_options(NaraGameEngine PRIVATE -Wall -Wextra)
 endif()
 
 # Optional Vulkan backend (a second native RHI; runs on Windows when the SDK is
@@ -107,11 +107,11 @@ endif()
 find_package(Vulkan QUIET)
 if(Vulkan_FOUND)
     message(STATUS "NaraGame: Vulkan found (${Vulkan_LIBRARY}) -> Vulkan backend enabled")
-    target_sources(NaraGame PRIVATE
+    target_sources(NaraGameEngine PRIVATE
         src/renderer/rhi/vulkan/VulkanDevice.cpp
         src/renderer/rhi/vulkan/VulkanResources.cpp)
-    target_link_libraries(NaraGame PUBLIC Vulkan::Vulkan)
-    target_compile_definitions(NaraGame PUBLIC NARAGAME_HAVE_VULKAN)
+    target_link_libraries(NaraGameEngine PUBLIC Vulkan::Vulkan)
+    target_compile_definitions(NaraGameEngine PUBLIC NARAGAME_HAVE_VULKAN)
 else()
     message(STATUS "NaraGame: Vulkan SDK not found -> Vulkan backend disabled")
 endif()

@@ -1,4 +1,4 @@
-// Windows resource script for scene-editor.exe.
+// Windows resource script for NaraGame.exe (the editor).
 //
 // Ships a single ICON resource. Two consumers pull it in different
 // ways:
@@ -12,4 +12,4 @@
 //      shared header from the engine side.
 
 #define IDI_APP 101
-IDI_APP ICON "scene-editor.ico"
+IDI_APP ICON "NaraGame.ico"

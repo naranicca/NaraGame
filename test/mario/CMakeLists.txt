@@ -1,5 +1,5 @@
 add_executable(mario src/MarioApp.cpp)
-target_link_libraries(mario PRIVATE NaraGame::NaraGame)
+target_link_libraries(mario PRIVATE NaraGame::Engine)
 set_target_properties(mario PROPERTIES FOLDER "test")
 
 target_compile_definitions(mario PRIVATE

@@ -1,5 +1,5 @@
 add_executable(breakout src/BreakoutApp.cpp)
-target_link_libraries(breakout PRIVATE NaraGame::NaraGame)
+target_link_libraries(breakout PRIVATE NaraGame::Engine)
 set_target_properties(breakout PROPERTIES FOLDER "test")
 
 # Bake the source assets path so the game finds its sprites regardless of the

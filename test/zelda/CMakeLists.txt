@@ -1,5 +1,5 @@
 add_executable(zelda src/ZeldaApp.cpp)
-target_link_libraries(zelda PRIVATE NaraGame::NaraGame)
+target_link_libraries(zelda PRIVATE NaraGame::Engine)
 set_target_properties(zelda PROPERTIES FOLDER "test")
 
 target_compile_definitions(zelda PRIVATE

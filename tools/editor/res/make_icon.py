@@ -1,4 +1,4 @@
-"""Extract the blue "N" cube from n-cube.png and produce scene-editor.ico.
+"""Extract the blue "N" cube from n-cube.png and produce NaraGame.ico.
 
 The vendored source PNG (n-cube.png, sitting next to this script) is a
 blue isometric cube with a white "N" cutout on a plain white background.
@@ -7,7 +7,7 @@ without touching the "N" glyph, which is landlocked inside the cube's
 outline. We then tight-crop to the cube's bounding box, resample to a
 set of ICO sizes (16 / 32 / 48 / 64 / 128 / 256), and write the .ico.
 
-Also emits scene-editor-icon.png (256x256) alongside the .ico for anyone
+Also emits NaraGame-icon.png (256x256) alongside the .ico for anyone
 who wants the loose PNG for docs / About boxes.
 """
 
@@ -21,8 +21,8 @@ from collections import deque
 # Paths
 OUT_DIR = Path(__file__).resolve().parent
 SRC = OUT_DIR / "n-cube.png"
-OUT_ICO = OUT_DIR / "scene-editor.ico"
-OUT_PNG = OUT_DIR / "scene-editor-icon.png"
+OUT_ICO = OUT_DIR / "NaraGame.ico"
+OUT_PNG = OUT_DIR / "NaraGame-icon.png"
 
 # ---------------------------------------------------------------------------
 # Load + pad an alpha channel so we can just overwrite alpha to 0 on removal.

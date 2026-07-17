@@ -1,4 +1,4 @@
-// scene-editor -- Unity-style scene editor shell. Runs on top of the
+// NaraGame editor -- Unity-style game editor shell. Runs on top of the
 // NaraGame Application loop: the host drives the frame, ImGui's Win32
 // backend gets WM_* events via Window::SetMessageHook, and ImGui's
 // D3D11 backend draws on top of the engine's backbuffer. M1 commit 4
@@ -85,7 +85,7 @@ namespace {
 
 constexpr uint32_t kWindowW = 1600;
 constexpr uint32_t kWindowH = 900;
-constexpr const char* kBaseTitle = "NaraGame Scene Editor";
+constexpr const char* kBaseTitle = "NaraGame";
 
 // OS-default UI font search paths. First existing file in each list
 // wins. `Latin` handles ASCII + European glyphs at 16 px; `Cjk` is
@@ -348,7 +348,7 @@ void LoadEditorFonts(ImGuiIO& io, float uiScale) {
     ImFont* latin = nullptr;
     if (const char* latinPath = FirstExistingFontFile(kEditorLatinFontCandidates)) {
         latin = io.Fonts->AddFontFromFileTTF(latinPath, baseSize, &latinCfg);
-        NARAGAME_INFO("scene-editor: loaded UI font '%s' @ %.1f px",
+        NARAGAME_INFO("editor: loaded UI font '%s' @ %.1f px",
                       latinPath, baseSize);
     }
 
@@ -361,10 +361,10 @@ void LoadEditorFonts(ImGuiIO& io, float uiScale) {
             mergeCfg.PixelSnapH  = false;
             io.Fonts->AddFontFromFileTTF(cjkPath, baseSize, &mergeCfg,
                                          io.Fonts->GetGlyphRangesKorean());
-            NARAGAME_INFO("scene-editor: merged CJK font '%s'", cjkPath);
+            NARAGAME_INFO("editor: merged CJK font '%s'", cjkPath);
         }
     } else {
-        NARAGAME_WARN("scene-editor: no OS UI font found; using ImGui default");
+        NARAGAME_WARN("editor: no OS UI font found; using ImGui default");
         io.Fonts->AddFontDefault();
     }
 }
@@ -581,7 +581,7 @@ public:
         auto* dev = static_cast<ID3D11Device*>(GetDevice().GetNativeDevice());
         auto* ctx = static_cast<ID3D11DeviceContext*>(GetDevice().GetNativeContext());
         if (!hwnd || !dev || !ctx) {
-            NARAGAME_ERROR("scene-editor: missing native window or D3D11 device handles");
+            NARAGAME_ERROR("editor: missing native window or D3D11 device handles");
             Close();
             return;
         }
@@ -593,7 +593,7 @@ public:
         // but the window class was registered without an hIcon by the
         // engine (which doesn't know about editor resources), so we
         // apply it here with WM_SETICON. IDI_APP == 101 -- kept in
-        // sync with res/scene-editor.rc. Load returning null just
+        // sync with res/NaraGame.rc. Load returning null just
         // means the resource isn't linked in this configuration (e.g.
         // a hypothetical non-Windows port); leaves the default icon
         // instead of crashing.
@@ -612,7 +612,19 @@ public:
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.IniFilename = "scene-editor.ini";
+        // The editor was called "scene-editor" before it grew into
+        // the full NaraGame editor; adopt an existing layout file
+        // from that era so the user's docking setup survives the
+        // rename.
+        {
+            std::error_code ec;
+            if (!std::filesystem::exists("NaraGame.ini", ec) &&
+                std::filesystem::exists("scene-editor.ini", ec)) {
+                std::filesystem::rename("scene-editor.ini",
+                                        "NaraGame.ini", ec);
+            }
+        }
+        io.IniFilename = "NaraGame.ini";
 
         // OS-default UI font stack. Latin + CJK merged, scaled to the
         // system DPI so per-pixel work at 4K looks the same as at 1080p.
@@ -656,7 +668,7 @@ public:
 
         UpdateWindowTitle();
 
-        NARAGAME_INFO("scene-editor: ImGui %s + DX11 + dockspace ready",
+        NARAGAME_INFO("editor: ImGui %s + DX11 + dockspace ready",
                       ImGui::GetVersion());
 
         // Command-line auto-open. `--project <path>` opens a project at
@@ -3968,7 +3980,7 @@ private:
         drops.swap(g_pendingDropPaths);
         if (!m_project.IsOpen()) {
             NARAGAME_WARN(
-                "scene-editor: %zu dropped file(s) ignored -- no "
+                "editor: %zu dropped file(s) ignored -- no "
                 "project is open. Create or open a project first.",
                 drops.size());
             return;
@@ -3987,7 +3999,7 @@ private:
         namespace fs = std::filesystem;
         std::error_code ec;
         if (!fs::is_regular_file(absSrc, ec)) {
-            NARAGAME_WARN("scene-editor: drop skipped (not a file): %s",
+            NARAGAME_WARN("editor: drop skipped (not a file): %s",
                           absSrc.c_str());
             return false;
         }
@@ -4011,7 +4023,7 @@ private:
         const bool isTileset = ext == ".ntileset";
         if (!isImage && !isTileset) {
             NARAGAME_WARN(
-                "scene-editor: drop ignored -- unsupported extension "
+                "editor: drop ignored -- unsupported extension "
                 "\"%s\" (accept: .png .jpg .jpeg .bmp .tga .ntileset). "
                 "File: %s",
                 ext.c_str(), absSrc.c_str());
@@ -4048,7 +4060,7 @@ private:
             ++n;
             if (n > 999) {
                 NARAGAME_WARN(
-                    "scene-editor: giving up placing dropped file, "
+                    "editor: giving up placing dropped file, "
                     "too many collisions: %s", absSrc.c_str());
                 return false;
             }
@@ -4061,7 +4073,7 @@ private:
             // the user can retarget it in the tileset editor.
             fs::copy_file(absSrc, destTileset, ec);
             if (ec) {
-                NARAGAME_WARN("scene-editor: copy failed (%s): %s",
+                NARAGAME_WARN("editor: copy failed (%s): %s",
                               ec.message().c_str(), absSrc.c_str());
                 return false;
             }
@@ -4071,7 +4083,7 @@ private:
                     m_assetDb.FindByPath(RelToAssets(destTileset))) {
                 OpenTilesetEditor(entry->guid);
             }
-            NARAGAME_INFO("scene-editor: imported tileset %s -> %s",
+            NARAGAME_INFO("editor: imported tileset %s -> %s",
                           absSrc.c_str(), destTileset.c_str());
             return true;
         }
@@ -4083,7 +4095,7 @@ private:
         // both up on the next frame.
         fs::copy_file(absSrc, destImage, ec);
         if (ec) {
-            NARAGAME_WARN("scene-editor: copy failed (%s): %s",
+            NARAGAME_WARN("editor: copy failed (%s): %s",
                           ec.message().c_str(), absSrc.c_str());
             return false;
         }
@@ -4094,7 +4106,7 @@ private:
             m_assetDb.FindByPath(relImage);
         if (!imgEntry) {
             NARAGAME_WARN(
-                "scene-editor: copied image but AssetDatabase did not "
+                "editor: copied image but AssetDatabase did not "
                 "surface it: %s", destImage.c_str());
             return false;
         }
@@ -4103,7 +4115,7 @@ private:
         ts.texture = imgEntry->guid;
         if (!ts.SaveToFile(destTileset)) {
             NARAGAME_WARN(
-                "scene-editor: could not write tileset asset: %s",
+                "editor: could not write tileset asset: %s",
                 destTileset.c_str());
             return false;
         }
@@ -4115,7 +4127,7 @@ private:
             OpenTilesetEditor(tsEntry->guid);
         }
         NARAGAME_INFO(
-            "scene-editor: imported %s as tileset -> %s (texture=%s)",
+            "editor: imported %s as tileset -> %s (texture=%s)",
             absSrc.c_str(), destTileset.c_str(), relImage.c_str());
         return true;
     }
@@ -4177,14 +4189,14 @@ private:
         // "Save As" confirmation stays the only overwrite path.
         std::error_code ec;
         if (fs::exists(path, ec)) {
-            NARAGAME_ERROR("scene-editor: '%s' already exists; aborting",
+            NARAGAME_ERROR("editor: '%s' already exists; aborting",
                            path.c_str());
             return;
         }
         FILE* f = nullptr;
         fopen_s(&f, path.c_str(), "wb");
         if (!f) {
-            NARAGAME_ERROR("scene-editor: could not create '%s'",
+            NARAGAME_ERROR("editor: could not create '%s'",
                            path.c_str());
             return;
         }
@@ -4234,14 +4246,14 @@ private:
         const std::string rel = RelToAssets(m_currentScenePath);
         m_project.SetMainScenePath(rel);
         m_project.Save();
-        NARAGAME_INFO("scene-editor: main scene set to %s",
+        NARAGAME_INFO("editor: main scene set to %s",
                       rel.c_str());
     }
 
     // M9c12 / M9c13 build a shippable game folder.
     //
     // Layout (after a successful build):
-    //   <dest>/game.exe          -- copy of scene-editor.exe
+    //   <dest>/game.exe          -- copy of NaraGame.exe
     //   <dest>/assets.pak        -- single-file bundle of Assets/
     //   <dest>/ProjectSettings/  -- recursive copy (kept loose
     //                               so the user can edit
@@ -4489,7 +4501,7 @@ private:
         m_assetWatchLastCount = m_assetDb.CountAssetFilesOnDisk();
 
         UpdateWindowTitle();
-        NARAGAME_INFO("scene-editor: renamed scene %s -> %s",
+        NARAGAME_INFO("editor: renamed scene %s -> %s",
                       oldRel.c_str(), newRel.c_str());
         m_renameSceneError.clear();
         return true;
@@ -17037,7 +17049,7 @@ private:
     // Cached editor preferences (loaded in OnStart, saved by the
     // Preferences modal + PushRecentProject). Keeps
     // recentProjects around so a Save & Close doesn't wipe the
-    // MRU list built up by scene-editor sessions.
+    // MRU list built up by editor sessions.
     EditorPrefs         m_prefs;
     // M10c1 settings overlay rebind capture. Empty when no rebind
     // is in progress; set to the action name when the user clicks
@@ -17473,7 +17485,7 @@ Application* NaraGame::CreateApplication(int argc, char** argv) {
     // clicks a built game.exe with no args, look for the
     // project tree sitting alongside it (./ProjectSettings/
     // project.json) and fall straight into the standalone
-    // runtime path. The editor's own scene-editor.exe usually
+    // runtime path. The editor's own NaraGame.exe usually
     // launches with no args too, so we only enable this when
     // the project file is actually present in the cwd.
     if (project.empty() && !standalone) {

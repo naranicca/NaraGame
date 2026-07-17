@@ -390,7 +390,7 @@ bool ExtractPak(const std::string& pakPath,
 #else
             NARAGAME_ERROR(
                 "ExtractPak: entry '%s' is deflated but this "
-                "build of scene-editor lacks miniz support. "
+                "build of the editor lacks miniz support. "
                 "Re-pack with a stored (uncompressed) writer "
                 "or rebuild with third_party/miniz/.",
                 e.path.c_str());

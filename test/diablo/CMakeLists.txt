@@ -1,5 +1,5 @@
 add_executable(diablo src/DiabloApp.cpp)
-target_link_libraries(diablo PRIVATE NaraGame::NaraGame)
+target_link_libraries(diablo PRIVATE NaraGame::Engine)
 set_target_properties(diablo PROPERTIES FOLDER "test")
 
 target_compile_definitions(diablo PRIVATE

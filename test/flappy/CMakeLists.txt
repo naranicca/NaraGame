@@ -1,5 +1,5 @@
 add_executable(flappy src/FlappyApp.cpp)
-target_link_libraries(flappy PRIVATE NaraGame::NaraGame)
+target_link_libraries(flappy PRIVATE NaraGame::Engine)
 set_target_properties(flappy PROPERTIES FOLDER "test")
 
 target_compile_definitions(flappy PRIVATE

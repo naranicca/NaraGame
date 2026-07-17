@@ -1,5 +1,5 @@
 add_executable(brawl src/BrawlApp.cpp)
-target_link_libraries(brawl PRIVATE NaraGame::NaraGame)
+target_link_libraries(brawl PRIVATE NaraGame::Engine)
 set_target_properties(brawl PROPERTIES FOLDER "test")
 
 target_compile_definitions(brawl PRIVATE

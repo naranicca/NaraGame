@@ -1,6 +1,6 @@
-# 마리오 스타일 플랫포머 만들기 — Scene Editor 튜토리얼
+# 마리오 스타일 플랫포머 만들기 — NaraGame 에디터 튜토리얼
 
-이 튜토리얼은 NaraGame Scene Editor 만으로 마리오 스타일 2D
+이 튜토리얼은 NaraGame 에디터만으로 마리오 스타일 2D
 플랫포머의 뼈대를 완성하는 과정을 처음부터 끝까지 설명합니다.
 프로젝트 생성 → 캐릭터 → 스프라이트 편집 → 애니메이션 → 입력 →
 물리 → 파티클 → 배경/음악 → 패럴랙스 → 게임 오버 → 스플래시
@@ -38,8 +38,8 @@
 
 ## 0. 시작 전 준비물
 
-* Windows + 이미 빌드된 `scene-editor.exe` 실행 파일
-  (`build/windows-x64/bin/Release/scene-editor.exe`).
+* Windows + 이미 빌드된 `NaraGame.exe` 실행 파일
+  (`build/windows-x64/bin/Release/NaraGame.exe`).
 * 아래 이미지/사운드 파일을 미리 준비합니다. 파일 확장자와 대략적인
   픽셀 크기만 지키면 됩니다. 예시 이름은 아래 튜토리얼과 그대로
   맞춰 두면 편합니다.
@@ -64,7 +64,7 @@
 
 ### 1.1 새 프로젝트 만들기
 
-1. `scene-editor.exe`를 실행합니다.
+1. `NaraGame.exe`를 실행합니다.
 2. 상단 메뉴에서 **File → New Project...** 를 클릭합니다.
 3. `New Project` 창이 뜹니다.
    * **Project name**: `MarioLike`
@@ -99,7 +99,7 @@
    `Assets/Scenes`로 열립니다.
 3. 파일 이름을 `Level1.nscene` 으로 저장합니다.
 
-창 제목이 `NaraGame Scene Editor - MarioLike : Level1` 로 바뀝니다.
+창 제목이 `NaraGame - MarioLike : Level1` 로 바뀝니다.
 씬을 수정하면 `Level1*` 처럼 별표가 붙어 저장이 안 된 상태임을
 알려 줍니다.
 
@@ -1041,7 +1041,7 @@ end
 
 ```
 <빌드폴더>/
-  game.exe               -- 실행 파일 (scene-editor.exe 복제)
+  game.exe               -- 실행 파일 (NaraGame.exe 복제)
   assets.pak             -- Assets/ 를 묶은 팩 파일
   ProjectSettings/       -- 프로젝트 설정 사본
 ```
@@ -1055,7 +1055,7 @@ end
 에디터를 특정 씬으로 스탠드얼론 시작:
 
 ```
-scene-editor.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.nscene"
+NaraGame.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.nscene"
 ```
 
 ---

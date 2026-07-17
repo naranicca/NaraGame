@@ -44,6 +44,7 @@ DerivedData/
 # ImGui docking layout + per-machine UI preferences (font scale) +
 # always-on file log dumped by Log::Write.
 scene-editor.ini
+NaraGame.ini
 editor.prefs.json
 nara-log.txt
 

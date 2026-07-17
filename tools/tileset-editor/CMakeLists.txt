@@ -1,5 +1,5 @@
 add_executable(tileset-editor src/EditorApp.cpp)
-target_link_libraries(tileset-editor PRIVATE NaraGame::NaraGame)
+target_link_libraries(tileset-editor PRIVATE NaraGame::Engine)
 set_target_properties(tileset-editor PROPERTIES FOLDER "tools")
 
 target_compile_definitions(tileset-editor PRIVATE

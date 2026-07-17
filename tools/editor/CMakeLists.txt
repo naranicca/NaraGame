@@ -1,14 +1,14 @@
 # ---------------------------------------------------------------------------
-# scene-editor -- Unity-style scene editor built on Dear ImGui + NaraGame RHI.
+# NaraGame editor -- Unity-style game editor built on Dear ImGui + NaraGame RHI.
 # ---------------------------------------------------------------------------
 
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
 
 if(NOT EXISTS ${IMGUI_DIR}/imgui.h)
     message(WARNING
-        "scene-editor: third_party/imgui is empty. Run "
+        "NaraGame editor: third_party/imgui is empty. Run "
         "`git submodule update --init --recursive` to fetch Dear ImGui. "
-        "Skipping the scene-editor target until then.")
+        "Skipping the NaraGame editor target until then.")
     return()
 endif()
 
@@ -34,9 +34,9 @@ if(MSVC)
     target_compile_options(imgui PRIVATE /W3)
 endif()
 
-add_executable(scene-editor
+add_executable(NaraGame
     src/EditorApp.cpp
-    $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/res/scene-editor.rc>
+    $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/res/NaraGame.rc>
     src/asset/Animation.cpp
     src/asset/AnimatorController.cpp
     src/asset/AssetDatabase.cpp
@@ -67,8 +67,8 @@ add_executable(scene-editor
     src/scene/TilemapComponent.cpp
     src/scene/TransformComponent.cpp
     src/scripting/ScriptHost.cpp)
-target_include_directories(scene-editor PRIVATE src)
-target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui xaudio2)
+target_include_directories(NaraGame PRIVATE src)
+target_link_libraries(NaraGame PRIVATE NaraGame::Engine imgui xaudio2)
 
 # Ship the editor as a Windows GUI-subsystem executable so no console
 # window pops up when it's double-clicked from Explorer. WIN32_EXECUTABLE
@@ -76,12 +76,12 @@ target_link_libraries(scene-editor PRIVATE NaraGame::NaraGame imgui xaudio2)
 # the linker at mainCRTStartup instead so our existing `int main()` in
 # EntryPoint.h remains the entry point. AttachConsole in EntryPoint.h
 # still routes stdio to the parent terminal when the exe is launched
-# from cmd/PowerShell, so `scene-editor.exe --build-game ...` keeps
+# from cmd/PowerShell, so `NaraGame.exe --build-game ...` keeps
 # logging as before.
 if(WIN32)
-    set_target_properties(scene-editor PROPERTIES WIN32_EXECUTABLE TRUE)
+    set_target_properties(NaraGame PROPERTIES WIN32_EXECUTABLE TRUE)
     if(MSVC)
-        target_link_options(scene-editor PRIVATE "/ENTRY:mainCRTStartup")
+        target_link_options(NaraGame PRIVATE "/ENTRY:mainCRTStartup")
     endif()
 endif()
 
@@ -101,15 +101,15 @@ if(EXISTS ${AUDIO_DECODERS_DIR}/stb_vorbis.c)
         target_compile_definitions(stb_vorbis PRIVATE _CRT_SECURE_NO_WARNINGS=1)
         target_compile_options(stb_vorbis PRIVATE /W3)
     endif()
-    target_compile_definitions(scene-editor PRIVATE NARAGAME_HAS_STB_VORBIS=1)
-    target_link_libraries(scene-editor PRIVATE stb_vorbis)
-    message(STATUS "scene-editor: stb_vorbis found -- OGG playback enabled.")
+    target_compile_definitions(NaraGame PRIVATE NARAGAME_HAS_STB_VORBIS=1)
+    target_link_libraries(NaraGame PRIVATE stb_vorbis)
+    message(STATUS "NaraGame editor: stb_vorbis found -- OGG playback enabled.")
 endif()
 if(EXISTS ${AUDIO_DECODERS_DIR}/minimp3.h
    AND EXISTS ${AUDIO_DECODERS_DIR}/minimp3_ex.h)
-    target_compile_definitions(scene-editor PRIVATE NARAGAME_HAS_MINIMP3=1)
-    target_include_directories(scene-editor PRIVATE ${AUDIO_DECODERS_DIR})
-    message(STATUS "scene-editor: minimp3 found -- MP3 playback enabled.")
+    target_compile_definitions(NaraGame PRIVATE NARAGAME_HAS_MINIMP3=1)
+    target_include_directories(NaraGame PRIVATE ${AUDIO_DECODERS_DIR})
+    message(STATUS "NaraGame editor: minimp3 found -- MP3 playback enabled.")
 endif()
 # ---------------------------------------------------------------------------
 # M9c14 miniz (zlib-compatible single-file compressor) for asset paks.
@@ -128,11 +128,11 @@ if(EXISTS ${MINIZ_DIR}/miniz.c AND EXISTS ${MINIZ_DIR}/miniz.h)
         target_compile_definitions(miniz PRIVATE _CRT_SECURE_NO_WARNINGS=1)
         target_compile_options(miniz PRIVATE /W3)
     endif()
-    target_compile_definitions(scene-editor PRIVATE NARAGAME_HAS_MINIZ=1)
-    target_link_libraries(scene-editor PRIVATE miniz)
-    message(STATUS "scene-editor: miniz found -- pak compression enabled.")
+    target_compile_definitions(NaraGame PRIVATE NARAGAME_HAS_MINIZ=1)
+    target_link_libraries(NaraGame PRIVATE miniz)
+    message(STATUS "NaraGame editor: miniz found -- pak compression enabled.")
 endif()
-set_target_properties(scene-editor PROPERTIES FOLDER "tools")
+set_target_properties(NaraGame PROPERTIES FOLDER "tools")
 
 # ---------------------------------------------------------------------------
 # Optional Lua 5.4 scripting -- vendored sources live in third_party/lua/.
@@ -187,11 +187,11 @@ if(EXISTS ${LUA_DIR}/lua.h)
         target_compile_definitions(lua PRIVATE _CRT_SECURE_NO_WARNINGS=1)
         target_compile_options(lua PRIVATE /W3)
     endif()
-    target_compile_definitions(scene-editor PRIVATE NARAGAME_SCENE_EDITOR_HAS_LUA=1)
-    target_link_libraries(scene-editor PRIVATE lua)
-    message(STATUS "scene-editor: Lua 5.4 sources found -- building real ScriptHost.")
+    target_compile_definitions(NaraGame PRIVATE NARAGAME_SCENE_EDITOR_HAS_LUA=1)
+    target_link_libraries(NaraGame PRIVATE lua)
+    message(STATUS "NaraGame editor: Lua 5.4 sources found -- building real ScriptHost.")
 else()
-    message(STATUS "scene-editor: third_party/lua is empty. Vendor Lua 5.4 "
+    message(STATUS "NaraGame editor: third_party/lua is empty. Vendor Lua 5.4 "
                    "sources (see third_party/lua/README.md) to enable scripting; "
                    "ScriptHost stays a stub until then.")
 endif()
