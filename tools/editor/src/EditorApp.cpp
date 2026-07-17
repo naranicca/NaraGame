@@ -1427,16 +1427,22 @@ private:
                     m_assetDb.FindByGuid(ts->texture)) {
                 imp.FromJson(texEntry->importSettings);
             }
+            // Transform.scale stretches the whole grid: both the
+            // cell extents AND the cell centre spacing scale, so a
+            // 2x tilemap is twice as large with no gaps between
+            // synthetic colliders.
             const float cellWorldW =
-                float(ts->cellPixelW) / imp.pixelsPerUnit;
+                float(ts->cellPixelW) / imp.pixelsPerUnit
+                * tr->scale.x;
             const float cellWorldH =
-                float(ts->cellPixelH) / imp.pixelsPerUnit;
+                float(ts->cellPixelH) / imp.pixelsPerUnit
+                * tr->scale.y;
             const float rotRad = tr->rotation
                 * 3.14159265358979323846f / 180.0f;
             const float cosR = std::cos(rotRad);
             const float sinR = std::sin(rotRad);
-            const float halfX = cellWorldW * 0.5f * tr->scale.x;
-            const float halfY = cellWorldH * 0.5f * tr->scale.y;
+            const float halfX = std::abs(cellWorldW) * 0.5f;
+            const float halfY = std::abs(cellWorldH) * 0.5f;
             for (const auto& kv : tm->cells) {
                 const int gx = kv.first.first;
                 const int gy = kv.first.second;
@@ -14366,9 +14372,18 @@ private:
                         imp.FromJson(entry->importSettings);
                     }
                     const float ppu = imp.pixelsPerUnit;
-                    if (ppu > 0.0f) {
-                        const float cellW = float(rt.cellW) / ppu;
-                        const float cellH = float(rt.cellH) / ppu;
+                    const auto* trHit =
+                        e->GetComponent<SceneEditor::TransformComponent>();
+                    const float cellW = (ppu > 0.0f)
+                        ? float(rt.cellW) / ppu
+                            * (trHit ? trHit->scale.x : 1.0f)
+                        : 0.0f;
+                    const float cellH = (ppu > 0.0f)
+                        ? float(rt.cellH) / ppu
+                            * (trHit ? trHit->scale.y : 1.0f)
+                        : 0.0f;
+                    if (std::abs(cellW) > 1e-6f &&
+                        std::abs(cellH) > 1e-6f) {
                         const int gx = int(std::floor((worldMouse.x - wp.x) / cellW));
                         const int gy = int(std::floor((worldMouse.y - wp.y) / cellH));
                         if (tm->cells.count({gx, gy}) > 0) {
@@ -14409,9 +14424,17 @@ private:
         if (const auto* entry = m_assetDb.FindByGuid(rt.textureGuid)) {
             imp.FromJson(entry->importSettings);
         }
-        const float cellWorldW = float(rt.cellW) / imp.pixelsPerUnit;
-        const float cellWorldH = float(rt.cellH) / imp.pixelsPerUnit;
-        if (cellWorldW <= 0.0f || cellWorldH <= 0.0f) return true;
+        // Fold Transform.scale into the brush grid so painting on
+        // a scaled tilemap lands in the cell under the cursor and
+        // the ghost overlay hugs the rendered (scaled) cells.
+        const auto* selTr =
+            selEntity->GetComponent<SceneEditor::TransformComponent>();
+        const float cellWorldW = float(rt.cellW) / imp.pixelsPerUnit
+            * (selTr ? selTr->scale.x : 1.0f);
+        const float cellWorldH = float(rt.cellH) / imp.pixelsPerUnit
+            * (selTr ? selTr->scale.y : 1.0f);
+        if (std::abs(cellWorldW) < 1e-6f ||
+            std::abs(cellWorldH) < 1e-6f) return true;
 
         const ImVec2 ep   = EntityWorldPos(*selEntity);
         const ImVec2 mp   = ImGui::GetMousePos();
@@ -15645,9 +15668,17 @@ private:
         if (const auto* entry = m_assetDb.FindByGuid(rt.textureGuid)) {
             imp.FromJson(entry->importSettings);
         }
+        // Transform.scale stretches the grid uniformly: cell size
+        // AND cell spacing both scale (mirrors the physics
+        // synthesis in TickColliders so what you see is what
+        // collides).
+        const auto* trans =
+            e.GetComponent<SceneEditor::TransformComponent>();
         const float ppu        = imp.pixelsPerUnit;
-        const float cellWorldW = float(rt.cellW) / ppu;
-        const float cellWorldH = float(rt.cellH) / ppu;
+        const float cellWorldW = float(rt.cellW) / ppu
+            * (trans ? trans->scale.x : 1.0f);
+        const float cellWorldH = float(rt.cellH) / ppu
+            * (trans ? trans->scale.y : 1.0f);
 
         const float texW = float(tex->Width());
         const float texH = float(tex->Height());
@@ -15662,8 +15693,6 @@ private:
         // the same rigid-body rotation matrix the M7c12-c16
         // sprite paths use; the whole tilemap rotates around
         // the entity origin (gridX=0, gridY=0).
-        const auto* trans =
-            e.GetComponent<SceneEditor::TransformComponent>();
         const float rotDeg = trans ? trans->rotation : 0.0f;
         const float rotRad = rotDeg
             * 3.14159265358979323846f / 180.0f;

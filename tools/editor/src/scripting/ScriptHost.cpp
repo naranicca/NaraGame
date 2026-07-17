@@ -919,9 +919,14 @@ static int LuaSceneRaycast(lua_State* L) {
                     cellW = float(ts->cellPixelW) / imp.pixelsPerUnit;
                     cellH = float(ts->cellPixelH) / imp.pixelsPerUnit;
                 }
-                if (cellW > 1e-4f && cellH > 1e-4f) {
-                    const float halfX = cellW * 0.5f * tr->scale.x;
-                    const float halfY = cellH * 0.5f * tr->scale.y;
+                // Transform.scale stretches cell size AND spacing
+                // (mirrors EditorApp's collider synthesis).
+                cellW *= tr->scale.x;
+                cellH *= tr->scale.y;
+                if (std::abs(cellW) > 1e-4f &&
+                    std::abs(cellH) > 1e-4f) {
+                    const float halfX = std::abs(cellW) * 0.5f;
+                    const float halfY = std::abs(cellH) * 0.5f;
                     for (const auto& kv : tm->cells) {
                         auto tIt = ts->tiles.find(kv.second);
                         if (tIt == ts->tiles.end()) continue;
@@ -1094,10 +1099,15 @@ static int LuaSceneFindPath(lua_State* L) {
                 cellW = float(ts->cellPixelW) / imp.pixelsPerUnit;
                 cellH = float(ts->cellPixelH) / imp.pixelsPerUnit;
             }
+            // Transform.scale stretches the walkability grid the
+            // same way rendering / colliders stretch.
+            cellW *= trC->scale.x;
+            cellH *= trC->scale.y;
             break;
         }
     }
-    if (!tm || !ts || cellW < 1e-4f || cellH < 1e-4f) {
+    if (!tm || !ts ||
+        std::abs(cellW) < 1e-4f || std::abs(cellH) < 1e-4f) {
         lua_pushnil(L); return 1;
     }
     auto WorldToCell = [&](float wx, float wy,
@@ -1210,7 +1220,8 @@ static int LuaSceneFindPath(lua_State* L) {
             WorldToCell(x0, y0, gx, gy);
             return IsWalkable(gx, gy);
         }
-        const float step = std::min(cellW, cellH) * 0.25f;
+        const float step =
+            std::min(std::abs(cellW), std::abs(cellH)) * 0.25f;
         const int nSteps = std::max(1,
             int(std::ceil(dist / step)));
         int lastGx = INT_MIN, lastGy = INT_MIN;
