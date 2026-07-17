@@ -33,6 +33,7 @@
 18. 적 만들기 — 순찰 · 발견 · 추적, 그리고 밟기
 19. HUD 만들기 — 점수 · 스테이지 · 라이프 표시
 20. 움직이는 플랫폼
+21. 깨지는 블록과 ? 블록 (아이템 블록)
 
 부록 A. Lua API 요약표  
 부록 B. Lua 라이프사이클 훅 목록
@@ -1573,6 +1574,150 @@ Play를 켜면 발판이 좌우로 왕복합니다. 올라타면 발판과 함�
 이동하고, 발판 위에서 점프하면 캐리가 잠시 풀렸다가 착지하면
 다시 붙습니다. 발판 이동 방향과 반대로 걸으면 제자리걸음이 되는
 것도 확인해 보세요 — 캐리 이동량과 걷기 속도가 합산되기 때문입니다.
+
+---
+
+## 21. 깨지는 블록과 ? 블록 (아이템 블록)
+
+마리오의 두 가지 상징적인 블록을 만듭니다:
+
+* **벽돌(Brick)**: 아래에서 머리로 치면 깨져 사라지고 점수를 줍니다.
+* **? 블록(QBlock)**: 아래에서 치면 아이템(코인)이 위로 나오고,
+  "빈 블록" 모양으로 바뀌어 다시는 반응하지 않습니다.
+
+두 블록 모두 원리는 같습니다 — 블록은 Rigidbody 없는 솔리드
+BoxCollider(= 고정 블록)이고, 플레이어가 부딪히면 블록 쪽 스크립트의
+`CollisionEnter` 가 불립니다. 거기서 "아래에서 쳤는지"만 판별하면
+됩니다.
+
+> **왜 속도가 아니라 위치로 판별하나?** `CollisionEnter` 콜백은
+> 물리 해소(밀어내기 + 속도 반사)가 끝난 **뒤에** 불립니다. 머리로
+> 치는 순간 위쪽 속도는 이미 0으로 깎여 있으므로, 속도 대신
+> "플레이어가 블록보다 충분히 아래에 있고 수평으로 겹친다"는
+> 위치 관계로 판별하는 것이 안정적입니다.
+
+### 21.1 벽돌 (깨지는 블록)
+
+1. `Assets/Sprites/brick.png` 를 임포트합니다 (Pivot: Center,
+   Filter: Point).
+2. Hierarchy → **+ Entity** → 이름 `Brick1` → 플레이어가 점프로
+   머리를 닿을 수 있는 높이에 배치.
+3. **Add Component...** → **SpriteRenderer**: Sprite `brick.png`.
+4. **Add Component...** → **BoxCollider**: Size는 스프라이트에 맞게,
+   **Is Trigger 해제**, Layer `Default`. **Rigidbody2D는 붙이지
+   않습니다** (붙이면 떨어집니다).
+
+`Assets/Scripts/Brick.lua`:
+
+```lua
+-- Assets/Scripts/Brick.lua
+-- 아래에서 머리로 치면 깨지는 벽돌.
+
+-- "아래에서 쳤는가": 플레이어 중심이 블록 중심보다 충분히 아래
+-- + 수평으로 겹쳐 있을 때만 인정. 옆에서 걸어와 부딪히거나 위에
+-- 올라섰을 때는 거짓이 된다. 0.4 / 0.6 은 블록 1x1, 플레이어
+-- 콜라이더 폭 ~1 기준 -- 크기를 바꿨다면 함께 조정할 것.
+local function hitFromBelow(self, other)
+  local bx, by = transform.get_position(self)
+  local px, py = transform.get_position(other)
+  return py < by - 0.4 and math.abs(px - bx) < 0.6
+end
+
+function Brick_CollisionEnter(self, other)
+  if other ~= "Player" then return end
+  if not hitFromBelow(self, other) then return end
+
+  state.score = (state.score or 0) + 50
+  audio.play("Sounds/break.wav", 0.9)
+  -- 파편 연출 (선택): 파티클 엔티티를 하나 만들어 두면 깨질 때
+  -- 그 자리에서 터뜨릴 수 있다 (10장의 JumpDust 패턴).
+  if scene.find("BrickDust") then
+    local bx, by = transform.get_position(self)
+    transform.set_position("BrickDust", bx, by, 0)
+    particle.emit("BrickDust", 12)
+  end
+  scene.destroy_entity(self)
+end
+```
+
+`Brick1` 에 **Add Component... → Script**: Script
+`Scripts/Brick.lua`, Entry function `Brick`. 벽돌 여러 개는
+Duplicate — 스크립트가 이름에 의존하지 않으므로 이름은
+`Brick2`, `Brick3`, ... 아무거나 됩니다 (단 `_CollisionEnter` 는
+같은 Entry function 을 공유).
+
+### 21.2 ? 블록 (아이템 블록)
+
+1. `Assets/Sprites/qblock.png` — ? 모양과 "빈 블록" 모양이 가로로
+   나란한 2프레임 시트를 임포트하고, Sprite Editor에서 **By Cell
+   Count** `2 x 1` 로 슬라이스 → 이름을 `qblock_active`,
+   `qblock_used` 로 바꿉니다.
+2. 엔티티 `QBlock1` 을 만들고 SpriteRenderer (Sub-sprite:
+   `qblock_active`) + BoxCollider (Is Trigger 해제)를 붙입니다.
+   역시 Rigidbody2D는 없습니다.
+3. **나올 아이템 준비** — 18.4의 숨긴 엔티티 활성화 패턴 그대로:
+   11장의 코인을 Duplicate 해서 이름을 `QBlock1_Item` 으로 바꾸고
+   **enabled 체크를 해제**합니다. 스크립트가
+   `블록 이름 .. "_Item"` 규칙으로 찾습니다.
+
+`Assets/Scripts/QBlock.lua`:
+
+```lua
+-- Assets/Scripts/QBlock.lua
+-- 마리오 ? 블록: 아래에서 치면 아이템이 나오고 빈 블록이 된다.
+
+-- 이미 사용된 블록 기록. Lua VM은 씬을 다시 로드해도 유지되므로
+-- (11.4) 씬 재시작 때 블록이 "계속 빈 블록"으로 남지 않도록
+-- Start 에서 자기 항목을 지워 초기화한다.
+local used = {}
+
+function QBlock_Start(self)
+  used[self] = nil
+end
+
+function QBlock_CollisionEnter(self, other)
+  if other ~= "Player" then return end
+  if used[self] then return end
+  local bx, by = transform.get_position(self)
+  local px, py = transform.get_position(other)
+  if not (py < by - 0.4 and math.abs(px - bx) < 0.6) then return end
+
+  used[self] = true
+  sprite.set_sub_sprite(self, "qblock_used")
+  audio.play("Sounds/coin.wav", 0.9)
+
+  -- 숨겨 둔 아이템을 블록 바로 위에서 활성화. 아이템이 코인이면
+  -- Coin.lua(11.2)가 붙어 있으므로 그대로 주울 수 있다.
+  local item = self .. "_Item"
+  if scene.find(item) then
+    transform.set_position(item, bx, by + 1.0, 0)
+    scene.set_enabled(item, true)
+  end
+end
+```
+
+`QBlock1` 에 Script 컴포넌트: Script `Scripts/QBlock.lua`, Entry
+function `QBlock`. 블록마다 대응하는 `_Item` 엔티티를 하나씩
+준비합니다 (`QBlock2` → `QBlock2_Item`).
+
+**파워업 변형**: 아이템 엔티티에 Rigidbody2D + BoxCollider를 주면
+활성화되는 순간 중력을 받아 블록 위에서 떨어지는 버섯형 아이템이
+됩니다. 거기에 18장의 Goomba처럼 일정 속도로 걷는 스크립트를
+붙이면 화면을 굴러다니는 파워업이 완성됩니다. 효과는
+`Player_TriggerEnter` 에서 `state.lives = state.lives + 1` 처럼
+원하는 보상으로 처리하면 됩니다.
+
+### 21.3 실행해 보기
+
+Play를 켜고:
+
+* 벽돌 아래에서 점프해 머리로 치면 벽돌이 사라지고 +50점
+  (19장의 HUD가 있으면 점수가 바로 올라갑니다).
+* ? 블록을 치면 "빈 블록" 모양으로 바뀌면서 코인이 위로 나오고,
+  코인을 주우면 `state.coins` 가 올라갑니다. 빈 블록을 다시 쳐도
+  아무 일도 일어나지 않습니다.
+* 옆에서 걸어가 부딪히거나 블록 위에 올라서는 것으로는 발동하지
+  않는 것도 확인해 보세요 — `hitFromBelow` 의 위치 판별 덕분입니다.
 
 ---
 
