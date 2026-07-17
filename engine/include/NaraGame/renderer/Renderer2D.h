@@ -9,6 +9,15 @@
 #include <string>
 #include <vector>
 
+// windows.h maps DrawText to DrawTextA/W. A TU that includes
+// <windows.h> (e.g. via EntryPoint.h) before this header would see
+// both the declaration below and every call site macro-renamed to
+// DrawTextW. Scrub the macro; call the ANSI/wide winapi functions
+// explicitly if you ever need them in the same TU.
+#ifdef DrawText
+#  undef DrawText
+#endif
+
 namespace NaraGame {
 
 class RHIDevice;

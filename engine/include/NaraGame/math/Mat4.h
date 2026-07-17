@@ -96,27 +96,31 @@ inline Mat4 RotationY(float radians) {
 }
 
 // Right-handed orthographic projection with depth in [0, 1]. Ideal for 2D.
-inline Mat4 Ortho(float left, float right, float bottom, float top, float near, float far) {
+// Parameters are zNear/zFar (not near/far) because windows.h defines
+// `near` and `far` as empty macros -- a TU that includes <windows.h>
+// (e.g. via EntryPoint.h) before this header would otherwise fail to
+// compile.
+inline Mat4 Ortho(float left, float right, float bottom, float top, float zNear, float zFar) {
     Mat4 m;
     m.At(0, 0) = 2.0f / (right - left);
     m.At(1, 1) = 2.0f / (top - bottom);
-    m.At(2, 2) = -1.0f / (far - near);
+    m.At(2, 2) = -1.0f / (zFar - zNear);
     m.At(0, 3) = -(right + left) / (right - left);
     m.At(1, 3) = -(top + bottom) / (top - bottom);
-    m.At(2, 3) = -near / (far - near);
+    m.At(2, 3) = -zNear / (zFar - zNear);
     return m;
 }
 
 // Right-handed perspective projection with depth in [0, 1]. fovY in radians.
-inline Mat4 Perspective(float fovY, float aspect, float near, float far) {
+inline Mat4 Perspective(float fovY, float aspect, float zNear, float zFar) {
     const float tanHalf = std::tan(fovY * 0.5f);
     Mat4 m;
     m.data[0] = 0.0f; m.data[5] = 0.0f; m.data[10] = 0.0f; m.data[15] = 0.0f;
     m.At(0, 0) = 1.0f / (aspect * tanHalf);
     m.At(1, 1) = 1.0f / tanHalf;
-    m.At(2, 2) = far / (near - far);
+    m.At(2, 2) = zFar / (zNear - zFar);
     m.At(3, 2) = -1.0f;
-    m.At(2, 3) = -(far * near) / (far - near);
+    m.At(2, 3) = -(zFar * zNear) / (zFar - zNear);
     return m;
 }
 
