@@ -13940,6 +13940,10 @@ private:
             ImGui::Text("Zoom %.0f px/u  |  Centre (%.2f, %.2f)",
                         m_viewCam.zoom, m_viewCam.center.x, m_viewCam.center.y);
             ImGui::SameLine();
+            // Reset / Frame move the editor camera, which the game
+            // camera drive would overwrite next frame -- grey them
+            // out while the Game Cam view owns the framing.
+            ImGui::BeginDisabled(m_gameCameraView);
             if (ImGui::SmallButton("Reset View")) {
                 m_viewCam = ViewportCamera{};
             }
@@ -13949,6 +13953,7 @@ private:
                     m_viewCam.center = EntityWorldPos(*e);
                 }
             }
+            ImGui::EndDisabled();
             ImGui::SameLine();
             // Match the height of the neighbouring SmallButtons +
             // the "Zoom ... Centre ..." text on the same row.
@@ -13971,7 +13976,43 @@ private:
                     m_project.Save();
                 }
             }
+            ImGui::SameLine();
+            // Game-camera view toggle. Enable = stash the editor
+            // camera + start following the active CameraComponent;
+            // disable = restore the stashed editor framing.
+            if (NGCheckbox("Game Cam", &m_gameCameraView)) {
+                if (m_gameCameraView) {
+                    m_savedEditorCam = m_viewCam;
+                } else {
+                    m_viewCam = m_savedEditorCam;
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Render the Viewport through the scene's active\n"
+                    "Camera component (highest priority wins) --\n"
+                    "exactly what the shipped game shows. Pan / zoom\n"
+                    "are driven by the camera while this is on.");
+            }
             ImGui::PopStyleVar();
+            // Drive the viewport from the active game camera every
+            // frame while the toggle is on -- same resolve the
+            // standalone build runs, so a Lua camera-follow script
+            // moves this view identically.
+            if (m_gameCameraView) {
+                if (SceneEditor::Entity* camEnt =
+                        ResolveActiveCameraEntity()) {
+                    const auto* tr = camEnt->GetComponent<
+                        SceneEditor::TransformComponent>();
+                    const auto* cam = camEnt->GetComponent<
+                        SceneEditor::CameraComponent>();
+                    if (tr && cam) {
+                        m_viewCam.center =
+                            ImVec2{tr->position.x, tr->position.y};
+                        m_viewCam.zoom = cam->zoom;
+                    }
+                }
+            }
         }
 
         const ImVec2 panelMin  = ImGui::GetCursorScreenPos();
@@ -14671,8 +14712,12 @@ private:
 
         // Wheel zoom around the cursor so the world point under the
         // mouse stays put. Skip zoom while a drag is in progress so a
-        // fast pan with the wheel doesn't get hijacked.
-        if (hovered && std::abs(io.MouseWheel) > 0.0f) {
+        // fast pan with the wheel doesn't get hijacked. Both zoom and
+        // pan are inert in Game Cam view -- the camera drive would
+        // overwrite them on the next frame anyway, so reacting here
+        // would just make the view stutter.
+        if (!m_gameCameraView &&
+            hovered && std::abs(io.MouseWheel) > 0.0f) {
             const ImVec2 worldBefore = ScreenToWorld(io.MousePos,
                                                      panelMin, panelSize);
             const float factor = std::pow(1.15f, io.MouseWheel);
@@ -14687,7 +14732,7 @@ private:
         // be meaningless here. Both work against active OR hovered so
         // the pan doesn't drop the moment the cursor slips off the
         // viewport's InvisibleButton mid-stroke.
-        if ((active || hovered) &&
+        if (!m_gameCameraView && (active || hovered) &&
             (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
              ImGui::IsMouseDragging(ImGuiMouseButton_Right))) {
             const ImVec2 d = io.MouseDelta;
@@ -16880,6 +16925,14 @@ private:
                                m_audioPreviewVolume;
 
     ViewportCamera             m_viewCam;
+    // Game-camera view: when on, the Viewport renders through the
+    // scene's active CameraComponent every frame (same drive the
+    // standalone build uses) instead of the free editor camera, so
+    // the user sees exactly what the shipped game would show. The
+    // editor camera is stashed on enable + restored on disable so
+    // toggling doesn't lose the user's working framing.
+    bool                       m_gameCameraView = false;
+    ViewportCamera             m_savedEditorCam;
 
     // Translate-gizmo state. Hover updates every hovered frame; active
     // sticks from mouse-down to release. m_gizmoDownWorld + m_gizmoStartPos
