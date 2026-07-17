@@ -9122,12 +9122,17 @@ private:
         const float previewMaxH = avail.y;
         const float texW = float(tex->Width());
         const float texH = float(tex->Height());
-        float scale = std::min(previewMaxW / texW, previewMaxH / texH);
-        if (scale <= 0.0f) scale = 1.0f;
-        const ImVec2 imgSize{texW * scale, texH * scale};
 
         ImGui::BeginChild("##preview", ImVec2(previewMaxW, previewMaxH),
                           true);
+        // Fit against the child's INNER content size, not the child's
+        // outer size -- the 1px border + WindowPadding shave a dozen
+        // pixels off, and fitting against the outer size clipped the
+        // right edge of wide (width-limited) textures.
+        const ImVec2 inner = ImGui::GetContentRegionAvail();
+        float scale = std::min(inner.x / texW, inner.y / texH);
+        if (scale <= 0.0f) scale = 1.0f;
+        const ImVec2 imgSize{texW * scale, texH * scale};
         const ImVec2 imgMin = ImGui::GetCursorScreenPos();
         const ImTextureID texId =
             static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(
