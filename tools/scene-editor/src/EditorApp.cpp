@@ -13908,6 +13908,10 @@ private:
         if (!m_gameViewOpen) return;
         ImGui::SetNextWindowSize(ImVec2(816, 500),
                                  ImGuiCond_FirstUseEver);
+        if (m_gameViewFocusRequest) {
+            ImGui::SetNextWindowFocus();
+            m_gameViewFocusRequest = false;
+        }
         if (!ImGui::Begin("Game", &m_gameViewOpen)) {
             ImGui::End();
             return;
@@ -14050,10 +14054,15 @@ private:
                 }
             }
             ImGui::SameLine();
-            // Game view toggle: opens a separate floating window
+            // Game view button: opens the separate floating window
             // that renders through the scene's active Camera
-            // component at the game's aspect ratio.
-            NGCheckbox("Game View", &m_gameViewOpen);
+            // component at the game's aspect ratio. Pressing it
+            // while the window is already open re-focuses it
+            // instead of toggling it away.
+            if (ImGui::SmallButton("Game View")) {
+                m_gameViewOpen         = true;
+                m_gameViewFocusRequest = true;
+            }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip(
                     "Open a separate window rendered through the\n"
@@ -16986,6 +16995,7 @@ private:
     // m_gameViewRendering flags the shared draw path so editor-only
     // visuals (marker glyphs, selection outlines) stay out of it.
     bool                       m_gameViewOpen = false;
+    bool                       m_gameViewFocusRequest = false;
     bool                       m_gameViewRendering = false;
 
     // Translate-gizmo state. Hover updates every hovered frame; active
