@@ -30,6 +30,8 @@
 15. 스플래시 화면
 16. 게임 빌드 & 실행
 17. 자주 하는 실수 요약
+18. 적 만들기 — 순찰 · 발견 · 추적, 그리고 밟기
+19. HUD 만들기 — 점수 · 스테이지 · 라이프 표시
 
 부록 A. Lua API 요약표  
 부록 B. Lua 라이프사이클 훅 목록
@@ -1080,6 +1082,385 @@ NaraGame.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.nsce
 | 스크립트 바꿨는데 반영 안 됨 | 파일만 저장하고 리로드 안 함 | 스크립트 편집기의 **Save** 또는 **Edit → Reload Scripts** |
 | Tilemap 셀에 콜라이더 없음 | Tileset 편집기에서 셀 클릭 안 함 (기본은 빈 셀) | Tileset Editor 에서 각 셀 클릭하여 Solid Box 로 지정 |
 | 배경이 카메라와 함께 안 움직임 | Parallax factor = 0 | 0.1~0.9 로 조정, `origin_x/y` 도 확인 |
+
+---
+
+## 18. 적 만들기 — 순찰 · 발견 · 추적, 그리고 밟기
+
+굼바 스타일의 적을 만듭니다. 동작은 세 단계입니다:
+
+1. **순찰**: 시작 위치를 중심으로 좌우를 일정 거리 왕복합니다.
+2. **발견**: 플레이어가 탐지 범위 안에 들어오고 **시선이 닿으면**
+   (중간에 벽·지면이 없으면) 추적 모드로 바뀝니다.
+3. **추적·공격**: 플레이어 쪽으로 빠르게 다가가고, 몸통이 닿으면
+   플레이어가 피해를 입습니다(접촉 공격). 단, 플레이어가 **위에서
+   밟으면** 반대로 적이 사라지면서 점수가 오르고 코인이 나옵니다.
+
+### 18.1 Goomba 엔티티 만들기
+
+1. `Assets/Sprites/goomba.png` 를 임포트합니다 (Pivot: Center,
+   Filter: Point). 걷기 2프레임짜리 가로 시트를 권장합니다.
+2. Project 창에서 더블 클릭 → Sprite Editor 에서 **By Cell Count**
+   `2 x 1` 로 슬라이스하고 이름을 `walk_0`, `walk_1` 로 바꿉니다.
+3. Hierarchy → **+ Entity** → 이름 `Goomba1` → 지면 위에 배치.
+4. **Add Component...** → **SpriteRenderer**:
+   * Sprite: `goomba.png`, Sub-sprite: `walk_0`
+   * Sorting Layer: `Default`, Order in Layer: `9` (플레이어보다 아래)
+5. **Add Component...** → **Rigidbody2D**: 플레이어와 같은 동적
+   바디 설정 (중력 적용).
+6. **Add Component...** → **BoxCollider**:
+   * Size: 몸통에 맞게 (예: `0.7, 0.6`), **Is Trigger: 해제**
+   * Layer: `Default`
+   * 트리거가 아니어야 플레이어와 `CollisionEnter` 이벤트가
+     발생합니다 (11.3 참고).
+
+적을 여러 마리 두려면 `Goomba1` 을 Duplicate 해서 `Goomba2`,
+`Goomba3`, ... 로 이름을 바꾸고 위치만 옮기면 됩니다. 아래
+스크립트는 이름이 `Goomba` 로 시작하기만 하면 동작합니다.
+
+### 18.2 Goomba.lua — 순찰 · 발견 · 추적
+
+`Assets/Scripts/Goomba.lua`:
+
+```lua
+-- Assets/Scripts/Goomba.lua
+-- 순찰하다가 플레이어를 발견하면 추적한다.
+-- 공격은 접촉 데미지 방식 -- 몸이 닿으면 Player 쪽
+-- CollisionEnter 에서 피해 처리를 한다 (18.3).
+
+local PATROL_SPEED  = 1.5
+local CHASE_SPEED   = 3.5
+local PATROL_RANGE  = 3.0   -- 시작 위치에서 좌우로 왕복하는 거리
+local DETECT_RANGE  = 6.0   -- 이 거리 안이면 발견 후보
+local DETECT_HEIGHT = 1.5   -- 위아래 높이 차가 이 이내일 때만
+local FRAME_TIME    = 0.25  -- 걷기 flipbook 프레임 간격 (초)
+
+-- Goomba가 여러 마리여도 스크립트 파일은 하나 -- 엔티티 이름을
+-- 키로 하는 테이블에 마리별 상태를 저장한다 (Player.lua와 동일한
+-- 패턴).
+local state = {}
+local function s(name)
+  local t = state[name]
+  if not t then
+    local x, _ = transform.get_position(name)
+    t = { homeX = x, dir = -1, animT = 0, frame = 0, chasing = false }
+    state[name] = t
+  end
+  return t
+end
+
+-- 시야 판정. 거리/높이로 먼저 거른 뒤 마지막에 시선 raycast:
+-- 적 위치에서 플레이어 위치로 광선을 쏘고 (자기 자신은 exclude),
+-- "가장 먼저 맞은 것"이 Player일 때만 보이는 것으로 친다.
+-- 중간에 지면 타일이나 다른 콜라이더가 있으면 그쪽이 먼저 맞아
+-- false가 되므로, 자연스럽게 "벽 뒤는 안 보이는" 시야가 된다.
+local function canSeePlayer(self, ex, ey, px, py)
+  if math.abs(px - ex) > DETECT_RANGE  then return false end
+  if math.abs(py - ey) > DETECT_HEIGHT then return false end
+  return scene.raycast(ex, ey, px, py, self) == "Player"
+end
+
+function Goomba_Update(self, dt)
+  local st = s(self)
+  local ex, ey = transform.get_position(self)
+  local vx, vy = rigidbody.get_velocity(self)
+
+  -- 플레이어 위치 (죽거나 없으면 nil)
+  local px, py
+  if scene.find("Player") then
+    px, py = transform.get_position("Player")
+  end
+
+  st.chasing = (px ~= nil) and canSeePlayer(self, ex, ey, px, py)
+
+  if st.chasing then
+    -- 추적: 플레이어 쪽으로 빠르게 다가간다.
+    st.dir = (px > ex) and 1 or -1
+    vx = st.dir * CHASE_SPEED
+  else
+    -- 순찰: homeX +- PATROL_RANGE 사이를 왕복.
+    if ex > st.homeX + PATROL_RANGE then st.dir = -1 end
+    if ex < st.homeX - PATROL_RANGE then st.dir =  1 end
+    vx = st.dir * PATROL_SPEED
+  end
+
+  -- 낭떠러지 검사: 진행 방향 반 유닛 앞의 발밑으로 짧은 광선을
+  -- 쏘아 지면이 없으면, 순찰 중엔 돌아서고 추적 중엔 멈춘다
+  -- (추적하다 절벽으로 뛰어내리지 않게).
+  local aheadX = ex + st.dir * 0.5
+  if scene.raycast(aheadX, ey, aheadX, ey - 1.5, self) == "" then
+    if st.chasing then
+      vx = 0
+    else
+      st.dir = -st.dir
+      vx = st.dir * PATROL_SPEED
+    end
+  end
+
+  rigidbody.set_velocity(self, vx, vy)
+  sprite.set_flip_x(self, st.dir < 0)
+
+  -- 2프레임 걷기 flipbook. Animator Controller 없이 스크립트로
+  -- 서브스프라이트를 교대시키는 가장 가벼운 방법이다.
+  st.animT = st.animT + dt
+  if st.animT >= FRAME_TIME then
+    st.animT = st.animT - FRAME_TIME
+    st.frame = 1 - st.frame
+    sprite.set_sub_sprite(self, "walk_" .. st.frame)
+  end
+end
+```
+
+각 Goomba 엔티티에 **Add Component... → Script**:
+
+* Script: `Scripts/Goomba.lua`
+* Entry function: `Goomba`
+
+### 18.3 Player.lua — 밟기와 피격 처리
+
+밟기/피격 판정은 한곳에서 처리하는 게 깔끔하므로 **Player 쪽**
+`CollisionEnter` 에 둡니다. `Player.lua` 에 아래를 추가합니다.
+
+상수와 상태 (파일 상단):
+
+```lua
+local STOMP_BOUNCE    = 9.0   -- 밟은 뒤 튀어오르는 속도
+local HURT_KNOCKBACK  = 8.0   -- 피격 시 밀려나는 속도
+local HURT_INVINCIBLE = 1.5   -- 피격 후 무적 시간 (초)
+```
+
+`s(name)` 헬퍼가 만드는 상태 테이블에 `invincible = 0` 필드를
+추가합니다:
+
+```lua
+t = { coyote = 0, buffer = 0, wasGrounded = false, invincible = 0 }
+```
+
+`Player_Start` 에 전역 게임 상태 초기화를 추가합니다. `state` 는
+씬을 다시 로드해도 유지되는 전역 테이블이므로 (11.4), `or` 로
+"이미 있으면 그대로" 초기화합니다:
+
+```lua
+state.score = state.score or 0
+state.lives = state.lives or 3
+state.stage = state.stage or 1
+```
+
+충돌 핸들러 (새 함수):
+
+```lua
+-- 적과 충돌. 위에서 밟았으면 적 처치 + 점수 + 코인 드롭,
+-- 옆/아래에서 닿았으면 피격.
+function Player_CollisionEnter(self, other)
+  if other:sub(1, 6) ~= "Goomba" then return end
+  local st = s(self)
+  local px, py = transform.get_position(self)
+  local ex, ey = transform.get_position(other)
+  local vx, vy = rigidbody.get_velocity(self)
+
+  -- 밟기 판정: 플레이어가 적 중심보다 충분히 위에 있고
+  -- 하강 중일 때만 밟은 것으로 인정한다.
+  if py > ey + 0.3 and vy < 0 then
+    state.score = state.score + 100
+    audio.play("Sounds/stomp.wav", 0.9)
+    -- 미리 숨겨 둔 드롭 코인을 적이 있던 자리에서 활성화 (18.4)
+    local coin = other .. "_Coin"
+    if scene.find(coin) then
+      transform.set_position(coin, ex, ey + 0.6, 0)
+      scene.set_enabled(coin, true)
+    end
+    scene.destroy_entity(other)
+    rigidbody.set_velocity(self, vx, STOMP_BOUNCE)
+    return
+  end
+
+  -- 피격. 무적 시간 동안은 무시.
+  if st.invincible > 0 then return end
+  st.invincible = HURT_INVINCIBLE
+  state.lives = state.lives - 1
+  audio.play("Sounds/hurt.wav", 0.9)
+  -- 적 반대쪽으로 튕겨 나가는 넉백
+  local knockDir = (px < ex) and -1 or 1
+  rigidbody.set_velocity(self, knockDir * HURT_KNOCKBACK, 6.0)
+
+  if state.lives <= 0 then
+    -- 게임 오버: 상태를 리셋하고 씬 재시작 (14 참고)
+    state.lives = 3
+    state.score = 0
+    scene.load("Assets/Scenes/Level1.nscene",
+      { fade_out = 0.6, fade_in = 0.6, color = { r=0, g=0, b=0 } })
+  end
+end
+```
+
+마지막으로 `Player_Update` 안에 무적 시간 처리(타이머 감소 +
+깜빡임)를 추가합니다:
+
+```lua
+-- 피격 후 무적 시간: 타이머를 줄이면서 스프라이트를 깜빡인다.
+if st.invincible > 0 then
+  st.invincible = math.max(0, st.invincible - dt)
+  local blink = (math.floor(st.invincible * 10) % 2 == 0)
+  sprite.set_alpha(self, blink and 1.0 or 0.4)
+  if st.invincible == 0 then sprite.set_alpha(self, 1.0) end
+end
+```
+
+효과음 파일(`stomp.wav`, `hurt.wav`)이 없으면 `audio.play` 줄은
+지우거나 가지고 있는 다른 파일로 바꿔도 됩니다.
+
+### 18.4 밟으면 코인이 나오게 — 숨긴 엔티티 활성화 패턴
+
+Lua에서는 스프라이트 자산을 처음부터 만들어 붙일 수 없으므로,
+**드롭될 코인을 미리 씬에 숨겨 두고 필요할 때 활성화**하는 패턴을
+씁니다 (오브젝트 풀의 가장 단순한 형태입니다).
+
+1. 11장에서 만든 코인 엔티티 하나를 **Duplicate** 합니다.
+2. 이름을 `Goomba1_Coin` 으로 바꿉니다 — 18.3의 코드가
+   `적 이름 .. "_Coin"` 규칙으로 찾습니다.
+3. Inspector 상단의 **enabled 체크박스를 해제**해 비활성화합니다.
+   비활성 엔티티는 그려지지도, 트리거로 반응하지도 않습니다.
+4. 적마다 하나씩: `Goomba2_Coin`, `Goomba3_Coin`, ...
+
+밟히면 18.3의 코드가 코인을 적 위치로 옮기고 활성화합니다. 코인에는
+이미 `Coin.lua` 가 붙어 있으므로(11.2) 주우면 `state.coins` 가
+올라가고 사라집니다.
+
+> **왜 코인을 Goomba의 자식으로 두지 않나?**
+> `scene.destroy_entity` 는 자식 트리를 통째로 파괴합니다. 코인이
+> 적의 자식이면 적이 죽는 순간 코인도 같이 사라지므로, 반드시 씬
+> 루트(또는 다른 부모) 아래에 둬야 합니다.
+
+### 18.5 실행해 보기
+
+Play를 켜면:
+
+* Goomba가 시작 지점을 중심으로 좌우 순찰합니다.
+* 가까이 가면 (시선이 닿는 순간) 속도를 올려 쫓아옵니다. 벽이나
+  지면 뒤에 숨으면 다시 순찰로 돌아갑니다.
+* 옆에서 닿으면 라이프가 1 줄고 잠깐 무적(깜빡임) + 넉백.
+* 위에서 밟으면 적이 사라지고 +100점, 그 자리에 코인이 나옵니다.
+
+콘솔에 `state.score` 를 찍어 보거나, 19장의 HUD를 만들어 화면에서
+바로 확인하세요.
+
+---
+
+## 19. HUD 만들기 — 점수 · 스테이지 · 라이프 표시
+
+엔진에는 아직 화면 고정 텍스트를 그리는 전용 UI API가 없으므로,
+HUD는 **카메라의 자식 스프라이트**로 만듭니다. 부모(카메라)가
+움직이면 자식도 따라 움직이므로 화면에 고정된 것처럼 보이고, 숫자는
+0~9 스프라이트 시트의 서브스프라이트를 갈아 끼우는 방식으로
+표시합니다.
+
+### 19.1 숫자/하트 스프라이트 준비
+
+1. `Assets/Sprites/digits.png` — `0123456789` 가 가로로 나란한
+   10프레임 시트를 임포트합니다 (Filter: Point).
+2. Sprite Editor 에서 **By Cell Count** `10 x 1` 로 슬라이스하고
+   이름을 `digit_0` ~ `digit_9` 로 바꿉니다.
+3. `Assets/Sprites/heart.png` — 라이프 표시용 하트 한 장을
+   임포트합니다.
+
+### 19.2 HUD 엔티티 트리
+
+Hierarchy에서 다음 구조를 만듭니다. **HUD를 MainCamera의 자식**으로
+만드는 것이 핵심입니다 (Hierarchy에서 엔티티를 드래그해 MainCamera
+위에 떨어뜨리면 자식이 됩니다).
+
+```
+MainCamera
+└─ HUD                    <- 빈 엔티티, Position (0, 0, 0)
+   ├─ ScoreD3             <- 1000의 자리
+   ├─ ScoreD2             <- 100의 자리
+   ├─ ScoreD1             <- 10의 자리
+   ├─ ScoreD0             <- 1의 자리
+   ├─ StageD              <- 스테이지 번호
+   ├─ Heart1
+   ├─ Heart2
+   └─ Heart3
+```
+
+각 자식의 설정:
+
+* **ScoreD3~D0**: SpriteRenderer — Sprite `digits.png`, Sub-sprite
+  `digit_0`, **Sorting Layer: `UI`** (1.4에서 만든 레이어).
+  Position은 화면 왼쪽 위, 부모 기준 로컬 오프셋입니다. 카메라
+  줌 80px/u 기준 화면 반폭이 (10, 5.6) 이므로 예를 들어
+  `(-9.2, 4.8)`, `(-8.6, 4.8)`, `(-8.0, 4.8)`, `(-7.4, 4.8)`.
+* **StageD**: 같은 digits 스프라이트, Position `(0, 4.8)` (상단
+  중앙). "STAGE" 글자가 필요하면 라벨 이미지를 한 장 만들어 왼쪽에
+  붙이면 됩니다.
+* **Heart1~3**: Sprite `heart.png`, Sorting Layer `UI`, Position
+  오른쪽 위 `(7.6, 4.8)`, `(8.4, 4.8)`, `(9.2, 4.8)`.
+
+> 자식 엔티티의 Position은 **부모 기준 로컬 좌표**입니다. 카메라가
+> 어디로 가든 HUD는 항상 화면의 같은 자리에 보입니다. 화면 가장자리
+> 좌표는 카메라 줌에 따라 달라지므로 (`반폭 = 창크기/2/zoom`) 줌을
+> 바꿨다면 오프셋도 함께 조정하세요.
+
+### 19.3 Hud.lua
+
+`Assets/Scripts/Hud.lua`:
+
+```lua
+-- Assets/Scripts/Hud.lua
+-- 매 프레임 전역 state 테이블을 읽어 서브스프라이트/활성 상태로
+-- 반영한다. state 는 씬이 바뀌어도 유지되므로 (11.4) 스테이지를
+-- 넘어가도 점수/라이프가 이어진다.
+
+local SCORE_DIGITS = 4   -- ScoreD0 (1의 자리) ~ ScoreD3 (1000의 자리)
+local MAX_LIVES    = 3
+
+function Hud_Update(self, dt)
+  -- 점수: 자릿수별로 digit_N 서브스프라이트를 갈아 끼운다.
+  local score = state.score or 0
+  for i = 0, SCORE_DIGITS - 1 do
+    local d = math.floor(score / 10 ^ i) % 10
+    sprite.set_sub_sprite("ScoreD" .. i, "digit_" .. d)
+  end
+
+  -- 스테이지 번호
+  sprite.set_sub_sprite("StageD", "digit_" .. (state.stage or 1))
+
+  -- 라이프: 남은 개수만큼 하트를 켠다.
+  local lives = state.lives or MAX_LIVES
+  for i = 1, MAX_LIVES do
+    scene.set_enabled("Heart" .. i, lives >= i)
+  end
+end
+```
+
+`HUD` 엔티티에 **Add Component... → Script**:
+
+* Script: `Scripts/Hud.lua`
+* Entry function: `Hud`
+
+### 19.4 스테이지 번호 갱신
+
+여러 스테이지를 쓴다면 (14장의 Goal 트리거) 씬을 넘길 때
+`state.stage` 를 갱신합니다:
+
+```lua
+if other == "Goal" then
+  state.stage = 2
+  scene.load("Assets/Scenes/Level2.nscene",
+    { fade_out = 0.5, fade_in = 0.5, color = { r=0, g=0, b=0 } })
+end
+```
+
+Level2 씬에도 같은 구조의 HUD(카메라 자식)를 만들어 두면 점수와
+라이프가 그대로 이어져 표시됩니다.
+
+### 19.5 실행해 보기
+
+Play를 켜고:
+
+* 코인을 줍거나 적을 밟으면 왼쪽 위 점수가 즉시 올라갑니다.
+* 적에게 부딪히면 오른쪽 위 하트가 하나 꺼집니다.
+* 라이프가 다 닳으면 씬이 재시작되고 하트 3개 / 점수 0으로
+  돌아갑니다.
 
 ---
 
