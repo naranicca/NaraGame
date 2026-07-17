@@ -32,6 +32,7 @@
 17. 자주 하는 실수 요약
 18. 적 만들기 — 순찰 · 발견 · 추적, 그리고 밟기
 19. HUD 만들기 — 점수 · 스테이지 · 라이프 표시
+20. 움직이는 플랫폼
 
 부록 A. Lua API 요약표  
 부록 B. Lua 라이프사이클 훅 목록
@@ -1461,6 +1462,117 @@ Play를 켜고:
 * 적에게 부딪히면 오른쪽 위 하트가 하나 꺼집니다.
 * 라이프가 다 닳으면 씬이 재시작되고 하트 3개 / 점수 0으로
   돌아갑니다.
+
+---
+
+## 20. 움직이는 플랫폼
+
+두 지점을 왕복하는 발판을 만듭니다. 핵심은 두 가지입니다:
+
+* 플랫폼은 **Rigidbody2D 없이** 스크립트로 직접 움직입니다.
+  Rigidbody를 붙이면 중력으로 떨어져 버립니다. Rigidbody 없는
+  BoxCollider는 "고정 콜라이더"인데, 매 프레임 위치를 옮기면
+  사실상 키네마틱 플랫폼이 됩니다.
+* 물리 엔진은 발판이 움직여도 **위에 서 있는 것을 자동으로 태워
+  주지 않으므로**, 플레이어가 올라타 있으면 플랫폼의 이동량만큼
+  플레이어를 같이 옮겨 주는 "캐리" 코드를 스크립트에 넣습니다.
+
+### 20.1 Platform 엔티티 만들기
+
+1. `Assets/Sprites/platform.png` (예: 96x16 발판 이미지)를
+   임포트합니다 (Pivot: Center, Filter: Point).
+2. Hierarchy → **+ Entity** → 이름 `Platform1` → 왕복 시작 지점에
+   배치합니다.
+3. **Add Component...** → **SpriteRenderer**: Sprite `platform.png`,
+   Order in Layer `5`.
+4. **Add Component...** → **BoxCollider**:
+   * Size: 스프라이트에 맞게 (96x16, PPU 48이면 `2.0, 0.33`)
+   * **Is Trigger: 해제** (밟고 설 수 있어야 하므로)
+   * Layer: `Default`
+5. **Rigidbody2D는 붙이지 않습니다.**
+
+### 20.2 Platform.lua
+
+`Assets/Scripts/Platform.lua`:
+
+```lua
+-- Assets/Scripts/Platform.lua
+-- 시작 지점에서 (TRAVEL_X, TRAVEL_Y)만큼 떨어진 지점까지
+-- 부드럽게 왕복하는 발판. 올라탄 플레이어는 이동량만큼
+-- 같이 움직인다 (캐리).
+
+local TRAVEL_X = 4.0   -- 왕복 이동량 (world unit). 수직 발판이면
+local TRAVEL_Y = 0.0   -- X를 0으로, Y에 거리를 넣는다.
+local PERIOD   = 4.0   -- 한 번 갔다 돌아오는 데 걸리는 시간 (초)
+
+local state = {}
+local function s(name)
+  local t = state[name]
+  if not t then
+    local x, y = transform.get_position(name)
+    t = { homeX = x, homeY = y, phase = 0 }
+    state[name] = t
+  end
+  return t
+end
+
+function Platform_Update(self, dt)
+  local st = s(self)
+  local x, y = transform.get_position(self)
+
+  -- 사인 왕복: phase 0 -> 1 이 한 사이클. cos 곡선을 쓰면 양 끝에서
+  -- 속도가 0으로 줄어 부드럽게 방향을 바꾼다 (등속 왕복보다 자연스럽다).
+  st.phase = (st.phase + dt / PERIOD) % 1.0
+  local k = 0.5 - 0.5 * math.cos(st.phase * 2.0 * math.pi)
+  local nx = st.homeX + TRAVEL_X * k
+  local ny = st.homeY + TRAVEL_Y * k
+  local dx = nx - x
+  local dy = ny - y
+  transform.set_position(self, nx, ny, 0)
+
+  -- 캐리: 플레이어의 발밑 raycast가 "이 플랫폼"을 맞추고 있고
+  -- 상승 중이 아니면 (점프 순간 제외) 올라탄 것으로 보고
+  -- 이동량만큼 같이 옮긴다. raycast를 쓰면 콜라이더 크기를
+  -- 상수로 다시 적을 필요가 없다 (8장의 isGrounded와 같은 원리).
+  if scene.find("Player") then
+    local px, py = transform.get_position("Player")
+    local _, pvy = rigidbody.get_velocity("Player")
+    if pvy <= 0.1 and
+       scene.raycast(px, py, px, py - 2.0, "Player") == self then
+      transform.translate("Player", dx, dy, 0)
+    end
+  end
+end
+```
+
+`Platform1` 에 **Add Component... → Script**:
+
+* Script: `Scripts/Platform.lua`
+* Entry function: `Platform`
+
+플랫폼을 여러 개 두려면 Duplicate 후 이름만 `Platform2`, ... 로
+바꾸면 됩니다. 각자 자기 시작 위치(`homeX/homeY`)를 기준으로
+왕복합니다.
+
+### 20.3 변형과 튜닝
+
+* **수직 엘리베이터**: `TRAVEL_X = 0.0`, `TRAVEL_Y = 2.5`.
+  플레이어의 낙하 속도보다 발판이 빨리 내려가면 떨어졌다 다시
+  닿기를 반복하며 덜컹거립니다. 그때는 `PERIOD` 를 늘리세요.
+* **대각선**: `TRAVEL_X`, `TRAVEL_Y` 를 둘 다 사용.
+* **정지 구간이 있는 왕복**: `k` 를 계산한 뒤
+  `k = math.clamp((k - 0.1) / 0.8, 0, 1)` 처럼 양 끝 10%를 잘라
+  내면 끝에서 잠깐 머무는 연출이 됩니다.
+* 8장의 `isGrounded` 는 raycast 기반이라 플랫폼의 BoxCollider도
+  지면으로 인식합니다 — 발판 위에서 점프/착지 애니메이션이 그대로
+  동작합니다.
+
+### 20.4 실행해 보기
+
+Play를 켜면 발판이 좌우로 왕복합니다. 올라타면 발판과 함께
+이동하고, 발판 위에서 점프하면 캐리가 잠시 풀렸다가 착지하면
+다시 붙습니다. 발판 이동 방향과 반대로 걸으면 제자리걸음이 되는
+것도 확인해 보세요 — 캐리 이동량과 걷기 속도가 합산되기 때문입니다.
 
 ---
 
