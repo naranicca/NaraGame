@@ -1,4 +1,5 @@
-// Zelda-like room explorer. Loads .ntmap rooms authored by tools/tileset-editor,
+// Zelda-like room explorer. Loads .ntmap rooms (authored with the retired
+// standalone tileset-editor; the format lives on in assets/TileLevel),
 // transitions between them via door markers carrying free-form metadata
 // ("to=room2,side=west") in the editor's per-marker data field. Purpose: a
 // thin test game that exercises the editor's multi-map, marker-metadata,

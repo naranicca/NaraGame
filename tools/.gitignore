@@ -5,7 +5,5 @@
 # Source-controlled tools we built ourselves.
 !.gitignore
 !CMakeLists.txt
-!tileset-editor/
-!tileset-editor/**
 !editor/
 !editor/**

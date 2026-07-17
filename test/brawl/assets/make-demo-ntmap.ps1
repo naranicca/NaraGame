@@ -3,7 +3,7 @@ Add-Type -AssemblyName System.Drawing
 # Brawl arena background — 26x18 .ntmap on top of a 32x32 demo tileset.
 # Layout: grass everywhere, sand path along the centre cross, stone speckles.
 #
-# Tile ids (matched to demo-tileset.png from tools/tileset-editor/assets):
+# Tile ids (matched to the demo-tileset.png this script generates below):
 #   0 grass        1 grass-dark    2 sand
 #   3 dirt         4 water-shallow 5 water-deep
 #   6 stone        7 stone-dark
