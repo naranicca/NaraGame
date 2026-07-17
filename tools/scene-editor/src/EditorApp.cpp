@@ -807,6 +807,7 @@ public:
         DrawHierarchyPanel();
         DrawInspectorPanel();
         DrawViewportPanel();
+        DrawGameViewWindow();
         DrawConsolePanel();
         DrawProjectPanel();
         DrawTilePalettePanel();
@@ -13896,6 +13897,83 @@ private:
         return acc;
     }
 
+    // Game View: separate floating window rendered through the
+    // scene's active CameraComponent. The client area letterboxes
+    // to the game's aspect ratio (kWindowW : kWindowH) and the
+    // effective zoom scales with the letterbox width so the view
+    // frames exactly the world extent the standalone build's
+    // window would -- a smaller Game View shows the same scene,
+    // just minified.
+    void DrawGameViewWindow() {
+        if (!m_gameViewOpen) return;
+        ImGui::SetNextWindowSize(ImVec2(816, 500),
+                                 ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Game", &m_gameViewOpen)) {
+            ImGui::End();
+            return;
+        }
+        ShrinkFloatingCollapseIcon();
+        SceneEditor::Entity* camEnt = ResolveActiveCameraEntity();
+        const auto* tr = camEnt
+            ? camEnt->GetComponent<SceneEditor::TransformComponent>()
+            : nullptr;
+        const auto* cam = camEnt
+            ? camEnt->GetComponent<SceneEditor::CameraComponent>()
+            : nullptr;
+        if (!tr || !cam) {
+            ImGui::TextDisabled(
+                "No enabled Camera component in the scene.\n"
+                "Add one via Inspector > Add Component > Camera.");
+            ImGui::End();
+            return;
+        }
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        if (avail.x < 8.0f || avail.y < 8.0f) {
+            ImGui::End();
+            return;
+        }
+        // Letterbox: largest kWindowW:kWindowH rect that fits the
+        // client area, centred.
+        const float gameAspect = float(kWindowW) / float(kWindowH);
+        float rw = avail.x;
+        float rh = rw / gameAspect;
+        if (rh > avail.y) {
+            rh = avail.y;
+            rw = rh * gameAspect;
+        }
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const ImVec2 rectMin(origin.x + (avail.x - rw) * 0.5f,
+                             origin.y + (avail.y - rh) * 0.5f);
+        const ImVec2 rectMax(rectMin.x + rw, rectMin.y + rh);
+        // Reserve the region so the window scrolls / hit-tests
+        // sanely (also swallows clicks so they don't fall through
+        // to whatever is behind the letterbox bars).
+        ImGui::InvisibleButton("##gameview_hit", avail);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        // Letterbox bars + game clear colour (matches the engine's
+        // standalone Clear(0.10, 0.11, 0.13)).
+        dl->AddRectFilled(origin,
+                          ImVec2(origin.x + avail.x,
+                                 origin.y + avail.y),
+                          IM_COL32(0, 0, 0, 255));
+        dl->AddRectFilled(rectMin, rectMax,
+                          IM_COL32(26, 28, 33, 255));
+        // Swap the viewport camera for the game camera, scaled so
+        // the letterbox rect covers the same world extent as the
+        // real game window (zoom is px-per-unit at kWindowW; the
+        // rect is rw wide).
+        const ViewportCamera savedCam = m_viewCam;
+        m_viewCam.center = ImVec2{tr->position.x, tr->position.y};
+        m_viewCam.zoom   = cam->zoom * (rw / float(kWindowW));
+        m_gameViewRendering = true;
+        dl->PushClipRect(rectMin, rectMax, true);
+        DrawEntities(dl, rectMin, ImVec2(rw, rh));
+        dl->PopClipRect();
+        m_gameViewRendering = false;
+        m_viewCam = savedCam;
+        ImGui::End();
+    }
+
     void DrawViewportPanel() {
         // M9c1 standalone: full-window borderless viewport. The
         // editor's toolbar (Reset View / Frame Selected / Play
@@ -13940,10 +14018,6 @@ private:
             ImGui::Text("Zoom %.0f px/u  |  Centre (%.2f, %.2f)",
                         m_viewCam.zoom, m_viewCam.center.x, m_viewCam.center.y);
             ImGui::SameLine();
-            // Reset / Frame move the editor camera, which the game
-            // camera drive would overwrite next frame -- grey them
-            // out while the Game Cam view owns the framing.
-            ImGui::BeginDisabled(m_gameCameraView);
             if (ImGui::SmallButton("Reset View")) {
                 m_viewCam = ViewportCamera{};
             }
@@ -13953,7 +14027,6 @@ private:
                     m_viewCam.center = EntityWorldPos(*e);
                 }
             }
-            ImGui::EndDisabled();
             ImGui::SameLine();
             // Match the height of the neighbouring SmallButtons +
             // the "Zoom ... Centre ..." text on the same row.
@@ -13977,42 +14050,18 @@ private:
                 }
             }
             ImGui::SameLine();
-            // Game-camera view toggle. Enable = stash the editor
-            // camera + start following the active CameraComponent;
-            // disable = restore the stashed editor framing.
-            if (NGCheckbox("Game Cam", &m_gameCameraView)) {
-                if (m_gameCameraView) {
-                    m_savedEditorCam = m_viewCam;
-                } else {
-                    m_viewCam = m_savedEditorCam;
-                }
-            }
+            // Game view toggle: opens a separate floating window
+            // that renders through the scene's active Camera
+            // component at the game's aspect ratio.
+            NGCheckbox("Game View", &m_gameViewOpen);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip(
-                    "Render the Viewport through the scene's active\n"
-                    "Camera component (highest priority wins) --\n"
-                    "exactly what the shipped game shows. Pan / zoom\n"
-                    "are driven by the camera while this is on.");
+                    "Open a separate window rendered through the\n"
+                    "scene's active Camera component at the game's\n"
+                    "aspect ratio -- exactly what the shipped game\n"
+                    "shows.");
             }
             ImGui::PopStyleVar();
-            // Drive the viewport from the active game camera every
-            // frame while the toggle is on -- same resolve the
-            // standalone build runs, so a Lua camera-follow script
-            // moves this view identically.
-            if (m_gameCameraView) {
-                if (SceneEditor::Entity* camEnt =
-                        ResolveActiveCameraEntity()) {
-                    const auto* tr = camEnt->GetComponent<
-                        SceneEditor::TransformComponent>();
-                    const auto* cam = camEnt->GetComponent<
-                        SceneEditor::CameraComponent>();
-                    if (tr && cam) {
-                        m_viewCam.center =
-                            ImVec2{tr->position.x, tr->position.y};
-                        m_viewCam.zoom = cam->zoom;
-                    }
-                }
-            }
         }
 
         const ImVec2 panelMin  = ImGui::GetCursorScreenPos();
@@ -14712,12 +14761,8 @@ private:
 
         // Wheel zoom around the cursor so the world point under the
         // mouse stays put. Skip zoom while a drag is in progress so a
-        // fast pan with the wheel doesn't get hijacked. Both zoom and
-        // pan are inert in Game Cam view -- the camera drive would
-        // overwrite them on the next frame anyway, so reacting here
-        // would just make the view stutter.
-        if (!m_gameCameraView &&
-            hovered && std::abs(io.MouseWheel) > 0.0f) {
+        // fast pan with the wheel doesn't get hijacked.
+        if (hovered && std::abs(io.MouseWheel) > 0.0f) {
             const ImVec2 worldBefore = ScreenToWorld(io.MousePos,
                                                      panelMin, panelSize);
             const float factor = std::pow(1.15f, io.MouseWheel);
@@ -14732,7 +14777,7 @@ private:
         // be meaningless here. Both work against active OR hovered so
         // the pan doesn't drop the moment the cursor slips off the
         // viewport's InvisibleButton mid-stroke.
-        if (!m_gameCameraView && (active || hovered) &&
+        if ((active || hovered) &&
             (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
              ImGui::IsMouseDragging(ImGuiMouseButton_Right))) {
             const ImVec2 d = io.MouseDelta;
@@ -14944,7 +14989,10 @@ private:
             if (!e) continue;
             const ImVec2 wp = EntityWorldPos(*e);
             const ImVec2 c  = WorldToScreen(wp, panelMin, panelSize);
-            const bool sel = (k.id == m_selection);
+            // Selection outlines are editor chrome -- keep them out
+            // of the Game View render.
+            const bool sel = !m_gameViewRendering &&
+                             (k.id == m_selection);
             if (k.kind == Kind::Tilemap) {
                 if (const auto* tm =
                         e->GetComponent<SceneEditor::TilemapComponent>()) {
@@ -14957,9 +15005,10 @@ private:
                 }
             }
         }
-        // Marker entities are editor-only -- in standalone they
-        // would just litter the screen with debug glyphs.
-        if (!m_standalone) {
+        // Marker entities are editor-only -- in standalone (or the
+        // Game View window) they would just litter the screen with
+        // debug glyphs.
+        if (!m_standalone && !m_gameViewRendering) {
             for (SceneEditor::EntityId id : markers) {
                 const auto* e = m_scene.Get(id);
                 if (!e) continue;
@@ -15141,9 +15190,10 @@ private:
         // rectangle the active CameraComponent would render
         // to a 16:9 viewport at its `zoom`. Lets the user size
         // a camera by eye + spot which entities sit outside the
-        // current shot. Suppressed in standalone (the camera
-        // *is* the view, no need to overlay it on itself).
-        if (!m_standalone) {
+        // current shot. Suppressed in standalone AND the Game
+        // View window (there the camera *is* the view, no need
+        // to overlay it on itself).
+        if (!m_standalone && !m_gameViewRendering) {
             for (SceneEditor::EntityId id : ids) {
                 const auto* e = m_scene.Get(id);
                 if (!e || !e->enabled) continue;
@@ -15181,9 +15231,9 @@ private:
         // M9c10 emission-shape gizmo. Editor-only -- shows the
         // outline of where new particles will spawn so the user
         // can size a circle / box / line by eye. Skipped in
-        // standalone (game runtime) so a finished game doesn't
-        // leak debug glyphs.
-        if (!m_standalone) {
+        // standalone (game runtime) + the Game View window so
+        // neither leaks debug glyphs.
+        if (!m_standalone && !m_gameViewRendering) {
             for (SceneEditor::EntityId id : ids) {
                 const auto* e = m_scene.Get(id);
                 if (!e || !e->enabled) continue;
@@ -15225,6 +15275,11 @@ private:
                 }
             }
         }
+
+        // Everything below is collider-gizmo chrome -- editor-only.
+        // Standalone (game runtime) and the Game View window both
+        // want the pure game image, so bail out here.
+        if (m_standalone || m_gameViewRendering) return;
 
         // Collider gizmos -- box outlines + circle outlines.
         // Colour gates on the M7c1 overlap state:
@@ -15666,7 +15721,7 @@ private:
         // toggle is off, the tilemap doesn't point at a Tileset asset,
         // or that tileset has no flagged tiles -- so the overhead is
         // strictly proportional to flagged cells.
-        if (m_showCollisionOverlay) {
+        if (m_showCollisionOverlay && !m_gameViewRendering) {
             if (const auto* tsEntry = m_assetDb.FindByGuid(tm.tileset)) {
                 if (tsEntry->typeName == "Tileset") {
                     if (SceneEditor::TilesetAsset* ts =
@@ -15697,7 +15752,7 @@ private:
                 minX = std::min(minX, p.x);
                 maxY = std::max(maxY, p.y);
             }
-            if (!m_standalone) {
+            if (!m_standalone && !m_gameViewRendering) {
                 dl->AddText(ImVec2{minX, maxY + 2.0f},
                             IM_COL32(220, 220, 220, 255), e.name.c_str());
             }
@@ -15943,7 +15998,7 @@ private:
             maxY = std::max(maxY, p.y);
             minX = std::min(minX, p.x);
         }
-        if (!m_standalone) {
+        if (!m_standalone && !m_gameViewRendering) {
             dl->AddText(ImVec2{minX, maxY + 2.0f},
                         IM_COL32(220, 220, 220, 255),
                         e.name.c_str());
@@ -16925,14 +16980,13 @@ private:
                                m_audioPreviewVolume;
 
     ViewportCamera             m_viewCam;
-    // Game-camera view: when on, the Viewport renders through the
-    // scene's active CameraComponent every frame (same drive the
-    // standalone build uses) instead of the free editor camera, so
-    // the user sees exactly what the shipped game would show. The
-    // editor camera is stashed on enable + restored on disable so
-    // toggling doesn't lose the user's working framing.
-    bool                       m_gameCameraView = false;
-    ViewportCamera             m_savedEditorCam;
+    // Game View: separate floating window that renders the scene
+    // through the active CameraComponent at the game's aspect
+    // ratio (kWindowW : kWindowH), letterboxed inside the window.
+    // m_gameViewRendering flags the shared draw path so editor-only
+    // visuals (marker glyphs, selection outlines) stay out of it.
+    bool                       m_gameViewOpen = false;
+    bool                       m_gameViewRendering = false;
 
     // Translate-gizmo state. Hover updates every hovered frame; active
     // sticks from mouse-down to release. m_gizmoDownWorld + m_gizmoStartPos
