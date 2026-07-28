@@ -1,6 +1,6 @@
-# 마리오 스타일 플랫포머 만들기 — NaraGame 에디터 튜토리얼
+# 클래식 플랫포머 만들기 — NaraGame 에디터 튜토리얼
 
-이 튜토리얼은 NaraGame 에디터만으로 마리오 스타일 2D
+이 튜토리얼은 NaraGame 에디터만으로 클래식 스타일의 2D
 플랫포머의 뼈대를 완성하는 과정을 처음부터 끝까지 설명합니다.
 프로젝트 생성 → 캐릭터 → 스프라이트 편집 → 애니메이션 → 입력 →
 물리 → 파티클 → 배경/음악 → 패럴랙스 → 게임 오버 → 스플래시
@@ -71,7 +71,7 @@
 1. `NaraGame.exe`를 실행합니다.
 2. 상단 메뉴에서 **File → New Project...** 를 클릭합니다.
 3. `New Project` 창이 뜹니다.
-   * **Project name**: `MarioLike`
+   * **Project name**: `MyGame`
    * **Location (parent folder)** 옆의 **Browse...** 버튼을 눌러
      새 게임을 담을 부모 폴더를 선택합니다.
      선택된 폴더는 반드시 **비어 있어야** 합니다. (기존 폴더에
@@ -81,7 +81,7 @@
 프로젝트가 만들어지면 아래 폴더 구조가 자동으로 생성됩니다.
 
 ```
-<선택한 부모>/MarioLike/
+<선택한 부모>/MyGame/
   ProjectSettings/
     project.json               -- 프로젝트 설정 파일
   Assets/
@@ -91,8 +91,8 @@
     metadata/   cache/       thumbnails/
 ```
 
-> `MarioLike.nproj` 같은 확장자 파일은 없습니다. 프로젝트를 다시 열
-> 때는 **File → Open Project...** 로 `MarioLike/` 폴더 자체를
+> `MyGame.nproj` 같은 확장자 파일은 없습니다. 프로젝트를 다시 열
+> 때는 **File → Open Project...** 로 `MyGame/` 폴더 자체를
 > 선택하면 됩니다 (내부의 `ProjectSettings/project.json`이 있으면
 > 프로젝트로 인식합니다).
 
@@ -103,7 +103,7 @@
    `Assets/Scenes`로 열립니다.
 3. 파일 이름을 `Level1.nscene` 으로 저장합니다.
 
-창 제목이 `NaraGame - MarioLike : Level1` 로 바뀝니다.
+창 제목이 `NaraGame - MyGame : Level1` 로 바뀝니다.
 씬을 수정하면 `Level1*` 처럼 별표가 붙어 저장이 안 된 상태임을
 알려 줍니다.
 
@@ -159,7 +159,7 @@
 
 ### 2.3 좌표계 이해
 
-* +X = 오른쪽, **+Y = 위쪽** (마리오 스타일에서 중력은 -Y).
+* +X = 오른쪽, **+Y = 위쪽** (이 플랫포머에서 중력은 -Y).
 * 카메라 엔티티의 **Transform.Position** 이 곧 화면 중심입니다.
 * 픽셀당 월드 단위 환산은 카메라 `Zoom` (기본 48 px/unit)에 의해
   결정됩니다. 32x32 픽셀 타일이라면 대략 `32 / 48 ≈ 0.67` 월드
@@ -176,7 +176,7 @@
 
 ### 3.1 타일 이미지를 Assets에 넣기
 
-Windows 탐색기로 `MarioLike/Assets/Tilesets/` 폴더에 `tiles.png`
+Windows 탐색기로 `MyGame/Assets/Tilesets/` 폴더에 `tiles.png`
 파일을 복사해 넣습니다. 에디터의 파일 워처가 약 1초 안에
 자동으로 감지해 **Project** 창 트리에 새 항목이 나타납니다.
 
@@ -208,7 +208,7 @@ Windows 탐색기로 `MarioLike/Assets/Tilesets/` 폴더에 `tiles.png`
    `빈 셀 → Solid Box → OneWay → Slope R 45° → Slope L 45° →
    Slope R 22.5° → Slope L 22.5° → Trigger → 빈 셀`
 
-   * **Solid Box** (빨강): 사방이 막힌 지면 블록. 마리오가 위/옆에
+   * **Solid Box** (빨강): 사방이 막힌 지면 블록. 플레이어가 위/옆에
      설 수 있는 벽/땅.
    * **OneWay** (주황): "점프해서 위로 통과 가능한 발판". 아래에서
      위로 뚫고 올라올 수 있고, 위에서는 착지합니다. 구름 발판.
@@ -519,11 +519,11 @@ Windows 탐색기로 `Assets/Scripts/` 폴더에 빈 `Player.lua` 파일을
 
 ```lua
 -- Assets/Scripts/Player.lua
--- 마리오 스타일 좌우 이동 + 점프.
+-- 클래식 플랫포머 스타일 좌우 이동 + 점프.
 
 local MOVE_SPEED     = 6.0   -- world units / sec
 local JUMP_SPEED     = 12.0  -- world units / sec (점프 초기 속도)
--- 마리오 스타일 가변 점프 높이: 상승 도중에 점프 버튼을 떼면 위쪽
+-- 가변 점프 높이: 상승 도중에 점프 버튼을 떼면 위쪽
 -- 속도를 이 값으로 잘라 낸다. 짧게 누르면 낮게 뛰고, 계속 누르고
 -- 있으면 JUMP_SPEED / 중력이 정한 최대 높이까지 뛴다.
 local JUMP_CUT_SPEED = 4.0
@@ -1059,7 +1059,7 @@ end
 에디터를 특정 씬으로 스탠드얼론 시작:
 
 ```
-NaraGame.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.nscene"
+NaraGame.exe --project "C:\path\to\MyGame" --scene "Assets/Scenes/Level1.nscene"
 ```
 
 ---
@@ -1089,7 +1089,7 @@ NaraGame.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.nsce
 
 ## 18. 적 만들기 — 순찰 · 발견 · 추적, 그리고 밟기
 
-굼바 스타일의 적을 만듭니다. 동작은 세 단계입니다:
+버섯 요정 모양의 적 `Mossling`을 만듭니다. 동작은 세 단계입니다:
 
 1. **순찰**: 시작 위치를 중심으로 좌우를 일정 거리 왕복합니다.
 2. **발견**: 플레이어가 탐지 범위 안에 들어오고 **시선이 닿으면**
@@ -1098,15 +1098,15 @@ NaraGame.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.nsce
    플레이어가 피해를 입습니다(접촉 공격). 단, 플레이어가 **위에서
    밟으면** 반대로 적이 사라지면서 점수가 오르고 코인이 나옵니다.
 
-### 18.1 Goomba 엔티티 만들기
+### 18.1 Mossling 엔티티 만들기
 
-1. `Assets/Sprites/goomba.png` 를 임포트합니다 (Pivot: Center,
+1. `Assets/Sprites/mossling.png` 를 임포트합니다 (Pivot: Center,
    Filter: Point). 걷기 2프레임짜리 가로 시트를 권장합니다.
 2. Project 창에서 더블 클릭 → Sprite Editor 에서 **By Cell Count**
    `2 x 1` 로 슬라이스하고 이름을 `walk_0`, `walk_1` 로 바꿉니다.
-3. Hierarchy → **+ Entity** → 이름 `Goomba1` → 지면 위에 배치.
+3. Hierarchy → **+ Entity** → 이름 `Mossling1` → 지면 위에 배치.
 4. **Add Component...** → **SpriteRenderer**:
-   * Sprite: `goomba.png`, Sub-sprite: `walk_0`
+   * Sprite: `mossling.png`, Sub-sprite: `walk_0`
    * Sorting Layer: `Default`, Order in Layer: `9` (플레이어보다 아래)
 5. **Add Component...** → **Rigidbody2D**: 플레이어와 같은 동적
    바디 설정 (중력 적용).
@@ -1116,16 +1116,16 @@ NaraGame.exe --project "C:\path\to\MarioLike" --scene "Assets/Scenes/Level1.nsce
    * 트리거가 아니어야 플레이어와 `CollisionEnter` 이벤트가
      발생합니다 (11.3 참고).
 
-적을 여러 마리 두려면 `Goomba1` 을 Duplicate 해서 `Goomba2`,
-`Goomba3`, ... 로 이름을 바꾸고 위치만 옮기면 됩니다. 아래
-스크립트는 이름이 `Goomba` 로 시작하기만 하면 동작합니다.
+적을 여러 마리 두려면 `Mossling1` 을 Duplicate 해서 `Mossling2`,
+`Mossling3`, ... 로 이름을 바꾸고 위치만 옮기면 됩니다. 아래
+스크립트는 이름이 `Mossling` 으로 시작하기만 하면 동작합니다.
 
-### 18.2 Goomba.lua — 순찰 · 발견 · 추적
+### 18.2 Mossling.lua — 순찰 · 발견 · 추적
 
-`Assets/Scripts/Goomba.lua`:
+`Assets/Scripts/Mossling.lua`:
 
 ```lua
--- Assets/Scripts/Goomba.lua
+-- Assets/Scripts/Mossling.lua
 -- 순찰하다가 플레이어를 발견하면 추적한다.
 -- 공격은 접촉 데미지 방식 -- 몸이 닿으면 Player 쪽
 -- CollisionEnter 에서 피해 처리를 한다 (18.3).
@@ -1137,7 +1137,7 @@ local DETECT_RANGE  = 6.0   -- 이 거리 안이면 발견 후보
 local DETECT_HEIGHT = 1.5   -- 위아래 높이 차가 이 이내일 때만
 local FRAME_TIME    = 0.25  -- 걷기 flipbook 프레임 간격 (초)
 
--- Goomba가 여러 마리여도 스크립트 파일은 하나 -- 엔티티 이름을
+-- Mossling이 여러 마리여도 스크립트 파일은 하나 -- 엔티티 이름을
 -- 키로 하는 테이블에 마리별 상태를 저장한다 (Player.lua와 동일한
 -- 패턴).
 local state = {}
@@ -1162,7 +1162,7 @@ local function canSeePlayer(self, ex, ey, px, py)
   return scene.raycast(ex, ey, px, py, self) == "Player"
 end
 
-function Goomba_Update(self, dt)
+function Mossling_Update(self, dt)
   local st = s(self)
   local ex, ey = transform.get_position(self)
   local vx, vy = rigidbody.get_velocity(self)
@@ -1213,10 +1213,10 @@ function Goomba_Update(self, dt)
 end
 ```
 
-각 Goomba 엔티티에 **Add Component... → Script**:
+각 Mossling 엔티티에 **Add Component... → Script**:
 
-* Script: `Scripts/Goomba.lua`
-* Entry function: `Goomba`
+* Script: `Scripts/Mossling.lua`
+* Entry function: `Mossling`
 
 ### 18.3 Player.lua — 밟기와 피격 처리
 
@@ -1250,19 +1250,26 @@ state.stage = state.stage or 1
 
 충돌 핸들러 (새 함수):
 
+`CollisionEnter` 는 물리 엔진이 충돌을 해소한 뒤 호출됩니다. 따라서
+플레이어가 적의 윗면에 착지한 프레임에는 아래쪽 속도가 이미 `0`으로
+보정되어 있을 수 있습니다. 하강 여부는 `vy < 0`이 아니라 작은 오차를
+허용한 `vy <= 0.1`로 검사합니다. 플레이어가 적보다 충분히 위에 있다는
+위치 조건을 함께 사용하므로 옆면 충돌은 밟기로 처리되지 않습니다.
+
 ```lua
 -- 적과 충돌. 위에서 밟았으면 적 처치 + 점수 + 코인 드롭,
 -- 옆/아래에서 닿았으면 피격.
 function Player_CollisionEnter(self, other)
-  if other:sub(1, 6) ~= "Goomba" then return end
+  if other:sub(1, 8) ~= "Mossling" then return end
   local st = s(self)
   local px, py = transform.get_position(self)
   local ex, ey = transform.get_position(other)
   local vx, vy = rigidbody.get_velocity(self)
 
   -- 밟기 판정: 플레이어가 적 중심보다 충분히 위에 있고
-  -- 하강 중일 때만 밟은 것으로 인정한다.
-  if py > ey + 0.3 and vy < 0 then
+  -- 하강 중이거나 착지 충돌로 Y 속도가 0에 가깝게 보정된 경우에만
+  -- 밟은 것으로 인정한다. CollisionEnter는 충돌 해소 뒤 호출된다.
+  if py > ey + 0.3 and vy <= 0.1 then
     state.score = state.score + 100
     audio.play("Sounds/stomp.wav", 0.9)
     -- 미리 숨겨 둔 드롭 코인을 적이 있던 자리에서 활성화 (18.4)
@@ -1318,17 +1325,17 @@ Lua에서는 스프라이트 자산을 처음부터 만들어 붙일 수 없으�
 씁니다 (오브젝트 풀의 가장 단순한 형태입니다).
 
 1. 11장에서 만든 코인 엔티티 하나를 **Duplicate** 합니다.
-2. 이름을 `Goomba1_Coin` 으로 바꿉니다 — 18.3의 코드가
+2. 이름을 `Mossling1_Coin` 으로 바꿉니다 — 18.3의 코드가
    `적 이름 .. "_Coin"` 규칙으로 찾습니다.
 3. Inspector 상단의 **enabled 체크박스를 해제**해 비활성화합니다.
    비활성 엔티티는 그려지지도, 트리거로 반응하지도 않습니다.
-4. 적마다 하나씩: `Goomba2_Coin`, `Goomba3_Coin`, ...
+4. 적마다 하나씩: `Mossling2_Coin`, `Mossling3_Coin`, ...
 
 밟히면 18.3의 코드가 코인을 적 위치로 옮기고 활성화합니다. 코인에는
 이미 `Coin.lua` 가 붙어 있으므로(11.2) 주우면 `state.coins` 가
 올라가고 사라집니다.
 
-> **왜 코인을 Goomba의 자식으로 두지 않나?**
+> **왜 코인을 Mossling의 자식으로 두지 않나?**
 > `scene.destroy_entity` 는 자식 트리를 통째로 파괴합니다. 코인이
 > 적의 자식이면 적이 죽는 순간 코인도 같이 사라지므로, 반드시 씬
 > 루트(또는 다른 부모) 아래에 둬야 합니다.
@@ -1337,7 +1344,7 @@ Lua에서는 스프라이트 자산을 처음부터 만들어 붙일 수 없으�
 
 Play를 켜면:
 
-* Goomba가 시작 지점을 중심으로 좌우 순찰합니다.
+* Mossling이 시작 지점을 중심으로 좌우 순찰합니다.
 * 가까이 가면 (시선이 닿는 순간) 속도를 올려 쫓아옵니다. 벽이나
   지면 뒤에 숨으면 다시 순찰로 돌아갑니다.
 * 옆에서 닿으면 라이프가 1 줄고 잠깐 무적(깜빡임) + 넉백.
@@ -1579,10 +1586,10 @@ Play를 켜면 발판이 좌우로 왕복합니다. 올라타면 발판과 함�
 
 ## 21. 깨지는 블록과 ? 블록 (아이템 블록)
 
-마리오의 두 가지 상징적인 블록을 만듭니다:
+클래식 플랫포머에서 자주 쓰이는 두 가지 블록을 만듭니다:
 
 * **벽돌(Brick)**: 아래에서 머리로 치면 깨져 사라지고 점수를 줍니다.
-* **? 블록(QBlock)**: 아래에서 치면 아이템(코인)이 위로 나오고,
+* **선물 블록(SurpriseBlock)**: 아래에서 치면 아이템(코인)이 위로 나오고,
   "빈 블록" 모양으로 바뀌어 다시는 반응하지 않습니다.
 
 두 블록 모두 원리는 같습니다 — 블록은 Rigidbody 없는 솔리드
@@ -1646,36 +1653,36 @@ Duplicate — 스크립트가 이름에 의존하지 않으므로 이름은
 `Brick2`, `Brick3`, ... 아무거나 됩니다 (단 `_CollisionEnter` 는
 같은 Entry function 을 공유).
 
-### 21.2 ? 블록 (아이템 블록)
+### 21.2 선물 블록 (아이템 블록)
 
-1. `Assets/Sprites/qblock.png` — ? 모양과 "빈 블록" 모양이 가로로
+1. `Assets/Sprites/surprise_block.png` — 선물 모양과 "빈 블록" 모양이 가로로
    나란한 2프레임 시트를 임포트하고, Sprite Editor에서 **By Cell
-   Count** `2 x 1` 로 슬라이스 → 이름을 `qblock_active`,
-   `qblock_used` 로 바꿉니다.
-2. 엔티티 `QBlock1` 을 만들고 SpriteRenderer (Sub-sprite:
-   `qblock_active`) + BoxCollider (Is Trigger 해제)를 붙입니다.
+   Count** `2 x 1` 로 슬라이스 → 이름을 `surprise_active`,
+   `surprise_used` 로 바꿉니다.
+2. 엔티티 `SurpriseBlock1` 을 만들고 SpriteRenderer (Sub-sprite:
+   `surprise_active`) + BoxCollider (Is Trigger 해제)를 붙입니다.
    역시 Rigidbody2D는 없습니다.
 3. **나올 아이템 준비** — 18.4의 숨긴 엔티티 활성화 패턴 그대로:
-   11장의 코인을 Duplicate 해서 이름을 `QBlock1_Item` 으로 바꾸고
+   11장의 코인을 Duplicate 해서 이름을 `SurpriseBlock1_Item` 으로 바꾸고
    **enabled 체크를 해제**합니다. 스크립트가
    `블록 이름 .. "_Item"` 규칙으로 찾습니다.
 
-`Assets/Scripts/QBlock.lua`:
+`Assets/Scripts/SurpriseBlock.lua`:
 
 ```lua
--- Assets/Scripts/QBlock.lua
--- 마리오 ? 블록: 아래에서 치면 아이템이 나오고 빈 블록이 된다.
+-- Assets/Scripts/SurpriseBlock.lua
+-- 선물 블록: 아래에서 치면 아이템이 나오고 빈 블록이 된다.
 
 -- 이미 사용된 블록 기록. Lua VM은 씬을 다시 로드해도 유지되므로
 -- (11.4) 씬 재시작 때 블록이 "계속 빈 블록"으로 남지 않도록
 -- Start 에서 자기 항목을 지워 초기화한다.
 local used = {}
 
-function QBlock_Start(self)
+function SurpriseBlock_Start(self)
   used[self] = nil
 end
 
-function QBlock_CollisionEnter(self, other)
+function SurpriseBlock_CollisionEnter(self, other)
   if other ~= "Player" then return end
   if used[self] then return end
   local bx, by = transform.get_position(self)
@@ -1683,7 +1690,7 @@ function QBlock_CollisionEnter(self, other)
   if not (py < by - 0.4 and math.abs(px - bx) < 0.6) then return end
 
   used[self] = true
-  sprite.set_sub_sprite(self, "qblock_used")
+  sprite.set_sub_sprite(self, "surprise_used")
   audio.play("Sounds/coin.wav", 0.9)
 
   -- 숨겨 둔 아이템을 블록 바로 위에서 활성화. 아이템이 코인이면
@@ -1696,13 +1703,13 @@ function QBlock_CollisionEnter(self, other)
 end
 ```
 
-`QBlock1` 에 Script 컴포넌트: Script `Scripts/QBlock.lua`, Entry
-function `QBlock`. 블록마다 대응하는 `_Item` 엔티티를 하나씩
-준비합니다 (`QBlock2` → `QBlock2_Item`).
+`SurpriseBlock1` 에 Script 컴포넌트: Script `Scripts/SurpriseBlock.lua`, Entry
+function `SurpriseBlock`. 블록마다 대응하는 `_Item` 엔티티를 하나씩
+준비합니다 (`SurpriseBlock2` → `SurpriseBlock2_Item`).
 
 **파워업 변형**: 아이템 엔티티에 Rigidbody2D + BoxCollider를 주면
 활성화되는 순간 중력을 받아 블록 위에서 떨어지는 버섯형 아이템이
-됩니다. 거기에 18장의 Goomba처럼 일정 속도로 걷는 스크립트를
+됩니다. 거기에 18장의 Mossling처럼 일정 속도로 걷는 스크립트를
 붙이면 화면을 굴러다니는 파워업이 완성됩니다. 효과는
 `Player_TriggerEnter` 에서 `state.lives = state.lives + 1` 처럼
 원하는 보상으로 처리하면 됩니다.
@@ -1880,7 +1887,7 @@ Script 컴포넌트의 **Entry function** 필드에 넣은 이름이 훅의
 
 ---
 
-축하합니다. 여기까지 따라 하시면 마리오 스타일 플랫포머의 뼈대가
+축하합니다. 여기까지 따라 하시면 클래식 플랫포머의 뼈대가
 완성됩니다. 이후 확장 아이디어:
 
 * Enemy 엔티티 + AI 상태 머신 (Animator Controller 재사용).
