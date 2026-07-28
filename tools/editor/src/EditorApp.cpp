@@ -4717,7 +4717,7 @@ private:
                 m_openAudioMixerModal = true;
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Editor Preferences...")) {
+            if (ImGui::MenuItem("Preferences...")) {
                 m_openEditorPrefsModal = true;
             }
             ImGui::EndMenu();
@@ -9808,7 +9808,7 @@ private:
         ImGui::EndPopup();
     }
 
-    // Window > Editor Preferences. Currently UI scale + theme.
+    // Window > Preferences. Currently UI scale + theme.
     // Changes apply live via m_pendingFontRebuild / m_pendingTheme
     // Refresh; Save persists them to editor.prefs.json so the next
     // launch matches. More editor-wide toggles (autosave interval,
@@ -9816,17 +9816,62 @@ private:
     // menu wiring.
     void DrawEditorPreferencesModal() {
         if (m_openEditorPrefsModal) {
-            ImGui::OpenPopup("Editor Preferences");
+            ImGui::OpenPopup("Preferences");
             m_openEditorPrefsModal = false;
         }
+
+        // Keep the macOS-inspired treatment local to this modal. The rest of
+        // the editor continues to use the selected global theme unchanged.
+        const bool light = (m_theme == EditorTheme::Light);
+        const ImVec4 accent(0.04f, 0.48f, 1.00f, 1.00f);
+        const ImVec4 accentHover(0.12f, 0.54f, 1.00f, 1.00f);
+        const ImVec4 accentActive(0.02f, 0.40f, 0.90f, 1.00f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.0f, 18.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 7.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 7.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 10.0f));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg,
+                              light ? ImVec4(0.96f, 0.96f, 0.97f, 1.00f)
+                                    : ImVec4(0.12f, 0.12f, 0.13f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg,
+                              light ? ImVec4(1.00f, 1.00f, 1.00f, 0.82f)
+                                    : ImVec4(0.17f, 0.17f, 0.18f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Border,
+                              light ? ImVec4(0.72f, 0.72f, 0.75f, 0.45f)
+                                    : ImVec4(0.38f, 0.38f, 0.41f, 0.65f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBg,
+                              light ? ImVec4(0.82f, 0.82f, 0.84f, 0.75f)
+                                    : ImVec4(0.26f, 0.26f, 0.28f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+                              light ? ImVec4(0.76f, 0.76f, 0.79f, 0.85f)
+                                    : ImVec4(0.32f, 0.32f, 0.35f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive,
+                              light ? ImVec4(0.70f, 0.70f, 0.73f, 0.90f)
+                                    : ImVec4(0.37f, 0.37f, 0.40f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, accent);
+        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, accentActive);
+        ImGui::PushStyleColor(ImGuiCol_TextDisabled,
+                              light ? ImVec4(0.42f, 0.42f, 0.45f, 1.00f)
+                                    : ImVec4(0.62f, 0.62f, 0.65f, 1.00f));
+
+        auto popPreferencesStyle = []() {
+            ImGui::PopStyleColor(9);
+            ImGui::PopStyleVar(7);
+        };
+
+        ImGui::SetNextWindowSize(ImVec2(440.0f, 0.0f), ImGuiCond_Appearing);
         // Route the popup's "open" state through a local so the
         // title-bar X button (enabled by passing p_open) closes the
         // modal like a normal window. Popup content stays inside
         // BeginPopupModal so the modal-blocking backdrop still
         // covers the rest of the UI.
         bool open = true;
-        if (!ImGui::BeginPopupModal("Editor Preferences", &open,
+        if (!ImGui::BeginPopupModal("Preferences", &open,
                                     ImGuiWindowFlags_AlwaysAutoResize)) {
+            popPreferencesStyle();
             return;
         }
         if (!open) {
@@ -9834,59 +9879,144 @@ private:
             ImGui::CloseCurrentPopup();
         }
 
-        // --- Theme ---
-        ImGui::TextUnformatted("Theme");
-        int themeIdx = (m_theme == EditorTheme::Light) ? 1 : 0;
-        if (ImGui::RadioButton("Dark",  themeIdx == 0)) {
+        ImGui::TextUnformatted("Appearance");
+        ImGui::TextDisabled("Choose how the editor looks.");
+        ImGui::BeginChild("##appearance_card", ImVec2(0.0f, 64.0f), true,
+                          ImGuiWindowFlags_NoScrollbar);
+        const float segmentGap = ImGui::GetStyle().ItemSpacing.x;
+        const float segmentWidth =
+            (ImGui::GetContentRegionAvail().x - segmentGap) * 0.5f;
+
+        const bool darkSelected = (m_theme == EditorTheme::Dark);
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              darkSelected ? accent : ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              darkSelected ? accentHover : ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                              darkSelected ? accentActive : ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
+        if (ImGui::Button("Dark", ImVec2(segmentWidth, 0.0f))) {
             m_theme = EditorTheme::Dark;
             m_pendingThemeRefresh = true;
         }
+        ImGui::PopStyleColor(3);
         ImGui::SameLine();
-        if (ImGui::RadioButton("Light", themeIdx == 1)) {
+
+        const bool lightSelected = (m_theme == EditorTheme::Light);
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              lightSelected ? accent : ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              lightSelected ? accentHover : ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                              lightSelected ? accentActive : ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
+        if (ImGui::Button("Light", ImVec2(segmentWidth, 0.0f))) {
             m_theme = EditorTheme::Light;
             m_pendingThemeRefresh = true;
         }
+        ImGui::PopStyleColor(3);
+        ImGui::EndChild();
 
-        ImGui::Separator();
-
-        // --- UI Scale ---
-        ImGui::TextUnformatted(
-            "UI scale multiplies font size and every ImGui padding /\n"
-            "spacing constant. Applies live -- no restart needed.");
+        ImGui::TextUnformatted("Interface Scale");
+        ImGui::TextDisabled("Changes apply instantly. No restart required.");
+        ImGui::BeginChild("##scale_card", ImVec2(0.0f, 112.0f), true,
+                          ImGuiWindowFlags_NoScrollbar);
 
         float scale = m_uiScale;
-        ImGui::SetNextItemWidth(240.0f);
-        if (ImGui::SliderFloat("UI Scale", &scale, 0.75f, 3.0f,
-                               "%.2fx")) {
+        const float resetWidth = 112.0f;
+        const float sliderWidth = ImGui::GetContentRegionAvail().x -
+                                  resetWidth - ImGui::GetStyle().ItemSpacing.x;
+        auto macSliderFloat = [&](const char* id, float* value, float minValue,
+                                  float maxValue, float width) {
+            const float height = ImGui::GetFrameHeight();
+            const ImVec2 topLeft = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton(id, ImVec2(width, height));
+
+            const bool hovered = ImGui::IsItemHovered();
+            const bool active = ImGui::IsItemActive();
+            const float valueWidth = 54.0f;
+            const float thumbRadius = 7.0f;
+            const float trackLeft = topLeft.x + thumbRadius + 1.0f;
+            const float trackRight = topLeft.x + width - valueWidth -
+                                     thumbRadius - 8.0f;
+            const float trackY = topLeft.y + height * 0.5f;
+
+            bool changed = false;
+            if (active && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                const float mouseT = (ImGui::GetIO().MousePos.x - trackLeft) /
+                                     (trackRight - trackLeft);
+                const float clampedT = std::clamp(mouseT, 0.0f, 1.0f);
+                const float newValue = minValue +
+                                       (maxValue - minValue) * clampedT;
+                if (*value != newValue) {
+                    *value = newValue;
+                    changed = true;
+                }
+            }
+            if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+            const float t = std::clamp((*value - minValue) /
+                                       (maxValue - minValue), 0.0f, 1.0f);
+            const float thumbX = trackLeft + (trackRight - trackLeft) * t;
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const ImU32 emptyTrack = ImGui::GetColorU32(
+                light ? ImVec4(0.72f, 0.72f, 0.75f, 0.72f)
+                      : ImVec4(0.38f, 0.38f, 0.41f, 1.00f));
+            draw->AddLine(ImVec2(trackLeft, trackY),
+                          ImVec2(trackRight, trackY), emptyTrack, 4.0f);
+            draw->AddLine(ImVec2(trackLeft, trackY),
+                          ImVec2(thumbX, trackY), ImGui::GetColorU32(accent),
+                          4.0f);
+
+            // Flat white thumb with an accent outline on interaction.
+            draw->AddCircleFilled(ImVec2(thumbX, trackY),
+                                  thumbRadius + (active ? 1.0f : 0.0f),
+                                  IM_COL32(250, 250, 252, 255));
+            draw->AddCircle(ImVec2(thumbX, trackY),
+                            thumbRadius + (active ? 1.0f : 0.0f),
+                            hovered ? ImGui::GetColorU32(accent)
+                                    : IM_COL32(150, 150, 155, 150),
+                            0, hovered ? 1.5f : 1.0f);
+
+            char valueText[24];
+            std::snprintf(valueText, sizeof(valueText), "%.2fx", *value);
+            const ImVec2 textSize = ImGui::CalcTextSize(valueText);
+            const float valueX = topLeft.x + width - textSize.x;
+            draw->AddText(ImVec2(valueX, topLeft.y +
+                                 (height - textSize.y) * 0.5f),
+                          ImGui::GetColorU32(ImGuiCol_Text), valueText);
+            return changed;
+        };
+
+        if (macSliderFloat("##ui_scale", &scale, 0.75f, 3.0f,
+                           sliderWidth)) {
             m_uiScale = scale;
             m_pendingFontRebuild = true;
         }
         ImGui::SameLine();
-        if (ImGui::SmallButton("Reset to DPI")) {
+        if (ImGui::Button("Use Default", ImVec2(resetWidth, 0.0f))) {
             m_uiScale = DetectUiScale(m_hwnd);
             m_pendingFontRebuild = true;
         }
-        ImGui::TextDisabled("System DPI: %.2fx",
-                            DetectUiScale(m_hwnd));
+        ImGui::TextDisabled("Display default: %.2fx", DetectUiScale(m_hwnd));
+        ImGui::EndChild();
 
-        ImGui::Separator();
-        // Right-align the OK button on the last row so the modal
-        // reads as a standard confirm dialog. GetContentRegionAvail
-        // gives the remaining row width; subtract the button width
-        // and slide the cursor over.
-        const ImVec2 okSize(88.0f, 0.0f);
+        const ImVec2 okSize(92.0f, 0.0f);
         const float avail = ImGui::GetContentRegionAvail().x;
         if (avail > okSize.x) {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
                                   (avail - okSize.x));
         }
-        if (ImGui::Button("OK", okSize)) {
+        ImGui::PushStyleColor(ImGuiCol_Button, accent);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, accentHover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, accentActive);
+        if (ImGui::Button("Done", okSize)) {
             m_prefs.uiScale = m_uiScale;
             m_prefs.theme   = m_theme;
             SaveEditorPrefs(m_prefs);
             ImGui::CloseCurrentPopup();
         }
+        ImGui::PopStyleColor(3);
         ImGui::EndPopup();
+        popPreferencesStyle();
     }
 
     // M10c1 in-game settings overlay. Renders in BOTH editor and
