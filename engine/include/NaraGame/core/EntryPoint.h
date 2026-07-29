@@ -5,6 +5,12 @@
 
 #include "NaraGame/core/Application.h"
 #include "NaraGame/core/Log.h"
+#include "NaraGame/core/Platform.h"
+
+#if defined(NARAGAME_PLATFORM_ANDROID)
+#  include <android_native_app_glue.h>
+namespace NaraGame { void SetAndroidApp(android_app* app); }
+#endif
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -17,7 +23,7 @@
 #  include <io.h>
 #endif
 
-int main(int argc, char** argv) {
+static int NaraGameMain(int argc, char** argv) {
 #if defined(_WIN32)
     // GUI-subsystem executables don't get a console. Double-click from
     // Explorer -> no window pops up (that's the goal). But we still
@@ -73,3 +79,15 @@ int main(int argc, char** argv) {
     NaraGame::Log::Shutdown();
     return 0;
 }
+
+#if defined(NARAGAME_PLATFORM_ANDROID)
+extern "C" void android_main(android_app* app) {
+    app_dummy();
+    NaraGame::SetAndroidApp(app);
+    (void)NaraGameMain(0, nullptr);
+}
+#else
+int main(int argc, char** argv) {
+    return NaraGameMain(argc, argv);
+}
+#endif

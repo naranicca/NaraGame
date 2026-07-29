@@ -8,26 +8,29 @@
 
 namespace NaraGame {
 
-// TODO: Implement with UIKit (UIWindow + CAMetalLayer-backed UIView). The real
-// version must be compiled as Objective-C++ (.mm). This stub satisfies the
-// interface only.
 class iOSWindow final : public Window {
 public:
-    explicit iOSWindow(const WindowDesc& desc) : m_desc(desc) {}
+    explicit iOSWindow(const WindowDesc& desc);
 
     void PollEvents() override {}
     bool ShouldClose() const override { return m_shouldClose; }
     void RequestClose() override { m_shouldClose = true; }
 
-    uint32_t Width() const override { return m_desc.width; }
-    uint32_t Height() const override { return m_desc.height; }
-    void* NativeHandle() const override { return nullptr; }
+    uint32_t Width() const override { return m_width; }
+    uint32_t Height() const override { return m_height; }
+    void* NativeHandle() const override { return m_metalLayer; }
     const WindowDesc& Desc() const override { return m_desc; }
 
 private:
     WindowDesc m_desc;
+    void* m_metalLayer = nullptr; // CAMetalLayer*
+    uint32_t m_width = 0;
+    uint32_t m_height = 0;
     bool m_shouldClose = false;
 };
+
+// UIKit host calls this before constructing Application/iOSWindow.
+void SetIOSMetalLayer(void* layer, uint32_t width, uint32_t height);
 
 } // namespace NaraGame
 

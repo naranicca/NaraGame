@@ -34,7 +34,12 @@ std::unique_ptr<RHIDevice> RHIDevice::Create(const RHIDeviceDesc& desc) {
     #endif
     return std::make_unique<D3D11Device>(desc);
 #elif defined(NARAGAME_PLATFORM_MACOS) || defined(NARAGAME_PLATFORM_IOS)
-    return std::make_unique<MetalDevice>(desc);
+    {
+        auto metal = std::make_unique<MetalDevice>(desc);
+        if (metal->Valid()) return metal;
+        NARAGAME_ERROR("Metal backend failed to initialize");
+        return nullptr;
+    }
 #elif defined(NARAGAME_PLATFORM_ANDROID)
     return std::make_unique<VulkanDevice>(desc);
 #else

@@ -165,6 +165,7 @@ float DetectUiScale(void* nativeHandle) {
 constexpr const char* kEditorPrefsPath = "editor.prefs.json";
 
 enum class EditorTheme { Dark, Light };
+enum class BuildTarget { Windows, Android, Mac, IPhone };
 
 const char* EditorThemeToStr(EditorTheme t) {
     return (t == EditorTheme::Light) ? "light" : "dark";
@@ -827,6 +828,7 @@ public:
         DrawSortingLayersModal();
         DrawCollisionMatrixModal();
         DrawAudioMixerModal();
+        DrawBuildTargetModal();
         DrawEditorPreferencesModal();
         DrawRenameSceneModal();
         DrawSettingsPanel();
@@ -4287,8 +4289,27 @@ private:
     // preserves the same Assets/-relative tree the editor
     // wrote -- the runtime unpacks once into a temp folder +
     // points the cwd at it.
-    void DoBuildGame() {
+    void DoBuildGame(BuildTarget target) {
         if (!m_project.IsOpen()) return;
+
+        // A package must contain a runtime compiled for the selected target.
+        // Never copy the host Windows executable into a mobile or Apple build
+        // and report success: those targets need their native toolchains and
+        // platform backends first.
+        if (target != BuildTarget::Windows) {
+            const char* platform =
+                target == BuildTarget::Android ? "Android" :
+                target == BuildTarget::Mac     ? "macOS" : "iPhone";
+            const char* requirement =
+                target == BuildTarget::Android
+                    ? "Android SDK/NDK and the platform-neutral scene player"
+                    : "macOS/Xcode, Metal resources, and the platform-neutral scene player";
+            NARAGAME_ERROR(
+                "Build Game: %s target requires %s; this runtime backend "
+                "is not complete yet.", platform, requirement);
+            return;
+        }
+
         const std::string dest =
             PickFolderDialog(m_hwnd, L"Choose build destination");
         if (dest.empty()) return;
@@ -4369,6 +4390,87 @@ private:
                       m_project.MainScenePath().empty()
                         ? "<unset -- empty scene>"
                         : m_project.MainScenePath().c_str());
+    }
+
+    void DrawBuildTargetModal() {
+        if (m_openBuildTargetModal) {
+            ImGui::OpenPopup("Build");
+            m_openBuildTargetModal = false;
+        }
+
+        ImGui::SetNextWindowSize(ImVec2(480.0f, 0.0f), ImGuiCond_Appearing);
+        bool open = true;
+        if (!ImGui::BeginPopupModal("Build", &open,
+                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            return;
+        }
+        if (!open) ImGui::CloseCurrentPopup();
+
+        ImGui::TextUnformatted("Target Platform");
+        ImGui::TextDisabled(
+            "Choose the platform runtime to include in this build.");
+        ImGui::Spacing();
+
+        auto targetRow = [&](BuildTarget target, const char* name,
+                             const char* detail, bool available) {
+            ImGui::PushID(static_cast<int>(target));
+            const bool selected = (m_buildTarget == target);
+            if (ImGui::RadioButton(name, selected)) m_buildTarget = target;
+            ImGui::SameLine(150.0f);
+            if (available) {
+                ImGui::TextDisabled("Ready");
+            } else {
+                ImGui::TextDisabled("Toolchain/runtime required");
+            }
+            ImGui::Indent(26.0f);
+            ImGui::TextDisabled("%s", detail);
+            ImGui::Unindent(26.0f);
+            ImGui::PopID();
+        };
+
+        targetRow(BuildTarget::Windows, "Windows",
+                  "Desktop executable (Direct3D 11)", true);
+        targetRow(BuildTarget::Android, "Android",
+                  "APK/AAB via Android NDK (Vulkan)", false);
+        targetRow(BuildTarget::Mac, "Mac",
+                  "Xcode app template; Cocoa/Metal foundation ready", false);
+        targetRow(BuildTarget::IPhone, "iPhone",
+                  "Xcode app template; UIKit/Metal foundation ready", false);
+
+        ImGui::Separator();
+        const bool available = (m_buildTarget == BuildTarget::Windows);
+        if (!available) {
+            ImGui::TextWrapped(
+                "The native host foundation exists for this target, but Metal "
+                "resources and/or the platform-neutral scene player are not "
+                "complete. The editor will not emit a misleading package.");
+        } else {
+            ImGui::TextDisabled(
+                "The destination folder must be empty.");
+        }
+
+        bool startBuild = false;
+        const float buttonWidth = 96.0f;
+        const float totalWidth = buttonWidth * 2.0f +
+                                 ImGui::GetStyle().ItemSpacing.x;
+        const float availWidth = ImGui::GetContentRegionAvail().x;
+        if (availWidth > totalWidth) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                 availWidth - totalWidth);
+        }
+        if (ImGui::Button("Cancel", ImVec2(buttonWidth, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!available);
+        if (ImGui::Button("Build", ImVec2(buttonWidth, 0.0f))) {
+            startBuild = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndPopup();
+
+        if (startBuild) DoBuildGame(m_buildTarget);
     }
 
     // Strip the project's Assets/ prefix off `abs` so we can hand a
@@ -4681,9 +4783,9 @@ private:
                                 projOpen && !m_currentScenePath.empty())) {
                 DoSetMainScene();
             }
-            if (ImGui::MenuItem("Build Game...", nullptr, false,
+            if (ImGui::MenuItem("Build...", nullptr, false,
                                 projOpen)) {
-                DoBuildGame();
+                m_openBuildTargetModal = true;
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) Close();
@@ -17197,6 +17299,8 @@ private:
     bool                m_openLayersModal = false;
     bool                m_openCollisionMatrixModal = false;
     bool                m_openAudioMixerModal = false;
+    bool                m_openBuildTargetModal = false;
+    BuildTarget         m_buildTarget = BuildTarget::Windows;
     bool                m_openEditorPrefsModal = false;
     bool                m_openRenameSceneModal = false;
     // Buffer + last-error slot for the Rename Scene modal. The modal

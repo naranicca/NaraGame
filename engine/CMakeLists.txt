@@ -54,19 +54,24 @@ if(WIN32)
         src/audio/xaudio2/XAudio2Device.cpp
     )
 elseif(IOS)
+    enable_language(OBJCXX)
     list(APPEND NARAGAME_SOURCES
-        src/platform/ios/iOSWindow.cpp
-        src/renderer/rhi/metal/MetalDevice.cpp
+        src/platform/ios/iOSWindow.mm
+        src/renderer/rhi/metal/MetalDevice.mm
     )
 elseif(APPLE)
+    enable_language(OBJCXX)
     list(APPEND NARAGAME_SOURCES
-        src/platform/macos/MacWindow.cpp
-        src/renderer/rhi/metal/MetalDevice.cpp
+        src/platform/macos/MacWindow.mm
+        src/renderer/rhi/metal/MetalDevice.mm
     )
 elseif(ANDROID)
+    enable_language(C)
     list(APPEND NARAGAME_SOURCES
         src/platform/android/AndroidWindow.cpp
         src/renderer/rhi/vulkan/VulkanDevice.cpp
+        src/renderer/rhi/vulkan/VulkanResources.cpp
+        ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c
     )
 endif()
 
@@ -96,6 +101,34 @@ if(WIN32)
     target_link_libraries(NaraGameEngine PUBLIC d3d11 dxgi d3dcompiler dxguid xaudio2 ole32)
 endif()
 
+if(ANDROID)
+    target_include_directories(NaraGameEngine PUBLIC
+        ${ANDROID_NDK}/sources/android/native_app_glue)
+    find_library(NARAGAME_ANDROID_LIB android REQUIRED)
+    find_library(NARAGAME_LOG_LIB log REQUIRED)
+    find_library(NARAGAME_VULKAN_LIB vulkan REQUIRED)
+    target_link_libraries(NaraGameEngine PUBLIC
+        ${NARAGAME_ANDROID_LIB}
+        ${NARAGAME_LOG_LIB}
+        ${NARAGAME_VULKAN_LIB})
+    target_compile_definitions(NaraGameEngine PUBLIC
+        NARAGAME_HAVE_VULKAN=1)
+endif()
+
+if(APPLE)
+    target_link_libraries(NaraGameEngine PUBLIC
+        "-framework Metal"
+        "-framework QuartzCore"
+        "-framework Foundation")
+    if(IOS)
+        target_link_libraries(NaraGameEngine PUBLIC "-framework UIKit")
+    else()
+        target_link_libraries(NaraGameEngine PUBLIC "-framework AppKit")
+    endif()
+    target_compile_options(NaraGameEngine PRIVATE
+        $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+endif()
+
 if(MSVC)
     target_compile_options(NaraGameEngine PRIVATE /W4 /permissive- /MP)
 else()
@@ -104,8 +137,10 @@ endif()
 
 # Optional Vulkan backend (a second native RHI; runs on Windows when the SDK is
 # present). Selected at runtime via the NARAGAME_RHI=vulkan environment variable.
-find_package(Vulkan QUIET)
-if(Vulkan_FOUND)
+if(NOT ANDROID)
+  find_package(Vulkan QUIET)
+endif()
+if(Vulkan_FOUND AND NOT ANDROID)
     message(STATUS "NaraGame: Vulkan found (${Vulkan_LIBRARY}) -> Vulkan backend enabled")
     target_sources(NaraGameEngine PRIVATE
         src/renderer/rhi/vulkan/VulkanDevice.cpp

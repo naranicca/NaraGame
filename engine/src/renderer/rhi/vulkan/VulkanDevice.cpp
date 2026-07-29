@@ -42,18 +42,32 @@ bool HasLayer(const char* name) {
 } // namespace
 
 VulkanDevice::VulkanDevice(const RHIDeviceDesc& desc)
-    : m_hwnd(static_cast<HWND>(desc.nativeWindowHandle))
+    : m_nativeWindow(desc.nativeWindowHandle)
     , m_width(desc.width)
     , m_height(desc.height)
     , m_vsync(desc.vsync) {
     if (!CreateInstance())
         return;
 
-    VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+#if defined(NARAGAME_PLATFORM_WINDOWS)
+    VkWin32SurfaceCreateInfoKHR sci{
+        VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     sci.hinstance = GetModuleHandleW(nullptr);
-    sci.hwnd = m_hwnd;
-    if (vkCreateWin32SurfaceKHR(m_instance, &sci, nullptr, &m_surface) != VK_SUCCESS) {
-        NARAGAME_ERROR("vkCreateWin32SurfaceKHR failed");
+    sci.hwnd = static_cast<HWND>(m_nativeWindow);
+    const VkResult surfaceResult =
+        vkCreateWin32SurfaceKHR(m_instance, &sci, nullptr, &m_surface);
+#elif defined(NARAGAME_PLATFORM_ANDROID)
+    VkAndroidSurfaceCreateInfoKHR sci{
+        VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
+    sci.window = static_cast<ANativeWindow*>(m_nativeWindow);
+    const VkResult surfaceResult =
+        vkCreateAndroidSurfaceKHR(m_instance, &sci, nullptr, &m_surface);
+#else
+    const VkResult surfaceResult = VK_ERROR_EXTENSION_NOT_PRESENT;
+#endif
+    if (surfaceResult != VK_SUCCESS) {
+        NARAGAME_ERROR("Vulkan platform surface creation failed (%d)",
+                       static_cast<int>(surfaceResult));
         return;
     }
 
@@ -185,8 +199,12 @@ bool VulkanDevice::CreateInstance() {
     app.pApplicationName = "NaraGame";
     app.apiVersion = VK_API_VERSION_1_1;
 
-    std::vector<const char*> extensions = {VK_KHR_SURFACE_EXTENSION_NAME,
-                                           VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    std::vector<const char*> extensions = {VK_KHR_SURFACE_EXTENSION_NAME};
+#if defined(NARAGAME_PLATFORM_WINDOWS)
+    extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+#elif defined(NARAGAME_PLATFORM_ANDROID)
+    extensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+#endif
     std::vector<const char*> layers;
     const bool validation = kEnableValidation && HasLayer("VK_LAYER_KHRONOS_validation");
     if (validation) {

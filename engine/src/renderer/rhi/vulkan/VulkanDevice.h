@@ -4,12 +4,17 @@
 
 #if defined(NARAGAME_HAVE_VULKAN)
 
+#if defined(NARAGAME_PLATFORM_WINDOWS)
+#  define VK_USE_PLATFORM_WIN32_KHR
+#  include <windows.h>
+#elif defined(NARAGAME_PLATFORM_ANDROID)
+#  define VK_USE_PLATFORM_ANDROID_KHR
+#  include <android/native_window.h>
+#endif
+#include <vulkan/vulkan.h>
+
 #include "NaraGame/renderer/rhi/RHIDevice.h"
 #include "renderer/rhi/vulkan/VulkanResources.h"
-
-#define VK_USE_PLATFORM_WIN32_KHR
-#include <windows.h>
-#include <vulkan/vulkan.h>
 
 #include <cstring>
 #include <functional>
@@ -88,7 +93,7 @@ private:
         }
     };
 
-    HWND m_hwnd = nullptr;
+    void* m_nativeWindow = nullptr;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     bool m_vsync = true;
