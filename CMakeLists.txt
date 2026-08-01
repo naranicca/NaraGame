@@ -5,6 +5,8 @@ project(NaraGame
     DESCRIPTION "Cross-platform 2D/3D game engine"
     LANGUAGES CXX)
 
+include(CTest)
+
 # ---------------------------------------------------------------------------
 # Global settings
 # ---------------------------------------------------------------------------

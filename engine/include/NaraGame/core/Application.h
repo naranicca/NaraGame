@@ -47,6 +47,11 @@ protected:
     virtual void OnUpdate(float /*dt*/) {}
     virtual void OnRender() {}
     virtual void OnStop() {}
+    // Mobile platforms can destroy and recreate their native rendering
+    // surface while the process remains alive. Release resources that retain
+    // the old device in OnDeviceLost and rebuild them in OnDeviceRestored.
+    virtual void OnDeviceLost() {}
+    virtual void OnDeviceRestored() {}
 
 private:
     AppConfig m_config;
@@ -56,6 +61,7 @@ private:
     bool m_running = true;
     uint32_t m_lastWidth = 0;
     uint32_t m_lastHeight = 0;
+    void* m_lastNativeHandle = nullptr;
 
     float m_lastDt = 0.0f;
     float m_fps = 0.0f;

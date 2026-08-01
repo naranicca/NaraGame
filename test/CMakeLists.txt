@@ -8,3 +8,8 @@ add_subdirectory(flappy)
 add_subdirectory(brawl)
 add_subdirectory(zelda)
 add_subdirectory(cube)
+
+add_test(NAME editor_tutorial_docs
+    COMMAND ${CMAKE_COMMAND}
+        -DNARAGAME_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/ValidateTutorials.cmake)

@@ -11,7 +11,12 @@ get_filename_component(NARAGAME_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLU
 add_subdirectory("${NARAGAME_ROOT}/engine"
                  "${CMAKE_CURRENT_BINARY_DIR}/naragame-engine")
 
-add_executable(NaraGamePlayer MACOSX_BUNDLE IOSPlayer.mm)
+file(GLOB_RECURSE NARAGAME_GAME_RESOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_LIST_DIR}/Resources/*")
+add_executable(NaraGamePlayer MACOSX_BUNDLE IOSPlayer.mm
+    ${NARAGAME_GAME_RESOURCES})
+set_source_files_properties(${NARAGAME_GAME_RESOURCES} PROPERTIES
+    MACOSX_PACKAGE_LOCATION Resources)
 target_link_libraries(NaraGamePlayer PRIVATE NaraGame::Engine
     "-framework UIKit" "-framework Metal" "-framework QuartzCore")
 set_target_properties(NaraGamePlayer PROPERTIES

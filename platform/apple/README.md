@@ -19,6 +19,9 @@ cmake --build build/ios --config Release
 ```
 
 Device archives require an Apple Developer team and code-signing settings.
+An editor export places `assets.pak` and `ProjectSettings/` under each
+platform's `Resources/` directory. CMake adds those files to the generated app
+bundle automatically.
 Metal resource objects and the editor-authored scene player still need to be
 extracted from the Windows editor before full games can render on Apple
 platforms; the present templates intentionally render a clear screen rather

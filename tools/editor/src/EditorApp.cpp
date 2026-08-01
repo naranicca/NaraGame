@@ -4292,24 +4292,6 @@ private:
     void DoBuildGame(BuildTarget target) {
         if (!m_project.IsOpen()) return;
 
-        // A package must contain a runtime compiled for the selected target.
-        // Never copy the host Windows executable into a mobile or Apple build
-        // and report success: those targets need their native toolchains and
-        // platform backends first.
-        if (target != BuildTarget::Windows) {
-            const char* platform =
-                target == BuildTarget::Android ? "Android" :
-                target == BuildTarget::Mac     ? "macOS" : "iPhone";
-            const char* requirement =
-                target == BuildTarget::Android
-                    ? "Android SDK/NDK and the platform-neutral scene player"
-                    : "macOS/Xcode, Metal resources, and the platform-neutral scene player";
-            NARAGAME_ERROR(
-                "Build Game: %s target requires %s; this runtime backend "
-                "is not complete yet.", platform, requirement);
-            return;
-        }
-
         const std::string dest =
             PickFolderDialog(m_hwnd, L"Choose build destination");
         if (dest.empty()) return;
@@ -4329,6 +4311,59 @@ private:
             }
         } else {
             fs::create_directories(dest, ec);
+        }
+
+        if (target != BuildTarget::Windows) {
+            const fs::path sourceRoot = fs::path(NARAGAME_SOURCE_DIR);
+            const fs::path platformSource =
+                target == BuildTarget::Android
+                    ? sourceRoot / "platform" / "android"
+                    : sourceRoot / "platform" / "apple" /
+                          (target == BuildTarget::Mac ? "macos" : "ios");
+            const fs::path platformDest =
+                target == BuildTarget::Android
+                    ? fs::path(dest) / "platform" / "android"
+                    : fs::path(dest) / "platform" / "apple" /
+                          (target == BuildTarget::Mac ? "macos" : "ios");
+            const auto copyOpts = fs::copy_options::recursive |
+                                  fs::copy_options::overwrite_existing;
+            fs::copy(sourceRoot / "engine", fs::path(dest) / "engine",
+                     copyOpts, ec);
+            if (!ec) fs::copy(platformSource, platformDest, copyOpts, ec);
+            if (ec) {
+                NARAGAME_ERROR("Build Game: platform template copy failed (%s)",
+                               ec.message().c_str());
+                return;
+            }
+
+            fs::path payloadDir;
+            if (target == BuildTarget::Android) {
+                payloadDir = platformDest / "app" / "src" / "main" / "assets";
+            } else {
+                payloadDir = platformDest / "Resources";
+            }
+            fs::create_directories(payloadDir, ec);
+            if (ec || !SceneEditor::WritePak(
+                    (payloadDir / "assets.pak").string(),
+                    m_project.AssetsDir())) {
+                NARAGAME_ERROR("Build Game: failed to create platform assets.pak");
+                return;
+            }
+            fs::copy(m_project.SettingsDir(), payloadDir / "ProjectSettings",
+                     copyOpts, ec);
+            if (ec) {
+                NARAGAME_ERROR("Build Game: ProjectSettings copy failed (%s)",
+                               ec.message().c_str());
+                return;
+            }
+
+            const char* platform = target == BuildTarget::Android
+                ? "Android" : (target == BuildTarget::Mac ? "macOS" : "iPhone");
+            NARAGAME_INFO(
+                "Build Game: exported %s build project to %s. Open the platform "
+                "folder with its native toolchain to compile the app.",
+                platform, dest.c_str());
+            return;
         }
 
         // Locate this exe so we can drop a renamed copy of it
@@ -4431,22 +4466,19 @@ private:
         targetRow(BuildTarget::Windows, "Windows",
                   "Desktop executable (Direct3D 11)", true);
         targetRow(BuildTarget::Android, "Android",
-                  "APK/AAB via Android NDK (Vulkan)", false);
+                  "Gradle project via Android NDK (Vulkan)", true);
         targetRow(BuildTarget::Mac, "Mac",
-                  "Xcode app template; Cocoa/Metal foundation ready", false);
+                  "Xcode app project; Cocoa/Metal", true);
         targetRow(BuildTarget::IPhone, "iPhone",
-                  "Xcode app template; UIKit/Metal foundation ready", false);
+                  "Xcode app project; UIKit/Metal", true);
 
         ImGui::Separator();
-        const bool available = (m_buildTarget == BuildTarget::Windows);
-        if (!available) {
+        const bool available = true;
+        ImGui::TextDisabled("The destination folder must be empty.");
+        if (m_buildTarget != BuildTarget::Windows) {
             ImGui::TextWrapped(
-                "The native host foundation exists for this target, but Metal "
-                "resources and/or the platform-neutral scene player are not "
-                "complete. The editor will not emit a misleading package.");
-        } else {
-            ImGui::TextDisabled(
-                "The destination folder must be empty.");
+                "A native build project and game payload will be exported. "
+                "Compile it with Android Studio/Gradle or Xcode on macOS.");
         }
 
         bool startBuild = false;

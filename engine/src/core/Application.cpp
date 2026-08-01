@@ -34,6 +34,7 @@ Application::Application(AppConfig config) : m_config(std::move(config)) {
 
     m_lastWidth = m_window->Width();
     m_lastHeight = m_window->Height();
+    m_lastNativeHandle = m_window->NativeHandle();
 
     NARAGAME_INFO("Initialized: window %ux%u, render %s, audio %s",
               m_window->Width(), m_window->Height(),
@@ -73,7 +74,45 @@ void Application::Run() {
 
         const uint32_t width = m_window->Width();
         const uint32_t height = m_window->Height();
-        if ((width != m_lastWidth || height != m_lastHeight) && width > 0 && height > 0) {
+#if defined(NARAGAME_PLATFORM_ANDROID)
+        // APP_CMD_TERM_WINDOW invalidates VkSurfaceKHR. Android may later
+        // provide a different ANativeWindow without restarting the process,
+        // so recreate the device instead of resizing the stale surface.
+        void* nativeHandle = m_window->NativeHandle();
+        if (nativeHandle == nullptr && m_lastNativeHandle != nullptr) {
+            OnDeviceLost();
+            m_device.reset();
+            m_lastNativeHandle = nullptr;
+            m_lastWidth = m_lastHeight = 0;
+        }
+        if (nativeHandle != nullptr && nativeHandle != m_lastNativeHandle) {
+            if (m_device != nullptr) {
+                OnDeviceLost();
+                m_device.reset();
+            }
+            RHIDeviceDesc deviceDesc;
+            deviceDesc.nativeWindowHandle = nativeHandle;
+            deviceDesc.width = width;
+            deviceDesc.height = height;
+            deviceDesc.vsync = m_config.vsync;
+            m_device = RHIDevice::Create(deviceDesc);
+            NARAGAME_ASSERT(m_device != nullptr,
+                            "Failed to recreate Android RHI device");
+            m_lastNativeHandle = nativeHandle;
+            m_lastWidth = width;
+            m_lastHeight = height;
+            OnDeviceRestored();
+        }
+#endif
+        if (m_device == nullptr) {
+            // The Android activity is paused between TERM_WINDOW and the next
+            // INIT_WINDOW. Keep polling lifecycle events, but do not tick game
+            // code that may access GPU resources while no device exists.
+            continue;
+        }
+        if (m_device != nullptr &&
+            (width != m_lastWidth || height != m_lastHeight) &&
+            width > 0 && height > 0) {
             m_device->Resize(width, height);
             m_lastWidth = width;
             m_lastHeight = height;
@@ -83,7 +122,7 @@ void Application::Run() {
         m_audio->Update(); // reclaim finished sound voices
 
         // Skip rendering while minimized (zero-sized client area).
-        if (width > 0 && height > 0) {
+        if (m_device != nullptr && width > 0 && height > 0) {
             m_device->BeginFrame();
             OnRender();
             m_device->EndFrame();

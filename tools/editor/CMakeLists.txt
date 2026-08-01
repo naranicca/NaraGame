@@ -69,6 +69,8 @@ add_executable(NaraGame
     src/scripting/ScriptHost.cpp)
 target_include_directories(NaraGame PRIVATE src)
 target_link_libraries(NaraGame PRIVATE NaraGame::Engine imgui xaudio2)
+target_compile_definitions(NaraGame PRIVATE
+    NARAGAME_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # Ship the editor as a Windows GUI-subsystem executable so no console
 # window pops up when it's double-clicked from Explorer. WIN32_EXECUTABLE
