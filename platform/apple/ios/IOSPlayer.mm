@@ -4,6 +4,7 @@
 #include <NaraGame/core/Application.h>
 #include <NaraGame/core/Log.h>
 #include <NaraGame/input/Input.h>
+#include <NaraGamePlayer/ProjectPlayer.h>
 
 #include <thread>
 
@@ -39,18 +40,28 @@ void SetIOSMetalLayer(void* layer, uint32_t width, uint32_t height);
 @end
 
 namespace {
-class IOSPlayer final : public NaraGame::Application {
-public:
-    IOSPlayer() : Application({"NaraGame", 1280, 720, true}) {}
-protected:
-    void OnRender() override {
-        GetDevice().Clear({0.08f, 0.09f, 0.12f, 1.0f});
+std::string StageBundledProject() {
+    NSFileManager* files = NSFileManager.defaultManager;
+    NSURL* caches = [files URLsForDirectory:NSCachesDirectory
+                                  inDomains:NSUserDomainMask].firstObject;
+    NSURL* root = [caches URLByAppendingPathComponent:@"NaraGameProject"];
+    [files createDirectoryAtURL:root withIntermediateDirectories:YES
+                     attributes:nil error:nil];
+    for (NSString* name in @[@"assets.pak", @"ProjectSettings", @"Assets"]) {
+        NSURL* destination = [root URLByAppendingPathComponent:name];
+        [files removeItemAtURL:destination error:nil];
+        NSURL* source = [NSBundle.mainBundle.resourceURL
+                         URLByAppendingPathComponent:name];
+        if ([files fileExistsAtPath:source.path])
+            [files copyItemAtURL:source toURL:destination error:nil];
     }
-};
+    return root.path.UTF8String;
+}
 }
 
 NaraGame::Application* NaraGame::CreateApplication(int, char**) {
-    return new IOSPlayer();
+    auto app = NaraGamePlayer::CreateProjectPlayer({StageBundledProject(), 0});
+    return app.release();
 }
 
 @interface NaraGameAppDelegate : UIResponder <UIApplicationDelegate>

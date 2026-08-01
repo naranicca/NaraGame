@@ -4329,6 +4329,17 @@ private:
                                   fs::copy_options::overwrite_existing;
             fs::copy(sourceRoot / "engine", fs::path(dest) / "engine",
                      copyOpts, ec);
+            if (!ec) fs::copy(sourceRoot / "tools" / "player",
+                              fs::path(dest) / "tools" / "player",
+                              copyOpts, ec);
+            if (!ec) fs::copy(sourceRoot / "tools" / "editor" / "src",
+                              fs::path(dest) / "tools" / "editor" / "src",
+                              copyOpts, ec);
+            if (!ec && fs::exists(sourceRoot / "third_party" / "lua")) {
+                fs::copy(sourceRoot / "third_party" / "lua",
+                         fs::path(dest) / "third_party" / "lua",
+                         copyOpts, ec);
+            }
             if (!ec) fs::copy(platformSource, platformDest, copyOpts, ec);
             if (ec) {
                 NARAGAME_ERROR("Build Game: platform template copy failed (%s)",
@@ -4375,7 +4386,15 @@ private:
             NARAGAME_ERROR("Build Game: GetModuleFileName failed.");
             return;
         }
-        const fs::path srcExe(exePathW);
+        const fs::path editorExe(exePathW);
+        const fs::path srcExe = editorExe.parent_path() /
+                                L"NaraGamePlayer.exe";
+        if (!fs::exists(srcExe, ec)) {
+            NARAGAME_ERROR(
+                "Build Game: NaraGamePlayer.exe is missing next to the editor. "
+                "Build the NaraGamePlayer target first.");
+            return;
+        }
         const fs::path destExe = fs::path(dest) / L"game.exe";
         fs::copy_file(srcExe, destExe,
                       fs::copy_options::overwrite_existing, ec);
@@ -17761,7 +17780,14 @@ Application* NaraGame::CreateApplication(int argc, char** argv) {
         }
         const fs::path destExe =
             fs::path(buildDest) / L"game.exe";
-        fs::copy_file(fs::path(exePathW), destExe,
+        const fs::path playerExe = fs::path(exePathW).parent_path() /
+                                   L"NaraGamePlayer.exe";
+        if (!fs::exists(playerExe, ec)) {
+            std::fprintf(stderr,
+                "build-game: NaraGamePlayer.exe is missing next to the editor\n");
+            std::exit(1);
+        }
+        fs::copy_file(playerExe, destExe,
             fs::copy_options::overwrite_existing, ec);
         if (ec) {
             std::fprintf(stderr,

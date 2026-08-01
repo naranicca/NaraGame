@@ -49,6 +49,82 @@ float4 PSMain(VSOutput input) : SV_TARGET {
 }
 )";
 
+static const char* kSpriteMetalShader = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VertexIn {
+    float3 position [[attribute(0)]];
+    float4 color    [[attribute(1)]];
+    float2 uv       [[attribute(2)]];
+};
+struct VertexOut {
+    float4 position [[position]];
+    float4 color;
+    float2 uv;
+};
+vertex VertexOut vertexMain(VertexIn input [[stage_in]],
+                            constant float4x4& viewProj [[buffer(1)]]) {
+    VertexOut output;
+    output.position = viewProj * float4(input.position, 1.0);
+    output.color = input.color;
+    output.uv = input.uv;
+    return output;
+}
+fragment float4 fragmentMain(VertexOut input [[stage_in]],
+                             texture2d<float> colorTexture [[texture(0)]],
+                             sampler colorSampler [[sampler(0)]]) {
+    return colorTexture.sample(colorSampler, input.uv) * input.color;
+}
+)";
+
+static const char* kMsdfMetalShader = R"(
+#include <metal_stdlib>
+using namespace metal;
+struct VertexIn { float3 position [[attribute(0)]]; float4 color [[attribute(1)]]; float2 uv [[attribute(2)]]; };
+struct VertexOut { float4 position [[position]]; float4 color; float2 uv; };
+vertex VertexOut vertexMain(VertexIn input [[stage_in]], constant float4x4& viewProj [[buffer(1)]]) {
+    return {viewProj * float4(input.position, 1.0), input.color, input.uv};
+}
+fragment float4 fragmentMain(VertexOut input [[stage_in]],
+                             texture2d<float> atlas [[texture(0)]],
+                             sampler atlasSampler [[sampler(0)]]) {
+    float3 msd = atlas.sample(atlasSampler, input.uv).rgb;
+    float distance = max(min(msd.r, msd.g), min(max(msd.r, msd.g), msd.b)) - 0.5;
+    float2 unitRange = 4.0 / float2(atlas.get_width(), atlas.get_height());
+    float2 screenTexSize = 1.0 / fwidth(input.uv);
+    float pixelDistance = max(0.5 * dot(unitRange, screenTexSize), 1.0) * distance;
+    return float4(input.color.rgb, input.color.a * saturate(pixelDistance + 0.5));
+}
+)";
+
+static const char* kFogMetalShader = R"(
+#include <metal_stdlib>
+using namespace metal;
+struct VertexIn { float3 position [[attribute(0)]]; float4 color [[attribute(1)]]; float2 uv [[attribute(2)]]; };
+struct FogTransform { float4 u; float4 v; };
+struct VertexOut { float4 position [[position]]; float4 color; float2 uv; float2 fogUV; };
+vertex VertexOut vertexMain(VertexIn input [[stage_in]],
+                            constant float4x4& viewProj [[buffer(1)]],
+                            constant FogTransform& fog [[buffer(2)]]) {
+    VertexOut output;
+    output.position = viewProj * float4(input.position, 1.0);
+    output.color = input.color; output.uv = input.uv;
+    output.fogUV = float2(dot(fog.u.xyz, float3(input.position.xy, 1.0)),
+                          dot(fog.v.xyz, float3(input.position.xy, 1.0)));
+    return output;
+}
+fragment float4 fragmentMain(VertexOut input [[stage_in]],
+                             texture2d<float> colorTexture [[texture(0)]],
+                             texture2d<float> fogTexture [[texture(1)]],
+                             sampler colorSampler [[sampler(0)]],
+                             sampler fogSampler [[sampler(1)]]) {
+    float4 color = colorTexture.sample(colorSampler, input.uv) * input.color;
+    float visibility = fogTexture.sample(fogSampler, input.fogUV).r;
+    return float4(color.rgb * visibility, color.a);
+}
+)";
+
 // Fog-sprite shader: vertex stage outputs an additional UV computed from the
 // vertex position via a 2x3 affine transform (two vec4 rows); pixel stage
 // multiplies the sprite by a single-channel visibility sample. Used by the
@@ -176,6 +252,7 @@ void Renderer2D::Init(RHIDevice& device) {
     shaderDesc.vertexSource = kSpriteShader;
     shaderDesc.pixelSource = kSpriteShader;
     shaderDesc.debugName = "Renderer2D::sprite";
+    shaderDesc.metalSource = kSpriteMetalShader;
     shaderDesc.vertexSpirv = kSpriteVertSpv;
     shaderDesc.vertexSpirvSize = sizeof(kSpriteVertSpv);
     shaderDesc.pixelSpirv = kSpriteFragSpv;
@@ -213,6 +290,7 @@ void Renderer2D::Init(RHIDevice& device) {
     msdfShaderDesc.vertexSource = kMsdfShader;
     msdfShaderDesc.pixelSource = kMsdfShader;
     msdfShaderDesc.debugName = "Renderer2D::msdf";
+    msdfShaderDesc.metalSource = kMsdfMetalShader;
     msdfShaderDesc.vertexSpirv = kMsdfVertSpv;
     msdfShaderDesc.vertexSpirvSize = sizeof(kMsdfVertSpv);
     msdfShaderDesc.pixelSpirv = kMsdfFragSpv;
@@ -229,6 +307,7 @@ void Renderer2D::Init(RHIDevice& device) {
     fogShaderDesc.vertexSource = kFogSpriteShader;
     fogShaderDesc.pixelSource = kFogSpriteShader;
     fogShaderDesc.debugName = "Renderer2D::fogSprite";
+    fogShaderDesc.metalSource = kFogMetalShader;
     fogShaderDesc.vertexSpirv = kFogVertSpv;
     fogShaderDesc.vertexSpirvSize = sizeof(kFogVertSpv);
     fogShaderDesc.pixelSpirv = kFogFragSpv;

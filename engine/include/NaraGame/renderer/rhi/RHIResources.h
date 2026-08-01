@@ -87,6 +87,12 @@ struct ShaderDesc {
     std::string pixelEntry = "PSMain";
     std::string debugName = "shader";
 
+    // Metal Shading Language source used by the Apple backend. Both entry
+    // points must be present in this source when non-empty.
+    std::string metalSource;
+    std::string metalVertexEntry = "vertexMain";
+    std::string metalPixelEntry = "fragmentMain";
+
     // Precompiled SPIR-V (used by the Vulkan backend). Optional.
     const uint32_t* vertexSpirv = nullptr;
     size_t vertexSpirvSize = 0; // bytes

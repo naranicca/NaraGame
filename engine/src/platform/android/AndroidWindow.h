@@ -38,6 +38,7 @@ private:
 
 // Called by EntryPoint's android_main before Application construction.
 void SetAndroidApp(android_app* app);
+android_app* GetAndroidApp();
 
 } // namespace NaraGame
 

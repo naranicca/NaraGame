@@ -7,3 +7,5 @@
 !CMakeLists.txt
 !editor/
 !editor/**
+!player/
+!player/**

@@ -11,6 +11,9 @@ get_filename_component(NARAGAME_ROOT
     "${CMAKE_CURRENT_LIST_DIR}/../../../../../.." ABSOLUTE)
 add_subdirectory("${NARAGAME_ROOT}/engine"
                  "${CMAKE_CURRENT_BINARY_DIR}/naragame-engine")
+set(NARAGAME_PLAYER_BUILD_EXECUTABLE OFF CACHE BOOL "" FORCE)
+add_subdirectory("${NARAGAME_ROOT}/tools/player"
+                 "${CMAKE_CURRENT_BINARY_DIR}/naragame-player-runtime")
 
 add_library(naragame SHARED AndroidPlayer.cpp)
-target_link_libraries(naragame PRIVATE NaraGame::Engine)
+target_link_libraries(naragame PRIVATE NaraGame::ProjectRuntime)

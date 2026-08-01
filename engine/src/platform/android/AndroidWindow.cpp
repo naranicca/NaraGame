@@ -40,6 +40,8 @@ void SetAndroidApp(android_app* app) {
     g_androidApp = app;
 }
 
+android_app* GetAndroidApp() { return g_androidApp; }
+
 AndroidWindow::AndroidWindow(const WindowDesc& desc)
     : m_desc(desc), m_app(g_androidApp) {
     if (m_app == nullptr) {

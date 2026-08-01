@@ -22,6 +22,7 @@
 #include "../asset/TextureImportSettings.h"
 
 #include <NaraGame/assets/MiniJson.h>
+#include <NaraGame/input/Input.h>
 
 #include <algorithm>
 #include <cmath>
@@ -31,10 +32,6 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
-
-#if defined(NARAGAME_SCENE_EDITOR_HAS_LUA) && NARAGAME_SCENE_EDITOR_HAS_LUA
-#include <imgui.h>
-#endif
 
 #include <cstdio>
 #include <cstring>
@@ -113,47 +110,32 @@ static Rigidbody2DComponent* FindRigidbody(ScriptHost* host,
 // named keys (arrows, modifiers, common control keys). Anything
 // the table doesn't know about returns ImGuiKey_None which the
 // callbacks then treat as "key isn't down" -- no scripting error.
-static ImGuiKey LookupImGuiKey(const char* name) {
-    if (!name || !name[0]) return ImGuiKey_None;
+static NaraGame::Key LookupInputKey(const char* name) {
+    using NaraGame::Key;
+    if (!name || !name[0]) return Key::Unknown;
     if (name[1] == '\0') {
         char c = name[0];
         if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
-        if (c >= 'A' && c <= 'Z') return ImGuiKey(ImGuiKey_A + (c - 'A'));
-        if (c >= '0' && c <= '9') return ImGuiKey(ImGuiKey_0 + (c - '0'));
+        if (c >= 'A' && c <= 'Z') return Key(int(Key::A) + (c - 'A'));
+        if (c >= '0' && c <= '9') return Key(int(Key::Num0) + (c - '0'));
     }
-    struct Entry { const char* name; ImGuiKey key; };
+    struct Entry { const char* name; Key key; };
     static const Entry kTable[] = {
-        {"Space",      ImGuiKey_Space},
-        {"Enter",      ImGuiKey_Enter},
-        {"Return",     ImGuiKey_Enter},
-        {"Escape",     ImGuiKey_Escape},
-        {"Esc",        ImGuiKey_Escape},
-        {"Tab",        ImGuiKey_Tab},
-        {"Backspace",  ImGuiKey_Backspace},
-        {"Delete",     ImGuiKey_Delete},
-        {"Home",       ImGuiKey_Home},
-        {"End",        ImGuiKey_End},
-        {"PageUp",     ImGuiKey_PageUp},
-        {"PageDown",   ImGuiKey_PageDown},
-        {"Up",         ImGuiKey_UpArrow},
-        {"UpArrow",    ImGuiKey_UpArrow},
-        {"Down",       ImGuiKey_DownArrow},
-        {"DownArrow",  ImGuiKey_DownArrow},
-        {"Left",       ImGuiKey_LeftArrow},
-        {"LeftArrow",  ImGuiKey_LeftArrow},
-        {"Right",      ImGuiKey_RightArrow},
-        {"RightArrow", ImGuiKey_RightArrow},
-        {"LeftShift",  ImGuiKey_LeftShift},
-        {"RightShift", ImGuiKey_RightShift},
-        {"LeftCtrl",   ImGuiKey_LeftCtrl},
-        {"RightCtrl",  ImGuiKey_RightCtrl},
-        {"LeftAlt",    ImGuiKey_LeftAlt},
-        {"RightAlt",   ImGuiKey_RightAlt},
+        {"Space",Key::Space},{"Enter",Key::Enter},{"Return",Key::Enter},
+        {"Escape",Key::Escape},{"Esc",Key::Escape},{"Tab",Key::Tab},
+        {"Backspace",Key::Backspace},{"Home",Key::Home},{"End",Key::End},
+        {"PageUp",Key::PageUp},{"PageDown",Key::PageDown},
+        {"Up",Key::Up},{"UpArrow",Key::Up},{"Down",Key::Down},
+        {"DownArrow",Key::Down},{"Left",Key::Left},{"LeftArrow",Key::Left},
+        {"Right",Key::Right},{"RightArrow",Key::Right},
+        {"LeftShift",Key::LeftShift},{"RightShift",Key::LeftShift},
+        {"LeftCtrl",Key::LeftCtrl},{"RightCtrl",Key::LeftCtrl},
+        {"LeftAlt",Key::LeftAlt},{"RightAlt",Key::LeftAlt},
     };
     for (const Entry& e : kTable) {
         if (std::strcmp(e.name, name) == 0) return e.key;
     }
-    return ImGuiKey_None;
+    return Key::Unknown;
 }
 
 // input.is_key_down / is_key_pressed / is_key_released /
@@ -463,54 +445,51 @@ static bool AnyKey(lua_State* L, int argIdx, F check) {
     auto it = map.find(act ? act : "");
     if (it == map.end()) return false;
     for (const std::string& name : it->second) {
-        ImGuiKey k = LookupImGuiKey(name.c_str());
-        if (k != ImGuiKey_None && check(k)) return true;
+        NaraGame::Key k = LookupInputKey(name.c_str());
+        if (k != NaraGame::Key::Unknown && check(k)) return true;
     }
     return false;
 }
 
 static int LuaInputIsActionDown(lua_State* L) {
     lua_pushboolean(L, AnyKey(L, 1,
-        [](ImGuiKey k) { return ImGui::IsKeyDown(k); }));
+        [](NaraGame::Key k) { return NaraGame::Input::IsKeyDown(k); }));
     return 1;
 }
 static int LuaInputIsActionPressed(lua_State* L) {
-    bool repeat = false;
-    if (lua_gettop(L) >= 2) repeat = lua_toboolean(L, 2) != 0;
+    (void)lua_gettop(L); // Engine input exposes physical press edges, not repeat.
     lua_pushboolean(L, AnyKey(L, 1,
-        [repeat](ImGuiKey k) { return ImGui::IsKeyPressed(k, repeat); }));
+        [](NaraGame::Key k) { return NaraGame::Input::IsKeyPressed(k); }));
     return 1;
 }
 static int LuaInputIsActionReleased(lua_State* L) {
     lua_pushboolean(L, AnyKey(L, 1,
-        [](ImGuiKey k) { return ImGui::IsKeyReleased(k); }));
+        [](NaraGame::Key k) { return NaraGame::Input::IsKeyReleased(k); }));
     return 1;
 }
 
 static int LuaInputIsKeyDown(lua_State* L) {
-    ImGuiKey k = LookupImGuiKey(luaL_checkstring(L, 1));
+    NaraGame::Key k = LookupInputKey(luaL_checkstring(L, 1));
     lua_pushboolean(L,
-        k != ImGuiKey_None && ImGui::IsKeyDown(k));
+        k != NaraGame::Key::Unknown && NaraGame::Input::IsKeyDown(k));
     return 1;
 }
 static int LuaInputIsKeyPressed(lua_State* L) {
-    ImGuiKey k = LookupImGuiKey(luaL_checkstring(L, 1));
+    NaraGame::Key k = LookupInputKey(luaL_checkstring(L, 1));
     // Second arg controls key-repeat firing; defaults to false so
     // the common "fire once per press" pattern just works.
-    bool repeat = false;
-    if (lua_gettop(L) >= 2) repeat = lua_toboolean(L, 2) != 0;
     lua_pushboolean(L,
-        k != ImGuiKey_None && ImGui::IsKeyPressed(k, repeat));
+        k != NaraGame::Key::Unknown && NaraGame::Input::IsKeyPressed(k));
     return 1;
 }
 static int LuaInputIsKeyReleased(lua_State* L) {
-    ImGuiKey k = LookupImGuiKey(luaL_checkstring(L, 1));
+    NaraGame::Key k = LookupInputKey(luaL_checkstring(L, 1));
     lua_pushboolean(L,
-        k != ImGuiKey_None && ImGui::IsKeyReleased(k));
+        k != NaraGame::Key::Unknown && NaraGame::Input::IsKeyReleased(k));
     return 1;
 }
 static int LuaInputMousePosition(lua_State* L) {
-    const ImVec2 p = ImGui::GetMousePos();
+    const NaraGame::Vec2 p = NaraGame::Input::MousePosition();
     lua_pushnumber(L, p.x);
     lua_pushnumber(L, p.y);
     return 2;
@@ -518,26 +497,26 @@ static int LuaInputMousePosition(lua_State* L) {
 static int LuaInputIsMouseDown(lua_State* L) {
     int btn = int(luaL_optinteger(L, 1, 0));
     lua_pushboolean(L,
-        btn >= 0 && btn < 5 &&
-        ImGui::IsMouseDown(ImGuiMouseButton(btn)));
+        btn >= 0 && btn < int(NaraGame::MouseButton::Count) &&
+        NaraGame::Input::IsMouseDown(NaraGame::MouseButton(btn)));
     return 1;
 }
 static int LuaInputIsMousePressed(lua_State* L) {
     int btn = int(luaL_optinteger(L, 1, 0));
     lua_pushboolean(L,
-        btn >= 0 && btn < 5 &&
-        ImGui::IsMouseClicked(ImGuiMouseButton(btn)));
+        btn >= 0 && btn < int(NaraGame::MouseButton::Count) &&
+        NaraGame::Input::IsMousePressed(NaraGame::MouseButton(btn)));
     return 1;
 }
 static int LuaInputIsMouseReleased(lua_State* L) {
     int btn = int(luaL_optinteger(L, 1, 0));
     lua_pushboolean(L,
-        btn >= 0 && btn < 5 &&
-        ImGui::IsMouseReleased(ImGuiMouseButton(btn)));
+        btn >= 0 && btn < int(NaraGame::MouseButton::Count) &&
+        NaraGame::Input::IsMouseReleased(NaraGame::MouseButton(btn)));
     return 1;
 }
 static int LuaInputMouseWheel(lua_State* L) {
-    lua_pushnumber(L, ImGui::GetIO().MouseWheel);
+    lua_pushnumber(L, NaraGame::Input::MouseWheelDelta());
     return 1;
 }
 
@@ -2538,7 +2517,8 @@ static int LuaSceneAllEntities(lua_State* L) {
 // raw DeltaTime); elapsed() + frame_count() come from the host's
 // own running totals (Tick(dt) bumps them once per editor frame).
 static int LuaTimeDelta(lua_State* L) {
-    lua_pushnumber(L, ImGui::GetIO().DeltaTime);
+    ScriptHost* host = HostFromUpvalue(L);
+    lua_pushnumber(L, host ? host->DeltaTime() : 0.0f);
     return 1;
 }
 static int LuaTimeElapsed(lua_State* L) {
@@ -2553,7 +2533,9 @@ static int LuaTimeFrameCount(lua_State* L) {
     return 1;
 }
 static int LuaTimeFps(lua_State* L) {
-    lua_pushnumber(L, ImGui::GetIO().Framerate);
+    ScriptHost* host = HostFromUpvalue(L);
+    const float dt = host ? host->DeltaTime() : 0.0f;
+    lua_pushnumber(L, dt > 0.0f ? 1.0f / dt : 0.0f);
     return 1;
 }
 

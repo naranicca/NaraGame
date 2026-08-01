@@ -171,7 +171,8 @@ public:
     // TickScripts) so the host can keep running totals the Lua
     // `time` API exposes. dt is the same frame delta TickScripts
     // forwards to OnUpdate.
-    void  Tick(float dt) { m_elapsed += dt; ++m_frameCount; }
+    void  Tick(float dt) { m_lastDelta = dt; m_elapsed += dt; ++m_frameCount; }
+    float DeltaTime() const { return m_lastDelta; }
     double Elapsed()    const { return m_elapsed; }
     long long FrameCount() const { return m_frameCount; }
 
@@ -210,6 +211,7 @@ private:
     // Running totals the Lua `time` API surfaces. Tick() bumps
     // them every editor frame; nothing else mutates them.
     double    m_elapsed    = 0.0;
+    float     m_lastDelta  = 0.0f;
     long long m_frameCount = 0;
     // Bookkeeping for `scene.destroy_self`. Each lifecycle hook
     // dispatcher sets this to its target entity name before the

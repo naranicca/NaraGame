@@ -20,19 +20,19 @@ public:
     void Clear(const Color&) override;
     void EndFrame() override;
     void Present() override;
-    void SetRenderTarget(RHITexture*) override {}
+    void SetRenderTarget(RHITexture*) override;
 
     std::unique_ptr<RHIBuffer> CreateBuffer(const BufferDesc&) override;
     std::unique_ptr<RHITexture> CreateTexture(const TextureDesc&) override;
     std::unique_ptr<RHIShader> CreateShader(const ShaderDesc&) override;
     std::unique_ptr<RHIPipeline> CreatePipeline(const PipelineDesc&) override;
 
-    void BindPipeline(RHIPipeline*) override {}
-    void BindVertexBuffer(RHIBuffer*, uint32_t, uint32_t) override {}
-    void BindIndexBuffer(RHIBuffer*, IndexFormat) override {}
-    void BindUniformBuffer(uint32_t, RHIBuffer*) override {}
-    void BindTexture(uint32_t, RHITexture*) override {}
-    void DrawIndexed(uint32_t, uint32_t) override {}
+    void BindPipeline(RHIPipeline*) override;
+    void BindVertexBuffer(RHIBuffer*, uint32_t, uint32_t) override;
+    void BindIndexBuffer(RHIBuffer*, IndexFormat) override;
+    void BindUniformBuffer(uint32_t, RHIBuffer*) override;
+    void BindTexture(uint32_t, RHITexture*) override;
+    void DrawIndexed(uint32_t, uint32_t) override;
 
     RHIBackend Backend() const override { return RHIBackend::Metal; }
     const char* BackendName() const override { return "Metal"; }
@@ -45,6 +45,11 @@ private:
     void* m_drawable = nullptr;      // id<CAMetalDrawable>
     void* m_commandBuffer = nullptr; // id<MTLCommandBuffer>
     void* m_encoder = nullptr;       // id<MTLRenderCommandEncoder>
+    void* m_linearSampler = nullptr; // id<MTLSamplerState>
+    void* m_pointSampler = nullptr;  // id<MTLSamplerState>
+    RHIBuffer* m_indexBuffer = nullptr;
+    IndexFormat m_indexFormat = IndexFormat::Uint32;
+    RHITexture* m_renderTarget = nullptr;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
 };
