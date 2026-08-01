@@ -8,11 +8,15 @@ android {
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
-        applicationId = "com.naragame.player"
+        applicationId = providers.gradleProperty("naragame.applicationId")
+            .getOrElse("com.naragame.player")
         minSdk = 26
         targetSdk = 37
         versionCode = 1
-        versionName = "1.0"
+        versionName = providers.gradleProperty("naragame.versionName")
+            .getOrElse("0.1.0")
+        manifestPlaceholders["appName"] = providers
+            .gradleProperty("naragame.appName").getOrElse("NaraGame")
 
         ndk {
             abiFilters += listOf("arm64-v8a")

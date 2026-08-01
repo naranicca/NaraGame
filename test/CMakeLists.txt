@@ -21,3 +21,8 @@ add_test(NAME editor_build_game_package
         -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/player-project
         -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/player-package-test
         -P ${CMAKE_CURRENT_SOURCE_DIR}/ValidatePlayerPackage.cmake)
+
+add_test(NAME platform_player_templates
+    COMMAND ${CMAKE_COMMAND}
+        -DNARAGAME_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/ValidatePlatformTemplates.cmake)

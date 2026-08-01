@@ -39,13 +39,14 @@
 
 | 플랫폼 | 윈도우 | RHI 백엔드 | 상태 |
 | --- | --- | --- | --- |
-| Windows | Win32 | Direct3D 11 | 구현됨 (창+스왑체인+클리어) |
-| macOS | Cocoa | Metal | 스텁 |
-| iOS | UIKit | Metal | 스텁 |
-| Android | NativeActivity | Vulkan | 스텁 |
+| Windows | Win32 | Direct3D 11 | 에디터 및 프로젝트 플레이어 |
+| macOS | Cocoa | Metal | 2D 프로젝트 플레이어, Xcode 검증 필요 |
+| iOS | UIKit | Metal | 2D 프로젝트 플레이어, Xcode/실기기 검증 필요 |
+| Android | NativeActivity | Vulkan | 프로젝트 플레이어, SDK/NDK 및 실기기 검증 필요 |
 
-현재 RHI는 스왑체인 수명과 화면 클리어만 다룹니다. 다음 단계로
-버퍼/텍스처/셰이더/파이프라인/커맨드리스트 추상화를 그 위에 올립니다.
+RHI는 버퍼, 텍스처, 셰이더, 파이프라인, 렌더 타겟과 인덱스 드로를
+추상화합니다. Metal은 현재 프로젝트 플레이어의 2D 렌더링 경로를 지원하며,
+3D·Depth·HDR 후처리는 아직 다른 백엔드와 완전한 기능 동등성이 없습니다.
 
 ### 플랫폼 감지
 `core/Platform.h`가 컴파일러 매크로(`_WIN32`, `__APPLE__`, `__ANDROID__`)로부터

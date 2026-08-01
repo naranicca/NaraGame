@@ -5,6 +5,10 @@
 
 #if defined(NARAGAME_PLATFORM_WINDOWS)
     #include "audio/xaudio2/XAudio2Device.h"
+#elif defined(NARAGAME_PLATFORM_ANDROID)
+    #include "audio/opensl/OpenSLAudioDevice.h"
+#elif defined(NARAGAME_PLATFORM_MACOS) || defined(NARAGAME_PLATFORM_IOS)
+    #include "audio/apple/AppleAudioDevice.h"
 #endif
 
 namespace NaraGame {
@@ -26,6 +30,14 @@ std::unique_ptr<AudioDevice> AudioDevice::Create() {
     if (device->Valid())
         return device;
     NARAGAME_WARN("XAudio2 unavailable; falling back to silent audio");
+#elif defined(NARAGAME_PLATFORM_ANDROID)
+    auto device = std::make_unique<OpenSLAudioDevice>();
+    if (device->Valid()) return device;
+    NARAGAME_WARN("OpenSL ES unavailable; falling back to silent audio");
+#elif defined(NARAGAME_PLATFORM_MACOS) || defined(NARAGAME_PLATFORM_IOS)
+    auto device = std::make_unique<AppleAudioDevice>();
+    if (device->Valid()) return device;
+    NARAGAME_WARN("AVAudioEngine unavailable; falling back to silent audio");
 #endif
     return std::make_unique<NullAudioDevice>();
 }

@@ -57,18 +57,21 @@ elseif(IOS)
     enable_language(OBJCXX)
     list(APPEND NARAGAME_SOURCES
         src/platform/ios/iOSWindow.mm
+        src/audio/apple/AppleAudioDevice.mm
         src/renderer/rhi/metal/MetalDevice.mm
     )
 elseif(APPLE)
     enable_language(OBJCXX)
     list(APPEND NARAGAME_SOURCES
         src/platform/macos/MacWindow.mm
+        src/audio/apple/AppleAudioDevice.mm
         src/renderer/rhi/metal/MetalDevice.mm
     )
 elseif(ANDROID)
     enable_language(C)
     list(APPEND NARAGAME_SOURCES
         src/platform/android/AndroidWindow.cpp
+        src/audio/opensl/OpenSLAudioDevice.cpp
         src/renderer/rhi/vulkan/VulkanDevice.cpp
         src/renderer/rhi/vulkan/VulkanResources.cpp
         ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c
@@ -88,7 +91,15 @@ target_compile_features(NaraGameEngine PUBLIC cxx_std_20)
 # Keep headers visible in the Visual Studio Solution Explorer.
 file(GLOB_RECURSE NARAGAME_HEADERS CONFIGURE_DEPENDS include/*.h src/*.h)
 target_sources(NaraGameEngine PRIVATE ${NARAGAME_HEADERS})
-source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${NARAGAME_SOURCES} ${NARAGAME_HEADERS})
+set(NARAGAME_GROUP_SOURCES ${NARAGAME_SOURCES})
+if(ANDROID)
+    set(NARAGAME_NATIVE_APP_GLUE
+        ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
+    list(REMOVE_ITEM NARAGAME_GROUP_SOURCES ${NARAGAME_NATIVE_APP_GLUE})
+    source_group("platform/android" FILES ${NARAGAME_NATIVE_APP_GLUE})
+endif()
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}
+    FILES ${NARAGAME_GROUP_SOURCES} ${NARAGAME_HEADERS})
 
 if(WIN32)
     target_compile_definitions(NaraGameEngine PUBLIC
@@ -107,9 +118,11 @@ if(ANDROID)
     find_library(NARAGAME_ANDROID_LIB android REQUIRED)
     find_library(NARAGAME_LOG_LIB log REQUIRED)
     find_library(NARAGAME_VULKAN_LIB vulkan REQUIRED)
+    find_library(NARAGAME_OPENSL_LIB OpenSLES REQUIRED)
     target_link_libraries(NaraGameEngine PUBLIC
         ${NARAGAME_ANDROID_LIB}
         ${NARAGAME_LOG_LIB}
+        ${NARAGAME_OPENSL_LIB}
         ${NARAGAME_VULKAN_LIB})
     target_compile_definitions(NaraGameEngine PUBLIC
         NARAGAME_HAVE_VULKAN=1)
@@ -118,6 +131,7 @@ endif()
 if(APPLE)
     target_link_libraries(NaraGameEngine PUBLIC
         "-framework Metal"
+        "-framework AVFoundation"
         "-framework QuartzCore"
         "-framework Foundation")
     if(IOS)
@@ -138,15 +152,15 @@ endif()
 # Optional Vulkan backend (a second native RHI; runs on Windows when the SDK is
 # present). Selected at runtime via the NARAGAME_RHI=vulkan environment variable.
 if(NOT ANDROID)
-  find_package(Vulkan QUIET)
-endif()
-if(Vulkan_FOUND AND NOT ANDROID)
-    message(STATUS "NaraGame: Vulkan found (${Vulkan_LIBRARY}) -> Vulkan backend enabled")
-    target_sources(NaraGameEngine PRIVATE
-        src/renderer/rhi/vulkan/VulkanDevice.cpp
-        src/renderer/rhi/vulkan/VulkanResources.cpp)
-    target_link_libraries(NaraGameEngine PUBLIC Vulkan::Vulkan)
-    target_compile_definitions(NaraGameEngine PUBLIC NARAGAME_HAVE_VULKAN)
-else()
-    message(STATUS "NaraGame: Vulkan SDK not found -> Vulkan backend disabled")
+    find_package(Vulkan QUIET)
+    if(Vulkan_FOUND)
+        message(STATUS "NaraGame: Vulkan found (${Vulkan_LIBRARY}) -> Vulkan backend enabled")
+        target_sources(NaraGameEngine PRIVATE
+            src/renderer/rhi/vulkan/VulkanDevice.cpp
+            src/renderer/rhi/vulkan/VulkanResources.cpp)
+        target_link_libraries(NaraGameEngine PUBLIC Vulkan::Vulkan)
+        target_compile_definitions(NaraGameEngine PUBLIC NARAGAME_HAVE_VULKAN)
+    else()
+        message(STATUS "NaraGame: Vulkan SDK not found -> Vulkan backend disabled")
+    endif()
 endif()

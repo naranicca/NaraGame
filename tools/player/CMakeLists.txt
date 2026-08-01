@@ -1,6 +1,9 @@
-set(EDITOR_SRC ${CMAKE_SOURCE_DIR}/tools/editor/src)
+get_filename_component(NARAGAME_PLAYER_ROOT
+    "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+set(EDITOR_SRC ${NARAGAME_PLAYER_ROOT}/tools/editor/src)
 
-set(NARAGAME_LUA_DIR ${CMAKE_SOURCE_DIR}/third_party/lua)
+set(NARAGAME_LUA_DIR ${NARAGAME_PLAYER_ROOT}/third_party/lua)
+set(NARAGAME_AUDIO_DIR ${NARAGAME_PLAYER_ROOT}/third_party/audio)
 if(NOT TARGET lua AND EXISTS ${NARAGAME_LUA_DIR}/lua.h)
     enable_language(C)
     file(GLOB NARAGAME_LUA_SOURCES CONFIGURE_DEPENDS
@@ -15,6 +18,11 @@ if(NOT TARGET lua AND EXISTS ${NARAGAME_LUA_DIR}/lua.h)
     set_target_properties(lua PROPERTIES FOLDER "third_party")
 endif()
 
+if(NOT TARGET stb_vorbis AND EXISTS ${NARAGAME_AUDIO_DIR}/stb_vorbis.c)
+    add_library(stb_vorbis STATIC ${NARAGAME_AUDIO_DIR}/stb_vorbis.c)
+    set_target_properties(stb_vorbis PROPERTIES FOLDER "third_party")
+endif()
+
 set(NARAGAME_PROJECT_RUNTIME_SOURCES
     src/PlayerApp.cpp
     ${EDITOR_SRC}/asset/Animation.cpp
@@ -26,7 +34,6 @@ set(NARAGAME_PROJECT_RUNTIME_SOURCES
     ${EDITOR_SRC}/asset/SpriteSheet.cpp
     ${EDITOR_SRC}/asset/TextureImportSettings.cpp
     ${EDITOR_SRC}/asset/Tileset.cpp
-    ${EDITOR_SRC}/audio/Audio.cpp
     ${EDITOR_SRC}/project/Project.cpp
     ${EDITOR_SRC}/scene/AnimatorComponent.cpp
     ${EDITOR_SRC}/scene/AudioSourceComponent.cpp
@@ -48,6 +55,14 @@ set(NARAGAME_PROJECT_RUNTIME_SOURCES
     ${EDITOR_SRC}/scene/TransformComponent.cpp
     ${EDITOR_SRC}/scripting/ScriptHost.cpp)
 
+if(WIN32)
+    list(APPEND NARAGAME_PROJECT_RUNTIME_SOURCES
+        ${EDITOR_SRC}/audio/Audio.cpp)
+else()
+    list(APPEND NARAGAME_PROJECT_RUNTIME_SOURCES
+        ${EDITOR_SRC}/audio/AudioPortable.cpp)
+endif()
+
 add_library(NaraGameProjectRuntime STATIC
     ${NARAGAME_PROJECT_RUNTIME_SOURCES})
 add_library(NaraGame::ProjectRuntime ALIAS NaraGameProjectRuntime)
@@ -59,6 +74,17 @@ if(TARGET lua)
     target_compile_definitions(NaraGameProjectRuntime PRIVATE
         NARAGAME_SCENE_EDITOR_HAS_LUA=1)
     target_link_libraries(NaraGameProjectRuntime PRIVATE lua)
+endif()
+if(NOT WIN32 AND TARGET stb_vorbis)
+    target_compile_definitions(NaraGameProjectRuntime PRIVATE
+        NARAGAME_PORTABLE_HAS_STB_VORBIS=1)
+    target_link_libraries(NaraGameProjectRuntime PRIVATE stb_vorbis)
+endif()
+if(NOT WIN32 AND EXISTS ${NARAGAME_AUDIO_DIR}/minimp3.h)
+    target_compile_definitions(NaraGameProjectRuntime PRIVATE
+        NARAGAME_PORTABLE_HAS_MINIMP3=1)
+    target_include_directories(NaraGameProjectRuntime PRIVATE
+        ${NARAGAME_AUDIO_DIR})
 endif()
 set_target_properties(NaraGameProjectRuntime PROPERTIES FOLDER "runtime")
 

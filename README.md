@@ -4,8 +4,9 @@
 Windows · macOS · Android · iOS를 목표로 하며,
 플랫폼별 네이티브 그래픽 API(Direct3D / Metal / Vulkan)를 자체 RHI 계층으로 추상화해 GPU 가속을 지원합니다.
 
-주 개발 환경은 **Windows + Visual Studio 2022**이며, 현재 동작하는 백엔드는 **Direct3D 11**입니다.
-나머지 플랫폼/백엔드는 동일한 인터페이스를 구현하는 스텁으로 골격만 잡혀 있습니다.
+주 개발 환경은 **Windows + Visual Studio 2022**입니다. Windows는 Direct3D 11,
+Android는 Vulkan, macOS/iOS는 Metal 기반 플레이어를 제공합니다. Apple 빌드는
+macOS/Xcode에서, Android 빌드는 Android SDK/NDK에서 최종 검증해야 합니다.
 
 ## 디렉토리 구조
 
@@ -25,13 +26,13 @@ NaraGame/
 │     ├─ input/
 │     ├─ platform/
 │     │  ├─ windows/       # Win32 윈도우  (구현됨)
-│     │  ├─ macos/         # Cocoa         (스텁)
-│     │  ├─ ios/           # UIKit         (스텁)
-│     │  └─ android/       # NativeActivity(스텁)
+│     │  ├─ macos/         # Cocoa
+│     │  ├─ ios/           # UIKit
+│     │  └─ android/       # NativeActivity
 │     └─ renderer/rhi/
 │        ├─ d3d11/         # Direct3D 11   (구현됨)
-│        ├─ metal/         # Metal         (스텁)
-│        └─ vulkan/        # Vulkan        (스텁)
+│        ├─ metal/         # Metal 2D
+│        └─ vulkan/        # Vulkan
 ├─ test/                   # 엔진을 사용하는 테스트 게임 (각각 실행 파일)
 │  ├─ breakout/            # 벽돌깨기
 │  ├─ space_invaders/      # 스페이스 인베이더
@@ -39,7 +40,8 @@ NaraGame/
 │  ├─ flappy/              # 플래피버드
 │  └─ citybuilder/         # SC2K 스타일 아이소메트릭 도시 건설 (자체 README)
 ├─ tools/
-│  └─ editor/              # NaraGame 에디터 (실행 파일 타깃: NaraGame → NaraGame.exe)
+│  ├─ editor/              # NaraGame 에디터 (NaraGame.exe)
+│  └─ player/              # 플랫폼 공통 프로젝트 런타임과 전용 플레이어
 ├─ scripts/                # 빌드 헬퍼 (아틀라스 굽기, 셰이더 컴파일)
 ├─ third_party/            # 벤더링된 의존성 (imgui, lua, 오디오 디코더, miniz)
 └─ docs/                   # 설계 문서 + 스크린샷
@@ -60,7 +62,7 @@ NaraGame/
 엔진 위에 구축된 Unity 스타일의 통합 게임 에디터입니다. 프로젝트/에셋 관리,
 씬·계층·인스펙터 패널, 타일맵 + 오토타일 페인팅, 애니메이터 컨트롤러,
 픽셀(스프라이트) 에디터, Lua 스크립팅(핫 리로드), 오디오 믹서, 게임 화면비
-그대로의 Game View, 독립 실행형 게임 빌드(File > Build Game)까지 지원합니다.
+그대로의 Game View, 타겟 플랫폼을 선택하는 게임 빌드(File > Build...)까지 지원합니다.
 
 ```powershell
 cmake --build --preset windows-release --target NaraGame

@@ -1,10 +1,8 @@
 #include "AssetGuid.h"
 
-#include <objbase.h>   // CoCreateGuid
-
 #include <cctype>
 #include <cstdio>
-#include <cstring>
+#include <random>
 
 namespace SceneEditor {
 
@@ -54,9 +52,12 @@ AssetGuid AssetGuid::FromString(const std::string& s) {
 
 AssetGuid AssetGuid::Generate() {
     AssetGuid out;
-    GUID g{};
-    if (FAILED(CoCreateGuid(&g))) return out;
-    std::memcpy(out.bytes.data(), &g, 16);
+    std::random_device random;
+    for (uint8_t& byte : out.bytes)
+        byte = static_cast<uint8_t>(random());
+    // RFC 4122 version 4 + variant 1 bits.
+    out.bytes[6] = static_cast<uint8_t>((out.bytes[6] & 0x0f) | 0x40);
+    out.bytes[8] = static_cast<uint8_t>((out.bytes[8] & 0x3f) | 0x80);
     return out;
 }
 

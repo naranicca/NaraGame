@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -24,5 +25,7 @@ struct AudioClip {
 
 // Load a PCM .wav file (from-scratch RIFF parser, 8/16-bit). Invalid on failure.
 AudioClip LoadWav(const std::string& path);
+AudioClip LoadWavMemory(const uint8_t* bytes, size_t size,
+                        const std::string& debugName = "<memory>");
 
 } // namespace NaraGame

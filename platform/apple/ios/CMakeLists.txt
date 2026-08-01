@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
 project(NaraGameIOSPlayer LANGUAGES C CXX OBJCXX)
 
+set(NARAGAME_APP_NAME "NaraGame")
+set(NARAGAME_APP_ID "com.naragame.player")
+set(NARAGAME_APP_VERSION "0.1.0")
+include("${CMAKE_CURRENT_LIST_DIR}/NaraGameBuildSettings.cmake" OPTIONAL)
+
 if(NOT IOS)
     message(FATAL_ERROR "Configure with -DCMAKE_SYSTEM_NAME=iOS -G Xcode")
 endif()
@@ -27,11 +32,11 @@ endforeach()
 target_link_libraries(NaraGamePlayer PRIVATE NaraGame::ProjectRuntime
     "-framework UIKit" "-framework Metal" "-framework QuartzCore")
 set_target_properties(NaraGamePlayer PROPERTIES
-    MACOSX_BUNDLE_BUNDLE_NAME "NaraGame"
-    MACOSX_BUNDLE_GUI_IDENTIFIER "com.naragame.player"
+    MACOSX_BUNDLE_BUNDLE_NAME "${NARAGAME_APP_NAME}"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "${NARAGAME_APP_ID}"
     MACOSX_BUNDLE_BUNDLE_VERSION "1"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
-    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.naragame.player"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${NARAGAME_APP_VERSION}"
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${NARAGAME_APP_ID}"
     XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
     XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "15.0"
     XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO")

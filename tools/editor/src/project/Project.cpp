@@ -173,6 +173,7 @@ bool Project::Create(const std::string& rootDir, const std::string& name) {
     m_rootDir = Normalise(fs::absolute(root, ec));
     m_name    = name.empty() ? root.filename().string() : name;
     m_version = "0.1.0";
+    m_applicationId = "com.naragame.player";
 
     if (!EnsureFolderTree() || !WriteProjectJson()) {
         Close();
@@ -219,6 +220,7 @@ void Project::Close() {
     m_rootDir.clear();
     m_name.clear();
     m_version = "0.1.0";
+    m_applicationId = "com.naragame.player";
     m_audioMasterVolume = 1.0f;
     m_audioSfxVolume    = 1.0f;
     m_audioMusicVolume  = 1.0f;
@@ -249,6 +251,7 @@ bool Project::WriteProjectJson() const {
     Value root = Value::MakeObject();
     root.Add("name",    Value::MakeString(m_name));
     root.Add("version", Value::MakeString(m_version));
+    root.Add("applicationId", Value::MakeString(m_applicationId));
     // Schema version is the editor's project-file format; bump when the
     // shape changes incompatibly. Distinct from the user-facing
     // `version` above.
@@ -311,6 +314,7 @@ bool Project::ReadProjectJson() {
     }
     m_name    = root.GetString("name",    fs::path(m_rootDir).filename().string());
     m_version = root.GetString("version", "0.1.0");
+    m_applicationId = root.GetString("applicationId", "com.naragame.player");
     // Sorting layers default to the standard set when missing or empty
     // so legacy projects pick up a sensible draw order automatically.
     const NaraGame::MiniJson::Value* layers = root.Find("sortingLayers");

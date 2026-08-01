@@ -38,6 +38,11 @@ public:
     const std::string& RootDir() const { return m_rootDir; }
     const std::string& Name()    const { return m_name; }
     const std::string& Version() const { return m_version; }
+    const std::string& ApplicationId() const { return m_applicationId; }
+    void SetVersion(std::string value) { m_version = std::move(value); }
+    void SetApplicationId(std::string value) {
+        m_applicationId = std::move(value);
+    }
 
     // Conventional paths inside the project. All come back with forward
     // slashes regardless of platform.
@@ -135,6 +140,7 @@ private:
     std::string m_rootDir;
     std::string m_name;
     std::string m_version = "0.1.0";
+    std::string m_applicationId = "com.naragame.player";
     std::vector<std::string> m_sortingLayers = DefaultSortingLayers();
     std::vector<std::string> m_collisionLayers = DefaultCollisionLayers();
     // 2D bit-set indexed by layer pair (i, j) with i <= j. A

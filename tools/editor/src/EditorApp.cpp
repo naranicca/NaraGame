@@ -61,6 +61,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -4368,6 +4369,44 @@ private:
                 return;
             }
 
+            if (target == BuildTarget::Android) {
+                std::ofstream properties(platformDest / "gradle.properties",
+                                         std::ios::binary | std::ios::app);
+                properties << "\nnaragame.applicationId="
+                           << m_project.ApplicationId()
+                           << "\nnaragame.appName=" << m_project.Name()
+                           << "\nnaragame.versionName=" << m_project.Version()
+                           << '\n';
+                if (!properties.good()) {
+                    NARAGAME_ERROR("Build Game: failed to write Android app settings");
+                    return;
+                }
+            } else {
+                auto cmakeEscape = [](std::string value) {
+                    size_t pos = 0;
+                    while ((pos = value.find('\\', pos)) != std::string::npos) {
+                        value.replace(pos, 1, "\\\\"); pos += 2;
+                    }
+                    pos = 0;
+                    while ((pos = value.find('"', pos)) != std::string::npos) {
+                        value.replace(pos, 1, "\\\""); pos += 2;
+                    }
+                    return value;
+                };
+                std::ofstream settings(platformDest / "NaraGameBuildSettings.cmake",
+                                       std::ios::binary);
+                settings << "set(NARAGAME_APP_NAME \""
+                         << cmakeEscape(m_project.Name()) << "\")\n"
+                         << "set(NARAGAME_APP_ID \""
+                         << cmakeEscape(m_project.ApplicationId()) << "\")\n"
+                         << "set(NARAGAME_APP_VERSION \""
+                         << cmakeEscape(m_project.Version()) << "\")\n";
+                if (!settings.good()) {
+                    NARAGAME_ERROR("Build Game: failed to write Apple app settings");
+                    return;
+                }
+            }
+
             const char* platform = target == BuildTarget::Android
                 ? "Android" : (target == BuildTarget::Mac ? "macOS" : "iPhone");
             NARAGAME_INFO(
@@ -4448,6 +4487,10 @@ private:
 
     void DrawBuildTargetModal() {
         if (m_openBuildTargetModal) {
+            std::snprintf(m_buildApplicationId.data(), m_buildApplicationId.size(),
+                          "%s", m_project.ApplicationId().c_str());
+            std::snprintf(m_buildVersion.data(), m_buildVersion.size(), "%s",
+                          m_project.Version().c_str());
             ImGui::OpenPopup("Build");
             m_openBuildTargetModal = false;
         }
@@ -4491,8 +4534,64 @@ private:
         targetRow(BuildTarget::IPhone, "iPhone",
                   "Xcode app project; UIKit/Metal", true);
 
+        ImGui::SeparatorText("Application");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("Application ID", m_buildApplicationId.data(),
+                         m_buildApplicationId.size());
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("Version", m_buildVersion.data(),
+                         m_buildVersion.size());
+
+        const std::string applicationId(m_buildApplicationId.data());
+        const std::string version(m_buildVersion.data());
+        auto validIdentifier = [](const std::string& value) {
+            size_t start = 0;
+            int segments = 0;
+            while (start < value.size()) {
+                const size_t end = value.find('.', start);
+                const size_t count = (end == std::string::npos
+                    ? value.size() : end) - start;
+                if (count == 0 || !std::isalnum(
+                        static_cast<unsigned char>(value[start])) ||
+                    !std::isalnum(static_cast<unsigned char>(value[start + count - 1])))
+                    return false;
+                for (size_t i = start; i < start + count; ++i) {
+                    const unsigned char c = static_cast<unsigned char>(value[i]);
+                    if (!std::isalnum(c) && c != '-') return false;
+                }
+                ++segments;
+                if (end == std::string::npos) break;
+                if (end + 1 == value.size()) return false;
+                start = end + 1;
+            }
+            return segments >= 2;
+        };
+        auto validAppleVersion = [](const std::string& value) {
+            size_t start = 0;
+            int segments = 0;
+            while (start < value.size() && segments < 3) {
+                const size_t end = value.find('.', start);
+                const size_t count = (end == std::string::npos
+                    ? value.size() : end) - start;
+                if (count == 0) return false;
+                for (size_t i = start; i < start + count; ++i) {
+                    if (!std::isdigit(static_cast<unsigned char>(value[i]))) return false;
+                }
+                ++segments;
+                if (end == std::string::npos) return true;
+                start = end + 1;
+            }
+            return false;
+        };
+        const bool validApplicationId = validIdentifier(applicationId);
+        const bool validVersion = validAppleVersion(version);
+        if (!validApplicationId)
+            ImGui::TextDisabled("Use a reverse-domain ID, for example com.example.mygame.");
+        if (!validVersion)
+            ImGui::TextDisabled("Use one to three numeric parts, for example 1.0.0.");
+
         ImGui::Separator();
-        const bool available = true;
+        const bool available = validApplicationId && validVersion;
         ImGui::TextDisabled("The destination folder must be empty.");
         if (m_buildTarget != BuildTarget::Windows) {
             ImGui::TextWrapped(
@@ -4521,7 +4620,15 @@ private:
         ImGui::EndDisabled();
         ImGui::EndPopup();
 
-        if (startBuild) DoBuildGame(m_buildTarget);
+        if (startBuild) {
+            m_project.SetApplicationId(applicationId);
+            m_project.SetVersion(version);
+            if (!m_project.Save()) {
+                NARAGAME_ERROR("Build Game: failed to save application settings");
+                return;
+            }
+            DoBuildGame(m_buildTarget);
+        }
     }
 
     // Strip the project's Assets/ prefix off `abs` so we can hand a
@@ -17352,6 +17459,8 @@ private:
     bool                m_openAudioMixerModal = false;
     bool                m_openBuildTargetModal = false;
     BuildTarget         m_buildTarget = BuildTarget::Windows;
+    std::array<char, 128> m_buildApplicationId{};
+    std::array<char, 64>  m_buildVersion{};
     bool                m_openEditorPrefsModal = false;
     bool                m_openRenameSceneModal = false;
     // Buffer + last-error slot for the Rename Scene modal. The modal

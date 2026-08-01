@@ -1,7 +1,8 @@
-# NaraGame Apple runtime foundations
+# NaraGame Apple players
 
-These templates require macOS with Xcode and currently validate the native
-Cocoa/UIKit + CAMetalLayer + Metal clear/present path.
+These templates require macOS with Xcode. Both hosts create a native
+Cocoa/UIKit window backed by `CAMetalLayer`, stage the bundled game payload,
+and start the shared `NaraGameProjectRuntime`.
 
 macOS:
 
@@ -22,7 +23,13 @@ Device archives require an Apple Developer team and code-signing settings.
 An editor export places `assets.pak` and `ProjectSettings/` under each
 platform's `Resources/` directory. CMake adds those files to the generated app
 bundle automatically.
-Metal resource objects and the editor-authored scene player still need to be
-extracted from the Windows editor before full games can render on Apple
-platforms; the present templates intentionally render a clear screen rather
-than reporting an incomplete game package as successful.
+
+The Metal backend supports the 2D sprite, MSDF text, fog-sprite, texture,
+buffer, blend, and render-target paths used by the project player. Full 3D,
+depth, and HDR post-processing parity is still future work. Because the Apple
+sources cannot be compiled on Windows, exported projects must be built and
+tested with Xcode on macOS before distribution.
+
+PCM WAV sound effects and music are output through AVAudioEngine on macOS and
+iOS. OGG/MP3 decoding and per-voice pause/resume parity remain future work on
+the portable player audio path.
