@@ -44,6 +44,8 @@ NaraGame은 C++20과 CMake로 작성된 2D 게임 엔진 및 Unity 스타일 편
 - Player의 `--project`, `--scene`, `--frames` 실행 옵션과 Lua 오류 로그 출력
 - Preferences 메뉴와 macOS 스타일 컨트롤
 - Build 팝업의 자동 가로 확장 문제 수정
+- 플레이 중 포커스된 Viewport/Game 창이 키보드 입력을 소유하여 방향키와
+  스페이스가 편집기 버튼의 포커스 이동이나 활성화로 이어지지 않음
 
 ## 튜토리얼과 샘플
 

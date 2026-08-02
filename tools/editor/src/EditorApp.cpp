@@ -749,6 +749,19 @@ public:
             m_pendingThemeRefresh = false;
         }
 
+        // ImGui keyboard navigation uses arrows to move focus and Space/Enter
+        // to activate the focused widget. Those are also common gameplay
+        // controls. While a playing Viewport or Game window owns keyboard
+        // focus, temporarily disable UI navigation; raw Win32 events still
+        // reach NaraGame::Input, so the game continues to receive every key.
+        ImGuiIO& frameIo = ImGui::GetIO();
+        const bool gameOwnsKeyboard = m_standalone ||
+            m_viewportKeyboardFocus || m_gameViewKeyboardFocus;
+        if (gameOwnsKeyboard)
+            frameIo.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+        else
+            frameIo.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
@@ -14438,7 +14451,10 @@ private:
     // window would -- a smaller Game View shows the same scene,
     // just minified.
     void DrawGameViewWindow() {
-        if (!m_gameViewOpen) return;
+        if (!m_gameViewOpen) {
+            m_gameViewKeyboardFocus = false;
+            return;
+        }
         ImGui::SetNextWindowSize(ImVec2(816, 500),
                                  ImGuiCond_FirstUseEver);
         if (m_gameViewFocusRequest) {
@@ -14446,9 +14462,13 @@ private:
             m_gameViewFocusRequest = false;
         }
         if (!ImGui::Begin("Game", &m_gameViewOpen)) {
+            m_gameViewKeyboardFocus = m_animPlaying &&
+                ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
             ImGui::End();
             return;
         }
+        m_gameViewKeyboardFocus = m_animPlaying &&
+            ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         ShrinkFloatingCollapseIcon();
         SceneEditor::Entity* camEnt = ResolveActiveCameraEntity();
         const auto* tr = camEnt
@@ -14621,6 +14641,11 @@ private:
                                ImGuiButtonFlags_MouseButtonRight);
         const bool hovered = ImGui::IsItemHovered();
         const bool active  = ImGui::IsItemActive();
+        // Window focus persists after the initial click, so gameplay keeps
+        // keyboard ownership even when the mouse leaves the image. Clicking
+        // another editor panel naturally releases it on the next frame.
+        m_viewportKeyboardFocus = m_animPlaying &&
+            ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
         // Drop target: a texture from the Project panel lands as a new
         // entity at the cursor's world position with a SpriteRenderer
@@ -17836,6 +17861,8 @@ private:
     // sees the animation live in the viewport. Off freezes the
     // currently sampled frame.
     bool                m_animPlaying          = true;
+    bool                m_viewportKeyboardFocus = false;
+    bool                m_gameViewKeyboardFocus = false;
     float               m_fixedScriptAccumulator = 0.0f;
     // Rolling log of recently fired AnimationEvents. Console panel
     // shows the tail; capped so a runaway emitter can't grow without
