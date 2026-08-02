@@ -11,6 +11,7 @@ namespace NaraGamePlayer {
 
 struct LaunchOptions {
     std::string projectRoot;
+    std::string scene;
     int maxFrames = 0;
 };
 

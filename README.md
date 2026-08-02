@@ -69,7 +69,7 @@ cmake --build --preset windows-release --target NaraGame
 .\build\windows-x64\bin\Release\NaraGame.exe --project "C:\path\to\MyProject"
 ```
 
-처음이라면 [마리오 스타일 플랫포머 튜토리얼](tools/editor/docs/tutorial-mario-platformer.md)을 따라 해 보세요.
+처음이라면 에셋이 포함된 [클래식 플랫포머 튜토리얼](samples/platformer/README.md)을 따라 해 보세요.
 
 ## 빌드 (Windows)
 

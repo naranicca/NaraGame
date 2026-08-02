@@ -1,4 +1,5 @@
 #include <NaraGame/core/Application.h>
+#include <NaraGame/assets/MiniJson.h>
 #include <NaraGame/core/Log.h>
 #include <NaraGame/math/Mat4.h>
 #include <NaraGame/renderer/Renderer2D.h>
@@ -33,12 +34,36 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace {
+
+NaraGame::AppConfig LoadPlayerConfig(const std::string& projectRoot) {
+    NaraGame::AppConfig config;
+    config.title = "NaraGame Player";
+    std::ifstream input(std::filesystem::path(projectRoot) /
+                        "ProjectSettings/project.json", std::ios::binary);
+    if (!input) return config;
+    std::string source((std::istreambuf_iterator<char>(input)), {});
+    std::string error;
+    const auto root = NaraGame::MiniJson::Parse(source, &error);
+    const auto* display = root.IsObject() ? root.Find("display") : nullptr;
+    if (!display || !display->IsObject()) return config;
+    config.width = static_cast<uint32_t>(std::clamp(
+        int(display->GetNumber("width", 1280)), 320, 16384));
+    config.height = static_cast<uint32_t>(std::clamp(
+        int(display->GetNumber("height", 720)), 180, 16384));
+    const std::string mode = display->GetString("mode", "");
+    config.fullscreen = mode.empty() ? display->GetBool("fullscreen", false)
+                                     : mode == "fullscreen";
+    config.resizable = display->GetBool("resizable", true);
+    return config;
+}
 
 struct WorldTransform {
     NaraGame::Vec2 position{0.0f, 0.0f};
@@ -56,9 +81,11 @@ struct SpriteDraw {
 
 class ProjectPlayer final : public NaraGame::Application {
 public:
-    explicit ProjectPlayer(std::string projectRoot, int maxFrames)
-        : Application({"NaraGame Player", 1280, 720, true}),
-          m_projectRoot(std::move(projectRoot)), m_maxFrames(maxFrames) {}
+    explicit ProjectPlayer(std::string projectRoot, std::string sceneOverride,
+                           int maxFrames)
+        : Application(LoadPlayerConfig(projectRoot)),
+          m_projectRoot(std::move(projectRoot)),
+          m_sceneOverride(std::move(sceneOverride)), m_maxFrames(maxFrames) {}
 
 protected:
     void OnStart() override {
@@ -78,7 +105,10 @@ protected:
                                    asset.relPath);
             }
         }
-        const std::string sceneRel = m_project.MainScenePath();
+        std::string sceneRel = m_sceneOverride.empty()
+            ? m_project.MainScenePath() : m_sceneOverride;
+        if (sceneRel.rfind("Assets/", 0) == 0)
+            sceneRel.erase(0, 7);
         if (sceneRel.empty() ||
             !m_scene.Load(m_project.AssetsDir() + "/" + sceneRel)) {
             NARAGAME_ERROR("Player: main scene is missing or could not be loaded");
@@ -93,7 +123,6 @@ protected:
     void OnUpdate(float dt) override {
         if (!m_ready) return;
         if (m_maxFrames > 0 && ++m_frames >= m_maxFrames) Close();
-        TickPhysics(dt);
         m_scripts.Tick(dt);
         std::vector<SceneEditor::EntityId> ids;
         for (SceneEditor::EntityId root : m_scene.Roots()) CollectIds(root, ids);
@@ -116,8 +145,11 @@ protected:
             }
             m_scripts.CallOnUpdate(entity->name, dt, script->entryFunction);
         }
+        TickFixedScripts(dt);
+        TickPhysics(dt);
         if (m_scripts.HasPendingSceneLoad()) LoadPendingScene();
         TickAnimators(dt);
+        FlushScriptOutput();
     }
 
     void OnRender() override {
@@ -176,6 +208,36 @@ protected:
     }
 
 private:
+    void FlushScriptOutput() {
+        for (const std::string& line : m_scripts.OutputLog()) {
+            if (line.rfind("[lua-error]", 0) == 0)
+                NARAGAME_ERROR("%s", line.c_str());
+            else
+                NARAGAME_INFO("%s", line.c_str());
+        }
+        m_scripts.ClearOutputLog();
+    }
+
+    void TickFixedScripts(float dt) {
+        constexpr float step = 1.0f / 60.0f;
+        m_fixedScriptAccumulator += std::min(dt, 0.25f);
+        int iterations = 0;
+        while (m_fixedScriptAccumulator >= step && iterations++ < 8) {
+            std::vector<SceneEditor::EntityId> ids;
+            for (SceneEditor::EntityId root : m_scene.Roots()) CollectIds(root, ids);
+            for (SceneEditor::EntityId id : ids) {
+                SceneEditor::Entity* entity = m_scene.Get(id);
+                if (!entity || !entity->enabled) continue;
+                auto* script = entity->GetComponent<SceneEditor::ScriptComponent>();
+                if (!script || !script->started) continue;
+                m_scripts.CallOnFixedUpdate(entity->name, step,
+                                            script->entryFunction);
+            }
+            m_fixedScriptAccumulator -= step;
+        }
+        if (iterations >= 8) m_fixedScriptAccumulator = 0.0f;
+    }
+
     struct Collider {
         enum class Kind { Box, Circle, Polygon } kind = Kind::Box;
         SceneEditor::EntityId id = 0;
@@ -830,9 +892,34 @@ private:
         }
         if (draw.sprite->flipX) std::swap(uv.x, uv.z);
         if (draw.sprite->flipY) std::swap(uv.y, uv.w);
+        const float fullU0 = uv.x, fullV0 = uv.y;
+        const float fullU1 = uv.z, fullV1 = uv.w;
+        uv = {fullU0 + (fullU1 - fullU0) * draw.sprite->uvRect.x,
+              fullV0 + (fullV1 - fullV0) * draw.sprite->uvRect.y,
+              fullU0 + (fullU1 - fullU0) * draw.sprite->uvRect.z,
+              fullV0 + (fullV1 - fullV0) * draw.sprite->uvRect.w};
+        if (draw.sprite->customQuad &&
+            draw.sprite->drawMode == SceneEditor::SpriteDrawMode::Simple) {
+            auto corner = [&](const NaraGame::Vec2& p) {
+                const NaraGame::Vec2 scaled{p.x * draw.world.scale.x,
+                                             p.y * draw.world.scale.y};
+                return draw.world.position + Rotate(scaled, draw.world.rotation);
+            };
+            m_renderer.DrawQuad(corner(draw.sprite->quadTL),
+                                corner(draw.sprite->quadTR),
+                                corner(draw.sprite->quadBR),
+                                corner(draw.sprite->quadBL),
+                                texture, draw.sprite->color, uv);
+            return;
+        }
+        const bool explicitSize =
+            std::abs(draw.sprite->size.x - 1.0f) > 0.0001f ||
+            std::abs(draw.sprite->size.y - 1.0f) > 0.0001f;
         const NaraGame::Vec2 size{
-            sourceW / settings.pixelsPerUnit * draw.world.scale.x,
-            sourceH / settings.pixelsPerUnit * draw.world.scale.y};
+            (explicitSize ? draw.sprite->size.x
+                          : sourceW / settings.pixelsPerUnit) * draw.world.scale.x,
+            (explicitSize ? draw.sprite->size.y
+                          : sourceH / settings.pixelsPerUnit) * draw.world.scale.y};
         const NaraGame::Vec2 pivotOffset{
             (0.5f - pivot.x) * size.x,
             (0.5f - pivot.y) * size.y};
@@ -1097,6 +1184,7 @@ private:
     }
 
     std::string m_projectRoot;
+    std::string m_sceneOverride;
     SceneEditor::Project m_project;
     SceneEditor::AssetDatabase m_assets;
     SceneEditor::Scene m_scene;
@@ -1105,6 +1193,7 @@ private:
     bool m_ready = false;
     int m_maxFrames = 0;
     int m_frames = 0;
+    float m_fixedScriptAccumulator = 0.0f;
     std::set<std::pair<SceneEditor::EntityId, SceneEditor::EntityId>> m_contacts;
     std::map<std::pair<SceneEditor::EntityId, SceneEditor::EntityId>, bool>
         m_contactSolid;
@@ -1132,6 +1221,7 @@ NaraGamePlayer::LaunchOptions ParseArgs(int argc, char** argv) {
     for (int i = 1; i + 1 < argc; ++i) {
         const std::string key = argv[i];
         if (key == "--project") args.projectRoot = argv[++i];
+        else if (key == "--scene") args.scene = argv[++i];
         else if (key == "--frames") args.maxFrames = std::max(0, std::atoi(argv[++i]));
     }
     if (args.projectRoot.empty())
@@ -1151,5 +1241,6 @@ std::unique_ptr<NaraGame::Application> NaraGamePlayer::CreateProjectPlayer(
         LaunchOptions options) {
     PrepareProjectRoot(options.projectRoot);
     return std::make_unique<ProjectPlayer>(
-        std::move(options.projectRoot), options.maxFrames);
+        std::move(options.projectRoot), std::move(options.scene),
+        options.maxFrames);
 }

@@ -174,6 +174,10 @@ bool Project::Create(const std::string& rootDir, const std::string& name) {
     m_name    = name.empty() ? root.filename().string() : name;
     m_version = "0.1.0";
     m_applicationId = "com.naragame.player";
+    m_defaultScreenWidth = 1280;
+    m_defaultScreenHeight = 720;
+    m_defaultFullscreen = false;
+    m_resizableWindow = true;
 
     if (!EnsureFolderTree() || !WriteProjectJson()) {
         Close();
@@ -221,6 +225,10 @@ void Project::Close() {
     m_name.clear();
     m_version = "0.1.0";
     m_applicationId = "com.naragame.player";
+    m_defaultScreenWidth = 1280;
+    m_defaultScreenHeight = 720;
+    m_defaultFullscreen = false;
+    m_resizableWindow = true;
     m_audioMasterVolume = 1.0f;
     m_audioSfxVolume    = 1.0f;
     m_audioMusicVolume  = 1.0f;
@@ -252,6 +260,14 @@ bool Project::WriteProjectJson() const {
     root.Add("name",    Value::MakeString(m_name));
     root.Add("version", Value::MakeString(m_version));
     root.Add("applicationId", Value::MakeString(m_applicationId));
+    Value display = Value::MakeObject();
+    display.Add("width", Value::MakeNumber(m_defaultScreenWidth));
+    display.Add("height", Value::MakeNumber(m_defaultScreenHeight));
+    display.Add("fullscreen", Value::MakeBool(m_defaultFullscreen));
+    display.Add("mode", Value::MakeString(
+        m_defaultFullscreen ? "fullscreen" : "windowed"));
+    display.Add("resizable", Value::MakeBool(m_resizableWindow));
+    root.Add("display", std::move(display));
     // Schema version is the editor's project-file format; bump when the
     // shape changes incompatibly. Distinct from the user-facing
     // `version` above.
@@ -315,6 +331,18 @@ bool Project::ReadProjectJson() {
     m_name    = root.GetString("name",    fs::path(m_rootDir).filename().string());
     m_version = root.GetString("version", "0.1.0");
     m_applicationId = root.GetString("applicationId", "com.naragame.player");
+    if (const auto* display = root.Find("display"); display && display->IsObject()) {
+        SetDefaultScreenWidth(int(display->GetNumber("width", 1280)));
+        SetDefaultScreenHeight(int(display->GetNumber("height", 720)));
+        const std::string mode = display->GetString("mode", "");
+        m_defaultFullscreen = mode.empty()
+            ? display->GetBool("fullscreen", false)
+            : mode == "fullscreen";
+        m_resizableWindow = display->GetBool("resizable", true);
+    } else {
+        m_defaultScreenWidth = 1280; m_defaultScreenHeight = 720;
+        m_defaultFullscreen = false; m_resizableWindow = true;
+    }
     // Sorting layers default to the standard set when missing or empty
     // so legacy projects pick up a sensible draw order automatically.
     const NaraGame::MiniJson::Value* layers = root.Find("sortingLayers");

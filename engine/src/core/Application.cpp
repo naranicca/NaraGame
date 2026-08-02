@@ -19,8 +19,10 @@ Application::Application(AppConfig config) : m_config(std::move(config)) {
     windowDesc.title = m_config.title;
     windowDesc.width = m_config.width;
     windowDesc.height = m_config.height;
+    windowDesc.resizable = m_config.resizable;
     m_window = Window::Create(windowDesc);
     NARAGAME_ASSERT(m_window != nullptr, "Failed to create window");
+    if (m_config.fullscreen) m_window->SetFullscreen(true);
 
     RHIDeviceDesc deviceDesc;
     deviceDesc.nativeWindowHandle = m_window->NativeHandle();

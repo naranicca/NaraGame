@@ -6,6 +6,7 @@
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <GameController/GameController.h>
 
 @interface NaraMetalView : NSView
 @end
@@ -47,6 +48,36 @@ Key TranslateMacKey(unsigned short code) {
         case 51: return Key::Backspace; case 123: return Key::Left;
         case 124: return Key::Right; case 125: return Key::Down;
         case 126: return Key::Up; default: return Key::Unknown;
+    }
+}
+
+void PollAppleGamepads() {
+    NSArray<GCController*>* controllers = [GCController controllers];
+    for (int i = 0; i < 4; ++i) {
+        if (i >= (int)controllers.count) {
+            Input::SetGamepadConnected(i, false); continue;
+        }
+        GCExtendedGamepad* pad = controllers[(NSUInteger)i].extendedGamepad;
+        if (pad == nil) { Input::SetGamepadConnected(i, false); continue; }
+        Input::SetGamepadConnected(i, true);
+        Input::SetGamepadButton(i, GamepadButton::A, pad.buttonA.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::B, pad.buttonB.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::X, pad.buttonX.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::Y, pad.buttonY.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::LeftShoulder, pad.leftShoulder.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::RightShoulder, pad.rightShoulder.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::LeftStick, pad.leftThumbstickButton.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::RightStick, pad.rightThumbstickButton.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::DpadUp, pad.dpad.up.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::DpadDown, pad.dpad.down.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::DpadLeft, pad.dpad.left.isPressed);
+        Input::SetGamepadButton(i, GamepadButton::DpadRight, pad.dpad.right.isPressed);
+        Input::SetGamepadAxis(i, GamepadAxis::LeftX, pad.leftThumbstick.xAxis.value);
+        Input::SetGamepadAxis(i, GamepadAxis::LeftY, -pad.leftThumbstick.yAxis.value);
+        Input::SetGamepadAxis(i, GamepadAxis::RightX, pad.rightThumbstick.xAxis.value);
+        Input::SetGamepadAxis(i, GamepadAxis::RightY, -pad.rightThumbstick.yAxis.value);
+        Input::SetGamepadAxis(i, GamepadAxis::LeftTrigger, pad.leftTrigger.value);
+        Input::SetGamepadAxis(i, GamepadAxis::RightTrigger, pad.rightTrigger.value);
     }
 }
 
@@ -99,6 +130,23 @@ MacWindow::~MacWindow() {
     }
 }
 
+void MacWindow::SetSize(uint32_t width, uint32_t height) {
+    if (m_window == nullptr || m_fullscreen || width == 0 || height == 0) return;
+    @autoreleasepool {
+        NSWindow* window = (__bridge NSWindow*)m_window;
+        [window setContentSize:NSMakeSize(width, height)];
+        [window center];
+    }
+}
+
+void MacWindow::SetFullscreen(bool fullscreen) {
+    if (m_window == nullptr || fullscreen == m_fullscreen) return;
+    @autoreleasepool {
+        [(__bridge NSWindow*)m_window toggleFullScreen:nil];
+        m_fullscreen = fullscreen;
+    }
+}
+
 void MacWindow::PollEvents() {
     @autoreleasepool {
         NSApplication* app = [NSApplication sharedApplication];
@@ -140,6 +188,7 @@ void MacWindow::PollEvents() {
         CAMetalLayer* layer = (__bridge CAMetalLayer*)m_metalLayer;
         layer.contentsScale = scale;
         layer.drawableSize = CGSizeMake(m_width, m_height);
+        PollAppleGamepads();
     }
 }
 

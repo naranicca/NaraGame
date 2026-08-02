@@ -40,6 +40,12 @@ public:
     virtual uint32_t Width() const = 0;
     virtual uint32_t Height() const = 0;
 
+    // Unity-style runtime display controls. Desktop backends resize the
+    // client area; mobile backends may ignore these because the OS owns it.
+    virtual void SetSize(uint32_t /*width*/, uint32_t /*height*/) {}
+    virtual void SetFullscreen(bool /*fullscreen*/) {}
+    virtual bool IsFullscreen() const { return false; }
+
     // Native handle for the RHI backend (HWND, NSWindow*, ANativeWindow*, ...).
     virtual void* NativeHandle() const = 0;
 

@@ -22,6 +22,7 @@
 #include "../asset/TextureImportSettings.h"
 
 #include <NaraGame/assets/MiniJson.h>
+#include <NaraGame/core/Application.h>
 #include <NaraGame/input/Input.h>
 
 #include <algorithm>
@@ -518,6 +519,62 @@ static int LuaInputIsMouseReleased(lua_State* L) {
 static int LuaInputMouseWheel(lua_State* L) {
     lua_pushnumber(L, NaraGame::Input::MouseWheelDelta());
     return 1;
+}
+
+static bool ParseGamepadButton(const char* name, NaraGame::GamepadButton& out) {
+    static const std::pair<const char*, NaraGame::GamepadButton> values[] = {
+        {"a", NaraGame::GamepadButton::A}, {"b", NaraGame::GamepadButton::B},
+        {"x", NaraGame::GamepadButton::X}, {"y", NaraGame::GamepadButton::Y},
+        {"left_shoulder", NaraGame::GamepadButton::LeftShoulder},
+        {"right_shoulder", NaraGame::GamepadButton::RightShoulder},
+        {"back", NaraGame::GamepadButton::Back}, {"start", NaraGame::GamepadButton::Start},
+        {"left_stick", NaraGame::GamepadButton::LeftStick},
+        {"right_stick", NaraGame::GamepadButton::RightStick},
+        {"dpad_up", NaraGame::GamepadButton::DpadUp},
+        {"dpad_down", NaraGame::GamepadButton::DpadDown},
+        {"dpad_left", NaraGame::GamepadButton::DpadLeft},
+        {"dpad_right", NaraGame::GamepadButton::DpadRight}};
+    for (const auto& value : values) if (std::strcmp(name, value.first) == 0) {
+        out = value.second; return true;
+    }
+    return false;
+}
+static bool ParseGamepadAxis(const char* name, NaraGame::GamepadAxis& out) {
+    static const std::pair<const char*, NaraGame::GamepadAxis> values[] = {
+        {"left_x", NaraGame::GamepadAxis::LeftX}, {"left_y", NaraGame::GamepadAxis::LeftY},
+        {"right_x", NaraGame::GamepadAxis::RightX}, {"right_y", NaraGame::GamepadAxis::RightY},
+        {"left_trigger", NaraGame::GamepadAxis::LeftTrigger},
+        {"right_trigger", NaraGame::GamepadAxis::RightTrigger}};
+    for (const auto& value : values) if (std::strcmp(name, value.first) == 0) {
+        out = value.second; return true;
+    }
+    return false;
+}
+static int LuaInputGamepadConnected(lua_State* L) {
+    lua_pushboolean(L, NaraGame::Input::IsGamepadConnected(int(luaL_optinteger(L, 1, 1)) - 1));
+    return 1;
+}
+static int LuaInputGamepadButton(lua_State* L, int mode) {
+    const int pad = int(luaL_optinteger(L, 1, 1)) - 1;
+    NaraGame::GamepadButton button{};
+    if (!ParseGamepadButton(luaL_checkstring(L, 2), button)) {
+        lua_pushboolean(L, false); return 1;
+    }
+    const bool value = mode == 0 ? NaraGame::Input::IsGamepadDown(pad, button)
+                     : mode == 1 ? NaraGame::Input::IsGamepadPressed(pad, button)
+                                 : NaraGame::Input::IsGamepadReleased(pad, button);
+    lua_pushboolean(L, value); return 1;
+}
+static int LuaInputGamepadDown(lua_State* L) { return LuaInputGamepadButton(L, 0); }
+static int LuaInputGamepadPressed(lua_State* L) { return LuaInputGamepadButton(L, 1); }
+static int LuaInputGamepadReleased(lua_State* L) { return LuaInputGamepadButton(L, 2); }
+static int LuaInputGamepadAxis(lua_State* L) {
+    const int pad = int(luaL_optinteger(L, 1, 1)) - 1;
+    NaraGame::GamepadAxis axis{};
+    if (!ParseGamepadAxis(luaL_checkstring(L, 2), axis)) {
+        lua_pushnumber(L, 0.0); return 1;
+    }
+    lua_pushnumber(L, NaraGame::Input::GamepadAxisValue(pad, axis)); return 1;
 }
 
 // Walks an entity's tree firing CallOnDestroy on every started
@@ -2539,6 +2596,49 @@ static int LuaTimeFps(lua_State* L) {
     return 1;
 }
 
+// app.quit() -> nil. Requests a clean shutdown after the current Lua
+// callback returns; Application::Run exits its loop and executes OnStop.
+static int LuaAppQuit(lua_State* L) {
+    (void)L;
+    NaraGame::Application::Get().Close();
+    return 0;
+}
+
+static int LuaScreenSetResolution(lua_State* L) {
+    const int width = std::max(320, int(luaL_checkinteger(L, 1)));
+    const int height = std::max(180, int(luaL_checkinteger(L, 2)));
+    const bool fullscreen = lua_gettop(L) >= 3 && lua_toboolean(L, 3);
+    auto& window = NaraGame::Application::Get().GetWindow();
+    window.SetFullscreen(fullscreen);
+    if (!fullscreen) window.SetSize(uint32_t(width), uint32_t(height));
+    return 0;
+}
+static int LuaScreenWidth(lua_State* L) {
+    lua_pushinteger(L, NaraGame::Application::Get().GetWindow().Width()); return 1;
+}
+static int LuaScreenHeight(lua_State* L) {
+    lua_pushinteger(L, NaraGame::Application::Get().GetWindow().Height()); return 1;
+}
+static int LuaScreenFullscreen(lua_State* L) {
+    lua_pushboolean(L, NaraGame::Application::Get().GetWindow().IsFullscreen()); return 1;
+}
+static int LuaScreenSetMode(lua_State* L) {
+    const char* mode = luaL_checkstring(L, 1);
+    if (std::strcmp(mode, "fullscreen") == 0) {
+        NaraGame::Application::Get().GetWindow().SetFullscreen(true);
+    } else if (std::strcmp(mode, "windowed") == 0) {
+        NaraGame::Application::Get().GetWindow().SetFullscreen(false);
+    } else {
+        return luaL_error(L, "screen.set_mode expects 'windowed' or 'fullscreen'");
+    }
+    return 0;
+}
+static int LuaScreenMode(lua_State* L) {
+    lua_pushstring(L, NaraGame::Application::Get().GetWindow().IsFullscreen()
+                          ? "fullscreen" : "windowed");
+    return 1;
+}
+
 // Same pattern again for SpriteRendererComponent. Entities without
 // a renderer are common (light-only / logic-only entities) so the
 // nullptr return is the expected "silent no-op" path.
@@ -2650,6 +2750,32 @@ static int LuaSpriteGetSize(lua_State* L) {
     lua_pushnumber(L, s->size.x);
     lua_pushnumber(L, s->size.y);
     return 2;
+}
+// sprite.set_quad(name, tlx,tly, trx,try, brx,bry, blx,bly) enables an
+// arbitrary local-space quad. sprite.reset_quad restores the regular sprite
+// rectangle. This lets Lua build pseudo-3D road strips without allocating
+// geometry or reaching into the renderer.
+static int LuaSpriteSetQuad(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!s) return 0;
+    s->quadTL = {float(luaL_checknumber(L, 2)), float(luaL_checknumber(L, 3))};
+    s->quadTR = {float(luaL_checknumber(L, 4)), float(luaL_checknumber(L, 5))};
+    s->quadBR = {float(luaL_checknumber(L, 6)), float(luaL_checknumber(L, 7))};
+    s->quadBL = {float(luaL_checknumber(L, 8)), float(luaL_checknumber(L, 9))};
+    s->customQuad = true;
+    return 0;
+}
+static int LuaSpriteResetQuad(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (s) s->customQuad = false;
+    return 0;
+}
+static int LuaSpriteSetUVRect(lua_State* L) {
+    auto* s = FindSpriteRenderer(HostFromUpvalue(L), luaL_checkstring(L, 1));
+    if (!s) return 0;
+    s->uvRect = {float(luaL_checknumber(L, 2)), float(luaL_checknumber(L, 3)),
+                 float(luaL_checknumber(L, 4)), float(luaL_checknumber(L, 5))};
+    return 0;
 }
 static int LuaSpriteSetOrder(lua_State* L) {
     auto* s = FindSpriteRenderer(HostFromUpvalue(L),
@@ -3111,6 +3237,9 @@ ScriptHost::ScriptHost() {
         {"get_flip_y",     LuaSpriteGetFlipY},
         {"set_size",       LuaSpriteSetSize},
         {"get_size",       LuaSpriteGetSize},
+        {"set_quad",       LuaSpriteSetQuad},
+        {"reset_quad",     LuaSpriteResetQuad},
+        {"set_uv_rect",    LuaSpriteSetUVRect},
         {"set_order",      LuaSpriteSetOrder},
         {"get_order",      LuaSpriteGetOrder},
         {nullptr,          nullptr},
@@ -3128,6 +3257,11 @@ ScriptHost::ScriptHost() {
         {"is_mouse_pressed",  LuaInputIsMousePressed},
         {"is_mouse_released", LuaInputIsMouseReleased},
         {"mouse_wheel",       LuaInputMouseWheel},
+        {"is_gamepad_connected", LuaInputGamepadConnected},
+        {"is_gamepad_down",      LuaInputGamepadDown},
+        {"is_gamepad_pressed",   LuaInputGamepadPressed},
+        {"is_gamepad_released",  LuaInputGamepadReleased},
+        {"gamepad_axis",         LuaInputGamepadAxis},
         {"bind",              LuaInputBind},
         {"unbind",            LuaInputUnbind},
         {"binding",           LuaInputBinding},
@@ -3143,6 +3277,22 @@ ScriptHost::ScriptHost() {
     // missing upvalue from the stack.
     luaL_setfuncs(L, kInputApi, 0);
     lua_setglobal(L, "input");
+    static const luaL_Reg kAppApi[] = {
+        {"quit", LuaAppQuit},
+        {nullptr, nullptr},
+    };
+    lua_newtable(L);
+    luaL_setfuncs(L, kAppApi, 0);
+    lua_setglobal(L, "app");
+    static const luaL_Reg kScreenApi[] = {
+        {"set_resolution", LuaScreenSetResolution},
+        {"set_mode", LuaScreenSetMode}, {"mode", LuaScreenMode},
+        {"width", LuaScreenWidth}, {"height", LuaScreenHeight},
+        {"fullscreen", LuaScreenFullscreen}, {nullptr, nullptr},
+    };
+    lua_newtable(L);
+    luaL_setfuncs(L, kScreenApi, 0);
+    lua_setglobal(L, "screen");
     static const luaL_Reg kTimeApi[] = {
         {"delta",       LuaTimeDelta},
         {"elapsed",     LuaTimeElapsed},
@@ -3393,6 +3543,25 @@ void ScriptHost::CallOnUpdate(const std::string& entityName,
     if (!m_lua) return;
     lua_State* L = static_cast<lua_State*>(m_lua);
     std::string fn = PushLifecycleHook(L, entryFunction, "Update");
+    if (fn.empty()) { lua_pop(L, 1); return; }
+    m_dispatchEntity = entityName;
+    lua_pushstring(L, entityName.c_str());
+    lua_pushnumber(L, dt);
+    if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        AppendLine("[lua-error] " + fn + ": " +
+                   (err ? err : "<no message>"));
+        lua_pop(L, 1);
+    }
+    m_dispatchEntity.clear();
+}
+
+void ScriptHost::CallOnFixedUpdate(const std::string& entityName,
+                                   float dt,
+                                   const std::string& entryFunction) {
+    if (!m_lua) return;
+    lua_State* L = static_cast<lua_State*>(m_lua);
+    std::string fn = PushLifecycleHook(L, entryFunction, "FixedUpdate");
     if (fn.empty()) { lua_pop(L, 1); return; }
     m_dispatchEntity = entityName;
     lua_pushstring(L, entityName.c_str());
@@ -3796,6 +3965,8 @@ void ScriptHost::CallOnStart(const std::string&,
                              const std::string&) { /* stub no-op */ }
 void ScriptHost::CallOnUpdate(const std::string&, float,
                               const std::string&) { /* stub no-op */ }
+void ScriptHost::CallOnFixedUpdate(const std::string&, float,
+                                   const std::string&) { /* stub no-op */ }
 void ScriptHost::CallOnDestroy(const std::string&,
                                const std::string&) { /* stub no-op */ }
 void ScriptHost::CallOnEnable(const std::string&,

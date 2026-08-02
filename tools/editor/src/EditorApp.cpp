@@ -63,6 +63,7 @@
 #include <array>
 #include <cctype>
 #include <climits>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -759,6 +760,7 @@ public:
         // since none of them belong in a shipped game build.
         if (m_standalone) {
             TickScripts (ImGui::GetIO().DeltaTime);
+            TickFixedScripts(ImGui::GetIO().DeltaTime);
             ConsumePendingSceneLoad();
             TickPhysics (ImGui::GetIO().DeltaTime);
             TickAnimators(ImGui::GetIO().DeltaTime);
@@ -800,6 +802,7 @@ public:
         ConsumePendingFileDrops();
         TickAssetFileWatcher(ImGui::GetIO().DeltaTime);
         TickScripts (ImGui::GetIO().DeltaTime);
+        TickFixedScripts(ImGui::GetIO().DeltaTime);
         TickPhysics (ImGui::GetIO().DeltaTime);
         TickAnimators(ImGui::GetIO().DeltaTime);
         // M8c7: AudioSource auto-play. Fires on the rising
@@ -829,6 +832,7 @@ public:
         DrawSortingLayersModal();
         DrawCollisionMatrixModal();
         DrawAudioMixerModal();
+        DrawPlayerSettingsModal();
         DrawBuildTargetModal();
         DrawEditorPreferencesModal();
         DrawRenameSceneModal();
@@ -2854,6 +2858,27 @@ private:
         }
     }
 
+    void TickFixedScripts(float dt) {
+        if (!m_animPlaying) { m_fixedScriptAccumulator = 0.0f; return; }
+        constexpr float step = 1.0f / 60.0f;
+        // Avoid a debugger pause causing hundreds of catch-up callbacks.
+        m_fixedScriptAccumulator += std::min(dt, 0.25f);
+        int iterations = 0;
+        while (m_fixedScriptAccumulator >= step && iterations++ < 8) {
+            std::vector<SceneEditor::EntityId> ids;
+            CollectAllEntities(m_scene.Roots(), ids);
+            for (SceneEditor::EntityId id : ids) {
+                SceneEditor::Entity* e = m_scene.Get(id);
+                if (!e || !e->enabled) continue;
+                auto* sc = e->GetComponent<SceneEditor::ScriptComponent>();
+                if (!sc || !sc->started) continue;
+                m_scriptHost.CallOnFixedUpdate(e->name, step, sc->entryFunction);
+            }
+            m_fixedScriptAccumulator -= step;
+        }
+        if (iterations >= 8) m_fixedScriptAccumulator = 0.0f;
+    }
+
     // play toggle is on) and push the sampled frame's sub-sprite name
     // into the entity's SpriteRenderer. Tickless when m_animPlaying is
     // false so the viewport snaps to whatever frame was last sampled.
@@ -4495,7 +4520,12 @@ private:
             m_openBuildTargetModal = false;
         }
 
-        ImGui::SetNextWindowSize(ImVec2(480.0f, 0.0f), ImGuiCond_Appearing);
+        // Keep the modal compact. An auto-resizing window combined with a
+        // full-width InputText and a visible label creates a feedback loop:
+        // the label extends the content width, then the input consumes that
+        // larger width on the next frame.
+        ImGui::SetNextWindowSizeConstraints(ImVec2(480.0f, 0.0f),
+                                            ImVec2(560.0f, FLT_MAX));
         bool open = true;
         if (!ImGui::BeginPopupModal("Build", &open,
                                     ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -4535,11 +4565,13 @@ private:
                   "Xcode app project; UIKit/Metal", true);
 
         ImGui::SeparatorText("Application");
+        ImGui::TextUnformatted("Application ID");
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputText("Application ID", m_buildApplicationId.data(),
+        ImGui::InputText("##build_application_id", m_buildApplicationId.data(),
                          m_buildApplicationId.size());
+        ImGui::TextUnformatted("Version");
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputText("Version", m_buildVersion.data(),
+        ImGui::InputText("##build_version", m_buildVersion.data(),
                          m_buildVersion.size());
 
         const std::string applicationId(m_buildApplicationId.data());
@@ -4975,6 +5007,10 @@ private:
             if (ImGui::MenuItem("Audio Mixer...", nullptr, false,
                                 m_project.IsOpen())) {
                 m_openAudioMixerModal = true;
+            }
+            if (ImGui::MenuItem("Player Settings...", nullptr, false,
+                                m_project.IsOpen())) {
+                m_openPlayerSettingsModal = true;
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Preferences...")) {
@@ -9979,6 +10015,52 @@ private:
     // volumes Audio.cpp keeps. Changes propagate to the live engine
     // (so the user hears the new balance immediately) AND to
     // project.json (so re-opening the project restores it).
+    void DrawPlayerSettingsModal() {
+        if (m_openPlayerSettingsModal) {
+            m_playerWidthDraft = m_project.DefaultScreenWidth();
+            m_playerHeightDraft = m_project.DefaultScreenHeight();
+            m_playerFullscreenDraft = m_project.DefaultFullscreen();
+            m_playerResizableDraft = m_project.ResizableWindow();
+            ImGui::OpenPopup("Player Settings");
+            m_openPlayerSettingsModal = false;
+        }
+        if (!ImGui::BeginPopupModal("Player Settings", nullptr,
+                                    ImGuiWindowFlags_AlwaysAutoResize)) return;
+        ImGui::TextUnformatted("Resolution and Presentation");
+        ImGui::Separator();
+        ImGui::InputInt("Default Width", &m_playerWidthDraft);
+        ImGui::InputInt("Default Height", &m_playerHeightDraft);
+        if (ImGui::Button("1280 x 720")) { m_playerWidthDraft=1280; m_playerHeightDraft=720; }
+        ImGui::SameLine();
+        if (ImGui::Button("1920 x 1080")) { m_playerWidthDraft=1920; m_playerHeightDraft=1080; }
+        ImGui::SameLine();
+        if (ImGui::Button("720 x 1280")) { m_playerWidthDraft=720; m_playerHeightDraft=1280; }
+        ImGui::TextUnformatted("Display Mode");
+        int displayMode = m_playerFullscreenDraft ? 1 : 0;
+        if (ImGui::RadioButton("Windowed", displayMode == 0)) {
+            m_playerFullscreenDraft = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Fullscreen", displayMode == 1)) {
+            m_playerFullscreenDraft = true;
+        }
+        ImGui::BeginDisabled(m_playerFullscreenDraft);
+        ImGui::Checkbox("Resizable Window", &m_playerResizableDraft);
+        ImGui::EndDisabled();
+        ImGui::Spacing();
+        if (ImGui::Button("Apply", ImVec2(90, 0))) {
+            m_project.SetDefaultScreenWidth(m_playerWidthDraft);
+            m_project.SetDefaultScreenHeight(m_playerHeightDraft);
+            m_project.SetDefaultFullscreen(m_playerFullscreenDraft);
+            m_project.SetResizableWindow(m_playerResizableDraft);
+            m_project.Save();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
     void DrawAudioMixerModal() {
         if (m_openAudioMixerModal) {
             ImGui::OpenPopup("Audio Mixer");
@@ -14192,7 +14274,34 @@ private:
                 changed = true;
             }
             if (ImGui::IsItemActivated()) UndoSnapshot();
+        } else {
+            bool custom = s.customQuad;
+            if (NGCheckbox("Custom Quad", &custom)) {
+                UndoSnapshot();
+                s.customQuad = custom;
+                changed = true;
+            }
+            if (s.customQuad) {
+                auto editCorner = [&](const char* label, NaraGame::Vec2& corner) {
+                    float value[2] = {corner.x, corner.y};
+                    if (ImGui::DragFloat2(label, value, 0.01f)) {
+                        corner = {value[0], value[1]};
+                        changed = true;
+                    }
+                    if (ImGui::IsItemActivated()) UndoSnapshot();
+                };
+                editCorner("Top Left", s.quadTL);
+                editCorner("Top Right", s.quadTR);
+                editCorner("Bottom Right", s.quadBR);
+                editCorner("Bottom Left", s.quadBL);
+            }
         }
+        float uv[4] = {s.uvRect.x, s.uvRect.y, s.uvRect.z, s.uvRect.w};
+        if (ImGui::DragFloat4("UV Rect", uv, 0.005f, 0.0f, 1.0f)) {
+            s.uvRect = {uv[0], uv[1], uv[2], uv[3]};
+            changed = true;
+        }
+        if (ImGui::IsItemActivated()) UndoSnapshot();
         // Sorting layer dropdown -- if the entity is on a layer that no
         // longer exists in the project (renamed / deleted via the
         // Window > Sorting Layers... dialog) we still show the orphan
@@ -16384,6 +16493,12 @@ private:
         float v0 = float(rs.srcY) / float(tex->Height());
         float u1 = float(rs.srcX + rs.srcW) / float(tex->Width());
         float v1 = float(rs.srcY + rs.srcH) / float(tex->Height());
+        const float fullU0 = u0, fullV0 = v0;
+        const float fullU1 = u1, fullV1 = v1;
+        u0 = fullU0 + (fullU1 - fullU0) * spr.uvRect.x;
+        v0 = fullV0 + (fullV1 - fullV0) * spr.uvRect.y;
+        u1 = fullU0 + (fullU1 - fullU0) * spr.uvRect.z;
+        v1 = fullV0 + (fullV1 - fullV0) * spr.uvRect.w;
         const float wWorld = float(rs.srcW) / imp.pixelsPerUnit;
         const float hWorld = float(rs.srcH) / imp.pixelsPerUnit;
         const NaraGame::Vec2 pivot = rs.pivot;
@@ -16411,8 +16526,12 @@ private:
         const float rotRad = rotDeg * 3.14159265358979323846f / 180.0f;
         const float cosR = std::cos(rotRad);
         const float sinR = std::sin(rotRad);
+        const float scaleX = trans ? trans->scale.x : 1.0f;
+        const float scaleY = trans ? trans->scale.y : 1.0f;
         const float z = m_viewCam.zoom;
         auto Project = [&](float wx, float wy) {
+            wx *= scaleX;
+            wy *= scaleY;
             const float rx = cosR * wx - sinR * wy;
             const float ry = sinR * wx + cosR * wy;
             return ImVec2{c.x + rx * z, c.y - ry * z};
@@ -16420,10 +16539,14 @@ private:
         // Four corners in CW order starting from top-left of
         // the sprite rect (world top = larger Y, which maps to
         // smaller screen Y after the Project Y-flip).
-        const ImVec2 pTL = Project(worldLeft,  worldTop);
-        const ImVec2 pTR = Project(worldRight, worldTop);
-        const ImVec2 pBR = Project(worldRight, worldBottom);
-        const ImVec2 pBL = Project(worldLeft,  worldBottom);
+        const ImVec2 pTL = spr.customQuad
+            ? Project(spr.quadTL.x, spr.quadTL.y) : Project(worldLeft, worldTop);
+        const ImVec2 pTR = spr.customQuad
+            ? Project(spr.quadTR.x, spr.quadTR.y) : Project(worldRight, worldTop);
+        const ImVec2 pBR = spr.customQuad
+            ? Project(spr.quadBR.x, spr.quadBR.y) : Project(worldRight, worldBottom);
+        const ImVec2 pBL = spr.customQuad
+            ? Project(spr.quadBL.x, spr.quadBL.y) : Project(worldLeft, worldBottom);
 
         const ImVec2 uvTL{u0, v0};
         const ImVec2 uvTR{u1, v0};
@@ -17457,6 +17580,11 @@ private:
     bool                m_openLayersModal = false;
     bool                m_openCollisionMatrixModal = false;
     bool                m_openAudioMixerModal = false;
+    bool                m_openPlayerSettingsModal = false;
+    int                 m_playerWidthDraft = 1280;
+    int                 m_playerHeightDraft = 720;
+    bool                m_playerFullscreenDraft = false;
+    bool                m_playerResizableDraft = true;
     bool                m_openBuildTargetModal = false;
     BuildTarget         m_buildTarget = BuildTarget::Windows;
     std::array<char, 128> m_buildApplicationId{};
@@ -17708,6 +17836,7 @@ private:
     // sees the animation live in the viewport. Off freezes the
     // currently sampled frame.
     bool                m_animPlaying          = true;
+    float               m_fixedScriptAccumulator = 0.0f;
     // Rolling log of recently fired AnimationEvents. Console panel
     // shows the tail; capped so a runaway emitter can't grow without
     // bound.

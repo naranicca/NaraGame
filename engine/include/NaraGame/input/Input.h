@@ -36,6 +36,15 @@ enum class MouseButton : uint8_t {
     Count
 };
 
+enum class GamepadButton : uint8_t {
+    A, B, X, Y, LeftShoulder, RightShoulder, Back, Start,
+    LeftStick, RightStick, DpadUp, DpadDown, DpadLeft, DpadRight, Count
+};
+
+enum class GamepadAxis : uint8_t {
+    LeftX, LeftY, RightX, RightY, LeftTrigger, RightTrigger
+};
+
 // Polling-style input. Game code calls IsKeyDown()/IsKeyPressed(); the platform
 // window feeds state via SetKeyState(). Edge queries (Pressed/Released) compare
 // against the previous frame, so NewFrame() must run once per frame before the
@@ -60,6 +69,14 @@ public:
     // detent ≈ ±1.0). Positive = scrolled toward the user / "up".
     static float MouseWheelDelta();
 
+    // Up to four controllers. Unsupported platform backends simply report
+    // disconnected/zero, allowing keyboard fallback without platform guards.
+    static bool IsGamepadConnected(int index = 0);
+    static bool IsGamepadDown(int index, GamepadButton button);
+    static bool IsGamepadPressed(int index, GamepadButton button);
+    static bool IsGamepadReleased(int index, GamepadButton button);
+    static float GamepadAxisValue(int index, GamepadAxis axis);
+
     // Characters typed this frame (driven by the platform's WM_CHAR-style
     // event, NOT IsKeyDown -- so capitals/punctuation arrive correctly
     // shifted, and held keys auto-repeat as the OS schedules). Includes
@@ -71,6 +88,9 @@ public:
     static void SetKeyState(Key key, bool down);
     static void SetMouseButton(MouseButton button, bool down);
     static void SetMousePosition(float x, float y);
+    static void SetGamepadConnected(int index, bool connected);
+    static void SetGamepadButton(int index, GamepadButton button, bool down);
+    static void SetGamepadAxis(int index, GamepadAxis axis, float value);
     static void AddMouseWheel(float deltaNotches);
     static void PushTextInput(char c);
     static void NewFrame();

@@ -58,6 +58,11 @@ public:
     void CallOnUpdate (const std::string& entityName,
                        float dt,
                        const std::string& entryFunction = "");
+    // FixedUpdate is dispatched by editor/player accumulators at 60 Hz. A
+    // frame may issue zero or several calls; dt is always the fixed step.
+    void CallOnFixedUpdate(const std::string& entityName,
+                           float dt,
+                           const std::string& entryFunction = "");
     void CallOnDestroy(const std::string& entityName,
                        const std::string& entryFunction = "");
     void CallOnEnable (const std::string& entityName,

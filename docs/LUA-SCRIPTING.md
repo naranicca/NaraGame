@@ -213,7 +213,95 @@ Set `mainScene = "Scenes/Splash.nscene"` (File > Set Current Scene as Main) and 
 
 Same pattern -- a `Scenes/Settings.nscene` with sprite + script entities, an `input.bind`-driven rebind row per action, and `state.audio_master` / `audio.set_bus_volume` for volume sliders. Persist with `savegame.save("settings")` so the panel reapplies on the next boot.
 
+### `app.*`
+
+| Function | Returns |
+| -------- | ------- |
+| `app.quit()` | - (requests a clean application shutdown) |
+
+Use `app.quit()` from a title-screen Exit command. The current callback
+finishes, then the application loop exits normally and releases the renderer,
+audio device, and window.
+
+### `screen.*`
+
+The standalone Player starts with the `display` values saved by
+**Window > Player Settings...**. This follows Unity's split between a build's
+default Player resolution and an in-game resolution menu.
+
+| Function | Returns / effect |
+| -------- | ---------------- |
+| `screen.width()` | Current drawable width in pixels |
+| `screen.height()` | Current drawable height in pixels |
+| `screen.fullscreen()` | Whether the desktop Player is fullscreen |
+| `screen.mode()` | `"windowed"` or `"fullscreen"` |
+| `screen.set_mode(mode)` | Switches mode without changing the stored window resolution |
+| `screen.set_resolution(width, height, fullscreen)` | Changes desktop window size or fullscreen state |
+
+```lua
+-- Typical options-menu buttons
+screen.set_resolution(1280, 720, false)
+screen.set_resolution(1920, 1080, true)
+screen.set_mode("windowed")
+screen.set_mode("fullscreen")
+```
+
+Desktop Player builds apply the change immediately and resize the render
+swapchain on the following frame. Android and iPhone use the surface size
+chosen by the operating system, so runtime width and height remain read-only
+there.
+
+### Pseudo-3D sprite quads
+
+| Function | Description |
+| -------- | ----------- |
+| `sprite.set_quad(name, tlx, tly, trx, try, brx, bry, blx, bly)` | Replaces a Simple sprite's rectangle with four local-space corners in TL, TR, BR, BL order. |
+| `sprite.reset_quad(name)` | Returns the sprite to its normal rectangular shape. |
+| `sprite.set_uv_rect(name, u0, v0, u1, v1)` | Crops the selected texture or sub-sprite with normalized coordinates. |
+
+Custom quads are transformed by the entity and rendered identically
+in Game View and NaraGamePlayer. A stack of thin trapezoids can form a curved,
+pseudo-3D road:
+
+```lua
+sprite.set_quad("Road01", -1.0, 0.1, 1.0, 0.1,
+                          1.8, -0.1, -1.8, -0.1)
+sprite.set_uv_rect("Road01", 0.0, 0.0, 1.0, 0.125)
+```
+
+The quad is split into two triangles, so interpolation is affine within each
+triangle. Use multiple short strips for smooth perspective instead of one very
+large quad.
+
+### Gamepads
+
+Gamepad indices are 1-based in Lua. Windows supports up to four XInput
+controllers, macOS/iOS use Apple's GameController framework, and Android reads
+native gamepad keys and joystick axes. Android currently exposes the active
+controller as index 1. A disconnected controller safely returns false or zero,
+so keyboard/touch fallback remains active.
+
+| Function | Description |
+| -------- | ----------- |
+| `input.is_gamepad_connected(index)` | Whether the controller is available. |
+| `input.is_gamepad_down(index, button)` | Button is held. |
+| `input.is_gamepad_pressed(index, button)` | Button went down this frame. |
+| `input.is_gamepad_released(index, button)` | Button went up this frame. |
+| `input.gamepad_axis(index, axis)` | Normalized axis value. |
+
+Buttons are `a`, `b`, `x`, `y`, `left_shoulder`, `right_shoulder`, `back`,
+`start`, `left_stick`, `right_stick`, and the four `dpad_*` names. Axes are
+`left_x`, `left_y`, `right_x`, `right_y`, `left_trigger`, and `right_trigger`.
+Stick dead zones and trigger thresholds are applied by the backend.
+
 ### `time.*`
+
+Scripts may define `OnFixedUpdate(entity, dt)` or an entry-prefixed equivalent
+such as `Kart_FixedUpdate(entity, dt)`. It runs from a 60 Hz accumulator in
+both Game View and NaraGamePlayer. Slow frames may execute several fixed calls;
+catch-up is capped at eight calls to prevent a debugger pause from causing a
+spiral. Put acceleration, steering integration, and deterministic timers here;
+keep animation and UI in `Update`.
 
 | Function | Returns |
 | -------- | ------- |

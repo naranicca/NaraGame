@@ -34,6 +34,22 @@ Key TranslateAndroidKey(int32_t code) {
         default:                   return Key::Unknown;
     }
 }
+
+bool TranslateGamepadKey(int32_t code, GamepadButton& button) {
+    switch (code) {
+        case AKEYCODE_BUTTON_A: button = GamepadButton::A; return true;
+        case AKEYCODE_BUTTON_B: button = GamepadButton::B; return true;
+        case AKEYCODE_BUTTON_X: button = GamepadButton::X; return true;
+        case AKEYCODE_BUTTON_Y: button = GamepadButton::Y; return true;
+        case AKEYCODE_BUTTON_L1: button = GamepadButton::LeftShoulder; return true;
+        case AKEYCODE_BUTTON_R1: button = GamepadButton::RightShoulder; return true;
+        case AKEYCODE_BUTTON_SELECT: button = GamepadButton::Back; return true;
+        case AKEYCODE_BUTTON_START: button = GamepadButton::Start; return true;
+        case AKEYCODE_BUTTON_THUMBL: button = GamepadButton::LeftStick; return true;
+        case AKEYCODE_BUTTON_THUMBR: button = GamepadButton::RightStick; return true;
+        default: return false;
+    }
+}
 } // namespace
 
 void SetAndroidApp(android_app* app) {
@@ -113,6 +129,13 @@ int32_t AndroidWindow::HandleInput(android_app* app, AInputEvent* event) {
 
     const int32_t type = AInputEvent_getType(event);
     if (type == AINPUT_EVENT_TYPE_KEY) {
+        GamepadButton padButton{};
+        if (TranslateGamepadKey(AKeyEvent_getKeyCode(event), padButton)) {
+            Input::SetGamepadConnected(0, true);
+            Input::SetGamepadButton(0, padButton,
+                AKeyEvent_getAction(event) != AKEY_EVENT_ACTION_UP);
+            return 1;
+        }
         const Key key = TranslateAndroidKey(AKeyEvent_getKeyCode(event));
         if (key == Key::Unknown) return 0;
         const int32_t action = AKeyEvent_getAction(event);
@@ -120,6 +143,30 @@ int32_t AndroidWindow::HandleInput(android_app* app, AInputEvent* event) {
         return 1;
     }
     if (type == AINPUT_EVENT_TYPE_MOTION) {
+        const int32_t source = AInputEvent_getSource(event);
+        if ((source & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK ||
+            (source & AINPUT_SOURCE_GAMEPAD) == AINPUT_SOURCE_GAMEPAD) {
+            Input::SetGamepadConnected(0, true);
+            Input::SetGamepadAxis(0, GamepadAxis::LeftX,
+                                  AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_X, 0));
+            Input::SetGamepadAxis(0, GamepadAxis::LeftY,
+                                  AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_Y, 0));
+            Input::SetGamepadAxis(0, GamepadAxis::RightX,
+                                  AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_Z, 0));
+            Input::SetGamepadAxis(0, GamepadAxis::RightY,
+                                  AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_RZ, 0));
+            Input::SetGamepadAxis(0, GamepadAxis::LeftTrigger,
+                                  AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_LTRIGGER, 0));
+            Input::SetGamepadAxis(0, GamepadAxis::RightTrigger,
+                                  AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_RTRIGGER, 0));
+            const float hatX = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_HAT_X, 0);
+            const float hatY = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_HAT_Y, 0);
+            Input::SetGamepadButton(0, GamepadButton::DpadLeft, hatX < -0.5f);
+            Input::SetGamepadButton(0, GamepadButton::DpadRight, hatX > 0.5f);
+            Input::SetGamepadButton(0, GamepadButton::DpadUp, hatY < -0.5f);
+            Input::SetGamepadButton(0, GamepadButton::DpadDown, hatY > 0.5f);
+            return 1;
+        }
         const int32_t action = AMotionEvent_getAction(event);
         const int32_t masked = action & AMOTION_EVENT_ACTION_MASK;
         const size_t pointerIndex = static_cast<size_t>(

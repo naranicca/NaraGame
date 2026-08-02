@@ -1,1 +1,1 @@
-{"name":"PlayerFixture","version":"0.1.0","schema":1,"sortingLayers":["Background","Default","Foreground","UI"],"mainScene":"Scenes/Main.nscene"}
+{"name":"PlayerFixture","version":"0.1.0","schema":1,"display":{"width":960,"height":540,"mode":"windowed","fullscreen":false,"resizable":true},"sortingLayers":["Background","Default","Foreground","UI"],"mainScene":"Scenes/Main.nscene"}

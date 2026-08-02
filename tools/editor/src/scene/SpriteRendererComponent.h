@@ -4,6 +4,7 @@
 #include "Component.h"
 
 #include <NaraGame/math/Vec2.h>
+#include <NaraGame/math/Vec4.h>
 #include <NaraGame/renderer/rhi/RHITypes.h>
 
 #include <string>
@@ -36,6 +37,16 @@ public:
     bool            flipY = false;
     SpriteDrawMode  drawMode = SpriteDrawMode::Simple;
     NaraGame::Vec2  size = {1.0f, 1.0f};          // world-units; used by Sliced/Tiled
+    // Optional local-space arbitrary quad, ordered TL, TR, BR, BL. It is
+    // transformed by the entity hierarchy and is available only in Simple
+    // mode. Useful for pseudo-3D road strips and perspective billboards.
+    bool customQuad = false;
+    NaraGame::Vec2 quadTL = {-0.5f,  0.5f};
+    NaraGame::Vec2 quadTR = { 0.5f,  0.5f};
+    NaraGame::Vec2 quadBR = { 0.5f, -0.5f};
+    NaraGame::Vec2 quadBL = {-0.5f, -0.5f};
+    // Normalized crop inside the selected texture/sub-sprite: u0,v0,u1,v1.
+    NaraGame::Vec4 uvRect = {0.0f, 0.0f, 1.0f, 1.0f};
     std::string     sortingLayer = "Default";
     int             orderInLayer = 0;
 

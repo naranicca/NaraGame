@@ -109,7 +109,7 @@ if(WIN32)
     )
     # Direct3D 11 + DXGI. d3dcompiler/dxguid reserved for upcoming shader work.
     # xaudio2 for audio; ole32 for CoInitialize.
-    target_link_libraries(NaraGameEngine PUBLIC d3d11 dxgi d3dcompiler dxguid xaudio2 ole32)
+    target_link_libraries(NaraGameEngine PUBLIC d3d11 dxgi d3dcompiler dxguid xaudio2 ole32 xinput9_1_0)
 endif()
 
 if(ANDROID)
@@ -133,6 +133,7 @@ if(APPLE)
         "-framework Metal"
         "-framework AVFoundation"
         "-framework QuartzCore"
+        "-framework GameController"
         "-framework Foundation")
     if(IOS)
         target_link_libraries(NaraGameEngine PUBLIC "-framework UIKit")

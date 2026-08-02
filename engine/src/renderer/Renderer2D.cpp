@@ -557,6 +557,30 @@ void Renderer2D::DrawQuad(const Vec2& position, const Vec2& size, RHITexture* te
     ++m_quadCount;
 }
 
+void Renderer2D::DrawQuad(const Vec2& topLeft, const Vec2& topRight,
+                          const Vec2& bottomRight, const Vec2& bottomLeft,
+                          RHITexture* texture, const Color& tint,
+                          const Vec4& uvRect) {
+    if (!m_inScene)
+        return;
+    EnsureSpriteMode();
+
+    RHITexture* tex = texture ? texture : m_whiteTexture.get();
+    if ((m_currentTexture != nullptr && m_currentTexture != tex) ||
+        m_quadCount >= kMaxQuads) {
+        Flush();
+        StartBatch();
+    }
+    m_currentTexture = tex;
+
+    const Vec4 c{tint.r, tint.g, tint.b, tint.a};
+    m_vertices.push_back({{topLeft.x,     topLeft.y,     0.0f}, c, {uvRect.x, uvRect.y}});
+    m_vertices.push_back({{topRight.x,    topRight.y,    0.0f}, c, {uvRect.z, uvRect.y}});
+    m_vertices.push_back({{bottomRight.x, bottomRight.y, 0.0f}, c, {uvRect.z, uvRect.w}});
+    m_vertices.push_back({{bottomLeft.x,  bottomLeft.y,  0.0f}, c, {uvRect.x, uvRect.w}});
+    ++m_quadCount;
+}
+
 void Renderer2D::DrawQuad(const Vec2& position, const Vec2& size, const TextureRegion& region,
                           const Color& tint, bool flipX) {
     Vec4 uv = region.uv;

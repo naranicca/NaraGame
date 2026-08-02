@@ -15,6 +15,8 @@ struct AppConfig {
     uint32_t width = 1280;
     uint32_t height = 720;
     bool vsync = true;
+    bool resizable = true;
+    bool fullscreen = false;
 };
 
 // Base class for a game. Owns the window + RHI device and drives the main loop.

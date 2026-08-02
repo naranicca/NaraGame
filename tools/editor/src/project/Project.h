@@ -43,6 +43,14 @@ public:
     void SetApplicationId(std::string value) {
         m_applicationId = std::move(value);
     }
+    int DefaultScreenWidth() const { return m_defaultScreenWidth; }
+    int DefaultScreenHeight() const { return m_defaultScreenHeight; }
+    bool DefaultFullscreen() const { return m_defaultFullscreen; }
+    bool ResizableWindow() const { return m_resizableWindow; }
+    void SetDefaultScreenWidth(int v) { m_defaultScreenWidth = v < 320 ? 320 : v; }
+    void SetDefaultScreenHeight(int v) { m_defaultScreenHeight = v < 180 ? 180 : v; }
+    void SetDefaultFullscreen(bool v) { m_defaultFullscreen = v; }
+    void SetResizableWindow(bool v) { m_resizableWindow = v; }
 
     // Conventional paths inside the project. All come back with forward
     // slashes regardless of platform.
@@ -141,6 +149,10 @@ private:
     std::string m_name;
     std::string m_version = "0.1.0";
     std::string m_applicationId = "com.naragame.player";
+    int m_defaultScreenWidth = 1280;
+    int m_defaultScreenHeight = 720;
+    bool m_defaultFullscreen = false;
+    bool m_resizableWindow = true;
     std::vector<std::string> m_sortingLayers = DefaultSortingLayers();
     std::vector<std::string> m_collisionLayers = DefaultCollisionLayers();
     // 2D bit-set indexed by layer pair (i, j) with i <= j. A

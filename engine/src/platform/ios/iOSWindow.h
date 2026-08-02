@@ -12,7 +12,7 @@ class iOSWindow final : public Window {
 public:
     explicit iOSWindow(const WindowDesc& desc);
 
-    void PollEvents() override {}
+    void PollEvents() override;
     bool ShouldClose() const override { return m_shouldClose; }
     void RequestClose() override { m_shouldClose = true; }
 

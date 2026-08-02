@@ -105,6 +105,38 @@ WindowsWindow::~WindowsWindow() {
         DestroyWindow(m_hwnd);
 }
 
+void WindowsWindow::SetSize(uint32_t width, uint32_t height) {
+    if (!m_hwnd || m_fullscreen || width == 0 || height == 0) return;
+    RECT rect{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(m_hwnd, GWL_STYLE));
+    AdjustWindowRect(&rect, style, FALSE);
+    SetWindowPos(m_hwnd, nullptr, 0, 0, rect.right - rect.left,
+                 rect.bottom - rect.top, SWP_NOMOVE | SWP_NOZORDER);
+}
+
+void WindowsWindow::SetFullscreen(bool fullscreen) {
+    if (!m_hwnd || fullscreen == m_fullscreen) return;
+    if (fullscreen) {
+        m_windowedPlacement.length = sizeof(WINDOWPLACEMENT);
+        GetWindowPlacement(m_hwnd, &m_windowedPlacement);
+        MONITORINFO monitor{sizeof(MONITORINFO)};
+        GetMonitorInfoW(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
+        SetWindowLongPtrW(m_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowPos(m_hwnd, HWND_TOP, monitor.rcMonitor.left, monitor.rcMonitor.top,
+                     monitor.rcMonitor.right - monitor.rcMonitor.left,
+                     monitor.rcMonitor.bottom - monitor.rcMonitor.top,
+                     SWP_FRAMECHANGED);
+    } else {
+        DWORD style = WS_OVERLAPPEDWINDOW;
+        if (!m_desc.resizable) style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+        SetWindowLongPtrW(m_hwnd, GWL_STYLE, style);
+        SetWindowPlacement(m_hwnd, &m_windowedPlacement);
+        SetWindowPos(m_hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
+    m_fullscreen = fullscreen;
+}
+
 void WindowsWindow::PollEvents() {
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {

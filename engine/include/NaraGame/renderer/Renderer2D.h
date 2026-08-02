@@ -65,6 +65,16 @@ public:
     void DrawQuad(const Vec2& position, const Vec2& size, RHITexture* texture,
                   const Color& tint = Color::White(), const Vec4& uvRect = {0.0f, 0.0f, 1.0f, 1.0f});
 
+    // Textured arbitrary quad. Corners are TL, TR, BR, BL in the same
+    // coordinate space as Begin(). This is an affine per-triangle warp (not
+    // perspective-correct interpolation), intended for pseudo-3D road strips,
+    // billboards and other Mode-7-style effects.
+    void DrawQuad(const Vec2& topLeft, const Vec2& topRight,
+                  const Vec2& bottomRight, const Vec2& bottomLeft,
+                  RHITexture* texture,
+                  const Color& tint = Color::White(),
+                  const Vec4& uvRect = {0.0f, 0.0f, 1.0f, 1.0f});
+
     // Draw a sprite-sheet / atlas region at an explicit size. `flipX` mirrors
     // horizontally (e.g. for left/right facing).
     void DrawQuad(const Vec2& position, const Vec2& size, const TextureRegion& region,

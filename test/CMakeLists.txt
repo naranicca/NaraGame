@@ -14,6 +14,19 @@ add_test(NAME editor_tutorial_docs
         -DNARAGAME_SOURCE_DIR=${CMAKE_SOURCE_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/ValidateTutorials.cmake)
 
+if(WIN32)
+    add_test(NAME tutorial_lua_runtime
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/ValidateTutorialRuntime.ps1
+            -Player $<TARGET_FILE:NaraGamePlayer>
+            -SourceDir ${CMAKE_SOURCE_DIR})
+    add_test(NAME tutorial_demo_projects
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/ValidateTutorialDemos.ps1
+            -Player $<TARGET_FILE:NaraGamePlayer>
+            -SourceDir ${CMAKE_SOURCE_DIR})
+endif()
+
 add_test(NAME editor_build_game_package
     COMMAND ${CMAKE_COMMAND}
         -DEDITOR_EXE=$<TARGET_FILE:NaraGame>
